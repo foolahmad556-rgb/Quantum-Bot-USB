@@ -5,8 +5,8 @@ account_id = ""
 workers_dev = true
 
 [vars]
-SUPABASE_URL = ""
-SUPABASE_ANON_KEY = ""
+SUPABASE_URL = "https://msktxfryadglugpznfsb.supabase.co"
+SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im1za3R4ZnJ5YWRnbHVncHpuZnNiIiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTE3MzExNjcsImV4cCI6MjEwNzMwNzE2N30.SKeSR9pe0VJOrL99ZLc3sUryNYymaT5X6ljzzResLdA"
 WEBHOOK_SECRET = ""
 
 [triggers]
