@@ -23,10 +23,8 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Build
-        run: npm run build
-        env:
-          VITE_API_BASE_URL: https://quantum-bot-usb.foolahmad556.workers.dev
+      - name: Build (static UI only, no Node server)
+        run: npx vite build --emptyOutDir
 
       - name: Deploy to Cloudflare Pages
         uses: cloudflare/wrangler-action@v3
