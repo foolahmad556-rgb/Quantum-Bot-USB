@@ -1,4 +1,4 @@
-name = "quantum-bot-webhook"
+name = "quantum-bot-usb"
 main = "api/webhook.js"
 compatibility_date = "2024-01-01"
 account_id = ""
@@ -13,7 +13,7 @@ WEBHOOK_SECRET = ""
 crons = []
 
 [env.production]
-name = "quantum-bot-webhook"
+name = "quantum-bot-usb"
 
 [dev]
 url = "http://localhost:8787"
