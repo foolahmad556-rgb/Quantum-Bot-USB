@@ -21,13 +21,6 @@ export default defineConfig(() => {
     },
     build: {
       chunkSizeWarningLimit: 900,
-      rollupOptions: {
-        output: {
-          manualChunks: {
-            'vendor-react': ['react', 'react-dom', 'react-dom/client'],
-          },
-        },
-      },
     },
   };
 });
