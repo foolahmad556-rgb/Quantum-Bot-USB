@@ -5,7 +5,17 @@ import { trades, balanceHistory, users } from '../db/schema.ts';
 import { eq, desc, and } from 'drizzle-orm';
 import { initializeApp, getApps, App } from 'firebase-admin/app';
 import { getFirestore, Firestore } from 'firebase-admin/firestore';
-import firebaseConfig from '../../firebase-applet-config.json';
+
+// Load Firebase config from environment variable (encrypted at rest, never committed).
+// Set FIREBASE_CREDENTIALS_JSON as a secret or in your environment.
+const firebaseConfigStr = process.env.FIREBASE_CREDENTIALS_JSON || '{}';
+let firebaseConfig: any;
+try {
+  firebaseConfig = JSON.parse(firebaseConfigStr);
+} catch {
+  console.error('FIREBASE_CREDENTIALS_JSON is missing or invalid.');
+  firebaseConfig = {};
+}
 import { TradeRecord, SignalRecord, BalanceSnapshot, PriceRecord } from './DatabaseService.ts';
 
 export class CloudDatabaseService {
