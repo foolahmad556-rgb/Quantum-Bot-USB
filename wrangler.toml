@@ -1,21 +1,19 @@
-[env.production]
-name = "QuantumBot-USB"
-zone_id = "YOUR_CLOUDFLARE_ZONE_ID"
+name = "quantum-bot-webhook"
+main = "api/webhook.js"
+compatibility_date = "2024-01-01"
+account_id = ""
+workers_dev = true
 
-[build]
-  command = "npm run build"
-  dir = "dist"
-  publish_dir = "dist"
-
-[routes]
-  pattern = "https://quantumbot-9.heme.zone"
-  service = "quantumbot-9"
+[vars]
+SUPABASE_URL = ""
+SUPABASE_ANON_KEY = ""
+WEBHOOK_SECRET = ""
 
 [triggers]
-  cron = "*/15 * * * *"
+crons = []
+
+[env.production]
+name = "quantum-bot-webhook"
 
 [dev]
-  url = "http://localhost:3000"
-
-[preview]
-  preview_sites = ["https://quantumbot-9.heme.zone"]
+url = "http://localhost:8787"
