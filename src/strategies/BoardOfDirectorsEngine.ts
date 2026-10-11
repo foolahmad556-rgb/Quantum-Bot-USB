@@ -1432,11 +1432,11 @@ export class BoardOfDirectorsEngine {
       testName: 'اختبار الصدمات المجهرية والانزلاق (Micro-Shock & Slippage Test)',
       candlesTested: 30,
       syntheticProfit: trial1Profit,
-      syntheticWinRate: isWin ? 86.5 : 74.0,
+      syntheticWinRate: 0.0,
       maxDrawdownPct: 0.85,
       isSuccessful: true,
-      validationLogAr: `✅ التجربة 1: أظهر التعديل المقترح حماية بنسبة 92% ضد الانزلاق المجهري وخفض التكاليف التشغيلية.`,
-      validationLogEn: `✅ Trial 1: Mutated policy demonstrated 92% resistance to micro-slippage drag with lower fees.`
+      validationLogAr: `✅ التجربة 1: اختبار الصدمات المجهرية — يحتاج حساب فوز حقيقي من بيانات الاختبار الخلفي.`,
+      validationLogEn: `✅ Trial 1: Micro-shock resilience test — requires real backtest win rate calculation.`
     });
 
     // Trial 2: Adaptive Trailing Stop & Noise Immunity
@@ -1446,11 +1446,11 @@ export class BoardOfDirectorsEngine {
       testName: 'اختبار مناعة الضوضاء والوقف التكيفي (Noise Immunity & Adaptive Trailing)',
       candlesTested: 45,
       syntheticProfit: trial2Profit,
-      syntheticWinRate: isWin ? 88.0 : 76.5,
+      syntheticWinRate: 0.0,
       maxDrawdownPct: 0.62,
       isSuccessful: true,
-      validationLogAr: `✅ التجربة 2: أثبتت الاستراتيجية المعدلة قدرتها على تجنب ضرب الوقف الوهمي وحجز الأرباح بمرونة.`,
-      validationLogEn: `✅ Trial 2: Strategy mutation prevented false noise stop-outs while locking profits effectively.`
+      validationLogAr: `✅ التجربة 2: اختبار مناعة الضوضاء — يحتاج حساب فوز حقيقي من بيانات الاختبار الخلفي.`,
+      validationLogEn: `✅ Trial 2: Noise immunity test — requires real backtest win rate calculation.`
     });
 
     // Trial 3: Out-of-Sample Forward Consistency
@@ -1460,11 +1460,11 @@ export class BoardOfDirectorsEngine {
       testName: 'اختبار التعميم في نافذة غير مرئية (Forward Out-of-Sample Consistency)',
       candlesTested: 60,
       syntheticProfit: trial3Profit,
-      syntheticWinRate: isWin ? 91.5 : 81.0,
+      syntheticWinRate: 0.0,
       maxDrawdownPct: 0.48,
       isSuccessful: true,
-      validationLogAr: `✅ التجربة 3: حققت الاستراتيجية نسبة فوز متفوقة وثباتاً تاماً في نافذة البيانات غير المرئية.`,
-      validationLogEn: `✅ Trial 3: Mutated policy achieved superior win rate and solid expectancy across unseen data.`
+      validationLogAr: `✅ التجربة 3: اختبار التعميم خارج العينة — يحتاج حساب فوز حقيقي من بيانات الاختبار الخلفي.`,
+      validationLogEn: `✅ Trial 3: Out-of-sample consistency test — requires real backtest win rate calculation.`
     });
 
     // -------------------------------------------------------------

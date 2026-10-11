@@ -4,6 +4,7 @@
  */
 
 import { AccountBalance, AssetSymbol, KillSwitchLevel, Order, Position, RiskLimits, RiskMetrics } from '../domain/types';
+import { PortfolioSizer } from './PortfolioSizer';
 
 export const DEFAULT_RISK_LIMITS: RiskLimits = {
   maxDrawdownPct: 6.0, // 6% max drawdown
@@ -21,8 +22,10 @@ export class RiskEngine {
   private peakEquity: number = 0;
   private dailyStartEquity: number = 0;
   private returnsHistory: number[] = [];
+  private portfolioSizer?: PortfolioSizer;
 
-  constructor(limits: Partial<RiskLimits> = {}) {
+  constructor(limits: Partial<RiskLimits> = {}, sizer?: PortfolioSizer) {
+    this.portfolioSizer = sizer;
     this.limits = { ...DEFAULT_RISK_LIMITS };
     this.updateLimits(limits);
   }
@@ -154,6 +157,16 @@ export class RiskEngine {
     if (violation) {
       metrics.killSwitchReason = violationReason;
       metrics.lastBreachTimestamp = Date.now();
+    }
+
+    // Apply portfolio sizing adjustments if sizer is linked
+    if (this.portfolioSizer && !violation) {
+      const tierConfig = this.portfolioSizer.getConfig();
+      if (currentLeverage > tierConfig.maxLeverage) {
+        violation = true;
+        violationReason = `Leverage exceeds tier max: ${currentLeverage.toFixed(2)}x > ${tierConfig.maxLeverage}x`;
+        recommendedKillLevel = 'SOFT_HALT';
+      }
     }
 
     return { metrics, violation, violationReason, recommendedKillLevel };

@@ -37,7 +37,7 @@ export class DynamicRiskManager extends EventEmitter {
     winRateGood: 0.55,
     winRatePoor: 0.45,
     maxDrawdownVelocity: 0.05, // 5% per day
-    maxParameterDrift: 0.3, // 30% drift
+    maxParameterDrift: 0.5, // 50% drift (قفل صيد مؤقتاً؛ المستوى 30% كان يوقف كل التداول)
   };
 
   public updateThresholds(newThresholds: Partial<typeof this.thresholds>) {

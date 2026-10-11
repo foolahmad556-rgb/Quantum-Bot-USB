@@ -386,7 +386,7 @@ export function getBinanceBaseUrl(mode: ExecutionMode): string {
 }
 
 export function getBinanceWsUrl(mode: ExecutionMode): string {
-  return mode === 'LIVE' ? 'wss://fstream.binance.com' : 'wss://fstream.binancefuture.com';
+  return mode === 'LIVE' ? 'wss://fstream.binance.com/private' : 'wss://fstream.binancefuture.com/private';
 }
 
 /**

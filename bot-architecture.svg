@@ -1,0 +1,37 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1400 980">
+  <defs>
+    <style>
+      .bg { fill: #0d0d12; }
+      .module-box { fill: #161624; stroke: #4a9eff; stroke-width: 1.5; }
+      .module-title { font-family: Arial, sans-serif; font-size: 14px; font-weight: bold; fill: #ffffff; }
+      .module-name { font-family: Arial, sans-serif; font-size: 12px; fill: #dcdcdc; }
+      .connector { stroke: #4a9eff; stroke-width: 2; }
+      .label { font-family: Arial, sans-serif; font-size: 12px; fill: #8a8fa6; }
+      .header { font-family: Arial, sans-serif; font-size: 24px; font-weight: bold; fill: #4a9eff; }
+    </style>
+  </defs>
+  <rect class="bg" width="1400" height="980"/>
+  <text x="50" y="50" class="header">Baselbotv1 — System Architecture</text>
+
+  <!-- Entry Point -->
+  <rect x="100" y="100" width="200" height="60" class="module-box" rx="5"/>
+  <text x="120" y="130" class="module-title">server.ts (Entry)</text>
+
+  <!-- Logic Layer -->
+  <rect x="400" y="100" width="200" height="150" class="module-box" rx="5"/>
+  <text x="420" y="130" class="module-title">TradingPipeline</text>
+  <text x="420" y="155" class="module-name">1. OrderGateway</text>
+  <text x="420" y="175" class="module-name">2. RiskEngine</text>
+  <text x="420" y="195" class="module-name">3. StrategyEngine</text>
+
+  <!-- Strategies -->
+  <rect x="700" y="100" width="200" height="150" class="module-box" rx="5"/>
+  <text x="720" y="130" class="module-title">Strategy Modules</text>
+  <text x="720" y="155" class="module-name">BoardOfDirectors</text>
+  <text x="720" y="175" class="module-name">QuantumSimulator</text>
+  <text x="720" y="195" class="module-name">RegimeDetector</text>
+
+  <!-- Connectors -->
+  <line x1="300" y1="130" x2="400" y2="130" class="connector"/>
+  <line x1="600" y1="130" x2="700" y2="130" class="connector"/>
+</svg>

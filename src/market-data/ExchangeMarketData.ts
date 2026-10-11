@@ -368,8 +368,8 @@ export class ExchangeMarketData extends EventEmitter {
             this.currentPrices.set(sym, p);
             this.lastUpdateTimes.set(sym, now);
 
-            // Construct or update candle
-            this.updateCandles(sym, p, Math.max(0.01, Math.abs(p - oldPrice) * 10));
+            // Construct or update candle in candleHistory
+            this.updateCandleHistory(sym, p, Math.max(0.01, Math.abs(p - oldPrice) * 10));
 
             // Construct real tick
             this.tradeCounter += 1;
@@ -483,6 +483,25 @@ export class ExchangeMarketData extends EventEmitter {
     this.connectSpotWs(`wss://stream.binance.com:9443/stream?streams=${spotStreams}`);
   }
 
+  private updateCandleHistory(symbol: AssetSymbol, price: number, volume: number) {
+    const now = Date.now();
+    if (!this.candleHistory.has(symbol)) {
+      this.candleHistory.set(symbol, []);
+    }
+    const candlesArr = this.candleHistory.get(symbol)!;
+    const lastCandle = candlesArr[candlesArr.length - 1];
+    if (lastCandle && now - lastCandle.timestamp < 60_000) {
+      lastCandle.high = Math.max(lastCandle.high, price);
+      lastCandle.low = Math.min(lastCandle.low, price);
+      lastCandle.close = price;
+      lastCandle.volume += volume;
+      lastCandle.vwap = lastCandle.volume > 0 ? (lastCandle.vwap + price) / 2 : price;
+    } else {
+      candlesArr.push({ timestamp: now, open: price, high: price, low: price, close: price, volume, vwap: price });
+      if (candlesArr.length > 120) candlesArr.shift();
+    }
+  }
+
   private connectSpotWs(url: string) {
     if (this.spotWs) {
       try { this.spotWs.close(); } catch (e) {}
@@ -500,7 +519,7 @@ export class ExchangeMarketData extends EventEmitter {
               const oldPrice = this.currentPrices.get(sym) || p;
               this.currentPrices.set(sym, p);
               this.lastUpdateTimes.set(sym, Date.now());
-              this.updateCandles(sym, p, parseFloat(msg.data.v) || 0.1);
+              this.updateCandleHistory(sym, p, parseFloat(msg.data.v) || 0.1);
               this.emit('market_update', sym);
             }
           }
@@ -693,102 +712,4 @@ export class ExchangeMarketData extends EventEmitter {
     }, 5000);
   }
 
-  // --- End of Binance Live Integration ---
-
-  public generateNextTicks(): Tick[] {
-    const symbols = Object.keys(DEFAULT_SYMBOLS) as AssetSymbol[];
-    const ticks: Tick[] = [];
-
-    for (const symbol of symbols) {
-      const config = DEFAULT_SYMBOLS[symbol];
-      const prevPrice = this.currentPrices.get(symbol) || config.basePrice;
-      const intensity = this.hawkesIntensity.get(symbol) || 1.0;
-
-      const dt = 1 / 3600;
-      const ouDrift = config.meanReversionSpeed * (config.equilibriumMean - prevPrice) * dt;
-      const sigma = (config.volatilityDaily / Math.sqrt(24)) * Math.sqrt(intensity);
-      const brownian = sigma * prevPrice * this.boxMullerRandom();
-
-      let jump = 0;
-      if (Math.random() < 0.02) {
-        jump = (Math.random() - 0.5) * prevPrice * 0.015;
-        this.hawkesIntensity.set(symbol, intensity + 3.0);
-      } else {
-        this.hawkesIntensity.set(symbol, Math.max(1.0, intensity * 0.96));
-      }
-
-      let newPrice = prevPrice + ouDrift + brownian + jump;
-      newPrice = Math.max(0.1, Number(newPrice.toFixed(newPrice > 100 ? 2 : 4)));
-      this.currentPrices.set(symbol, newPrice);
-
-      const side = newPrice >= prevPrice ? 'buy' : 'sell';
-      const size = Number((Math.random() * 1.5 + 0.1).toFixed(3));
-      this.tradeCounter += 1;
-
-      const tick: Tick = {
-        symbol,
-        price: newPrice,
-        size,
-        side,
-        timestamp: Date.now(),
-        tradeId: `TICK-${this.tradeCounter}-${Math.random().toString(36).substring(2, 6).toUpperCase()}`,
-      };
-
-      this.orderBookBuilder.processTick(tick);
-      this.updateCandles(symbol, newPrice, size);
-
-      ticks.push(tick);
-      this.tickListeners.forEach((fn) => fn(tick));
-      this.emit('market_update', symbol);
-    }
-
-    return ticks;
-  }
-
-  private updateCandles(symbol: AssetSymbol, price: number, size: number) {
-    const candles = this.candleHistory.get(symbol);
-    if (!candles || candles.length === 0) return;
-
-    const lastCandle = candles[candles.length - 1];
-    const now = Date.now();
-    const isNewMinute = now - lastCandle.timestamp >= 60 * 1000;
-
-    if (isNewMinute) {
-      const newCandle: Candle = {
-        timestamp: now,
-        open: price,
-        high: price,
-        low: price,
-        close: price,
-        volume: size,
-        vwap: price,
-      };
-      candles.push(newCandle);
-      if (candles.length > 120) candles.shift();
-    } else {
-      lastCandle.high = Math.max(lastCandle.high, price);
-      lastCandle.low = Math.min(lastCandle.low, price);
-      lastCandle.close = price;
-      lastCandle.volume = Number((lastCandle.volume + size).toFixed(3));
-      lastCandle.vwap = Number(((lastCandle.open + lastCandle.high + lastCandle.low + lastCandle.close) / 4).toFixed(2));
-    }
-  }
-
-  private boxMullerRandom(): number {
-    let u = 0, v = 0;
-    while (u === 0) u = Math.random();
-    while (v === 0) v = Math.random();
-    return Math.sqrt(-2.0 * Math.log(u)) * Math.cos(2.0 * Math.PI * v);
-  }
-
-  public injectStressEvent(priceDropPct: number, volatilityMult: number, symbols?: AssetSymbol[]) {
-    const targetSymbols = symbols || (Object.keys(DEFAULT_SYMBOLS) as AssetSymbol[]);
-    for (const sym of targetSymbols) {
-      const curr = this.currentPrices.get(sym) || DEFAULT_SYMBOLS[sym].basePrice;
-      const dropped = curr * (1 - priceDropPct / 100);
-      this.currentPrices.set(sym, Number(dropped.toFixed(2)));
-      this.hawkesIntensity.set(sym, volatilityMult);
-      this.orderBookBuilder.initialize(sym, dropped, 20 * volatilityMult);
-    }
-  }
 }

@@ -3,8 +3,10 @@
  * Feature Engineering, Statistical Arbitrage & Microstructure Alpha
  */
 
-import { AssetSymbol, Candle, OrderBook } from '../domain/types';
+import { AssetSymbol, Candle, OrderBook, QuboProblemConfig, QuboSolution, SolverType } from '../domain/types';
 import { calculateHurstDFA, augmentedDickeyFullerTest, ADFResult } from '../utils/stats';
+import { RegimeDetector, RegimeAnalysis } from '../risk/RegimeDetector';
+import { QuboPortfolio } from '../portfolio/QuboPortfolio';
 
 export interface CalculatedFeatures {
   symbol: AssetSymbol;
@@ -30,6 +32,26 @@ export interface CalculatedFeatures {
 export class FeatureEngine {
   private priceWindows: Map<AssetSymbol, number[]> = new Map();
   private maxWindowSize: number = 200;
+  private regimeDetector: RegimeDetector = new RegimeDetector();
+
+  public updateRegime(candles: Candle[]): void {
+    this.regimeDetector.update(candles);
+  }
+
+  public getRegimeAnalysis(): RegimeAnalysis {
+    return this.regimeDetector.analyze();
+  }
+
+  public optimizePortfolio(
+    assets: AssetSymbol[],
+    returnsMap: Map<AssetSymbol, number[]>,
+    config: QuboProblemConfig,
+    currentWeights?: Record<AssetSymbol, number>
+  ) {
+    const expectedReturns = QuboPortfolio.calculateDynamicReturns(assets, returnsMap);
+    const covarianceMatrix = QuboPortfolio.calculateDynamicCovariance(assets, returnsMap);
+    return QuboPortfolio.buildQuboMatrix(assets, expectedReturns, covarianceMatrix, config, currentWeights);
+  }
 
   public updatePrice(symbol: AssetSymbol, price: number) {
     let window = this.priceWindows.get(symbol);

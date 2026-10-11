@@ -5,6 +5,7 @@
 
 import { AssetSymbol } from '../domain/types';
 import { AssetScreener } from '../market-data/AssetScreener';
+import { RiskEngine } from './RiskEngine';
 
 export type PortfolioTier = 'MICRO' | 'SMALL' | 'MEDIUM' | 'LARGE';
 
@@ -55,6 +56,7 @@ export class PortfolioSizer {
   private tierStats: TierStats;
   private assetScreener?: AssetScreener;
   private allowedSymbols: AssetSymbol[] = [];
+  private riskEngine?: RiskEngine;
 
   private tierConfigs: Record<PortfolioTier, TierConfig> = {
     MICRO: {
@@ -133,6 +135,59 @@ export class PortfolioSizer {
     };
 
     this.refreshAllowedSymbols();
+  }
+
+  /**
+   * ربط RiskEngine مع Sizer — يسمح لكل منهما بالوصول إلى بيانات الآخر (cross-validation)
+   */
+  public setRiskEngine(riskEngine: RiskEngine): void {
+    this.riskEngine = riskEngine;
+  }
+
+  /**
+   * التحقق من حدود المخاطرة من خلال RiskEngine (تقييم مزدوج قبل فتح صفقة)
+   */
+  public validateWithRiskEngine(
+    equity: number,
+    currentExposureUsd: number,
+    orderNotional: number,
+    spreadPct: number = 0.05,
+    pendingExposureUsd: number = 0,
+    positions: any[] = [],
+    balance: any = { totalEquity: equity, freeMargin: equity }
+  ): { allowed: boolean; reason?: string } {
+    if (!this.riskEngine) {
+      return { allowed: true, reason: 'RiskEngine not linked; skipping risk validation' };
+    }
+    return this.riskEngine.validateOrder(
+      { quantity: orderNotional, price: 1 },
+      balance,
+      positions,
+      spreadPct,
+      pendingExposureUsd
+    );
+  }
+
+  /**
+   * قراءة VaR/CVaR الحالي من RiskEngine لتحديد مستوى المخاطرة
+   */
+  public getCurrentRiskMetrics(balance: any, positions: any[], killSwitchLevel?: any): {
+    sharpe: number | null;
+    sortino: number | null;
+    drawdown: number;
+    var95: number;
+  } {
+    if (!this.riskEngine) {
+      return { sharpe: null, sortino: null, drawdown: 0, var95: 0 };
+    }
+    const result = this.riskEngine.evaluateRisk(balance, positions, killSwitchLevel);
+    const m = result.metrics;
+    return {
+      sharpe: m.sharpeRatio,
+      sortino: m.sortinoRatio,
+      drawdown: m.currentDrawdownPct,
+      var95: m.var95,
+    };
   }
 
   /**

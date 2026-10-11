@@ -1,0 +1,21 @@
+[env.production]
+name = "QuantumBot-USB"
+zone_id = "YOUR_CLOUDFLARE_ZONE_ID"
+
+[build]
+  command = "npm run build"
+  dir = "dist"
+  publish_dir = "dist"
+
+[routes]
+  pattern = "https://quantumbot-9.heme.zone"
+  service = "quantumbot-9"
+
+[triggers]
+  cron = "*/15 * * * *"
+
+[dev]
+  url = "http://localhost:3000"
+
+[preview]
+  preview_sites = ["https://quantumbot-9.heme.zone"]

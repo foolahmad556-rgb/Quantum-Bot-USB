@@ -206,39 +206,9 @@ export class QuantumTrainingSimulator {
       // If network fails or rate-limit kicks in, return cached data if available
       if (cached) return cached.data;
 
-      // Fallback: If network rate-limit occurs, create realistic continuous micro-price steps based on last known prices
-      const basePrices: Record<string, number> = {
-        BTCUSDT: 92850,
-        ETHUSDT: 2450,
-        SOLUSDT: 148,
-        NEARUSDT: 4.85,
-        SUIUSDT: 2.15,
-        PEPEUSDT: 0.0000085,
-        DOGEUSDT: 0.175,
-        AVAXUSDT: 28.5,
-        RENDERUSDT: 6.2,
-        FETUSDT: 1.35
-      };
-      const base = basePrices[symbol] || 100;
-      let curr = base;
-      const fallback: Array<{ open: number; high: number; low: number; close: number; volume: number; time: number }> = [];
-
-      for (let i = limit; i >= 0; i--) {
-        const delta = (Math.random() - 0.49) * 0.003 * curr;
-        const open = curr;
-        curr = Math.max(0.000001, curr + delta);
-        const high = Math.max(open, curr) + Math.random() * 0.001 * curr;
-        const low = Math.min(open, curr) - Math.random() * 0.001 * curr;
-        fallback.push({
-          time: now - i * 60000,
-          open,
-          high,
-          low,
-          close: curr,
-          volume: Math.random() * 50000 + 10000
-        });
-      }
-      return fallback;
+      // Fallback: no fake data — return empty to prevent polluted signals
+      console.warn(`[QuantumTrainingSim] Network/rate-limit error for ${symbol}, returning empty candles`);
+      return [];
     }
   }
 

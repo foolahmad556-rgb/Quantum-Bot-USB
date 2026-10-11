@@ -715,10 +715,13 @@ export class TradingPipeline {
     const features = this.featureEngine.extractFeatures(tick.symbol, tick.price, candles, book);
     this.lastFeatures.set(tick.symbol, features);
 
-    // Per-symbol Regime Detection (البند 39)
+    // Per-symbol Regime Detection (البند 39) — synced via FeatureEngine unified interface
     const regimeDetector = this.getRegimeDetector(tick.symbol);
     regimeDetector.update(candles);
     const regime = regimeDetector.analyze();
+
+    // Unified FeatureEngine regime & portfolio optimization pipeline
+    this.featureEngine.updateRegime(candles);
 
     const tFeatures = performance.now() - t0;
 
@@ -1097,18 +1100,19 @@ export class TradingPipeline {
     const assets = this.config.activeSymbols;
 
     // Calculate dynamic covariance & expected returns from real market returns
-    const returnsMap = this.correlationRiskManager.getReturnsMap();
-    const dynamicCov = QuboPortfolio.calculateDynamicCovariance(assets, returnsMap);
-    const dynamicReturns = QuboPortfolio.calculateDynamicReturns(assets, returnsMap);
-
-    const qubo = QuboPortfolio.buildQuboMatrix(assets, dynamicReturns, dynamicCov, {
-      assets,
-      riskAversion: this.config.riskAversionLambda,
-      budgetPenalty: this.config.budgetPenaltyGamma,
-      transactionCostPenalty: 0.15,
-      cardinalityLimit: Math.min(4, assets.length),
-      discretizationBits: 2,
-    });
+        const returnsMap = this.correlationRiskManager.getReturnsMap();
+        // Unified QUBO optimization via FeatureEngine (delegates to QuboPortfolio)
+        const qubo = this.featureEngine.optimizePortfolio(assets, returnsMap, {
+          assets,
+          riskAversion: this.config.riskAversionLambda,
+          budgetPenalty: this.config.budgetPenaltyGamma,
+          transactionCostPenalty: 0.15,
+          cardinalityLimit: Math.min(4, assets.length),
+          discretizationBits: 2,
+        });
+        // Re-export the same dynamic values for solver consumption (single source of truth)
+        const dynamicReturns = QuboPortfolio.calculateDynamicReturns(assets, returnsMap);
+        const dynamicCov = QuboPortfolio.calculateDynamicCovariance(assets, returnsMap);
 
     let solution: QuboSolution;
 
