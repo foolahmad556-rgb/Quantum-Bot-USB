@@ -1,6 +1,0 @@
-{
-  "name": "Basel AlgoCore Trading Bot",
-  "description": "Integrated Quantum-Inspired Algorithmic Trading System with QUBO portfolio optimization, QAOA circuits, Ornstein-Uhlenbeck mean-reversion, real-time risk engine, order state machine, and backtesting validation.",
-  "requestFramePermissions": [],
-  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
-}

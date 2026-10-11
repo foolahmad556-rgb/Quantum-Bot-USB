@@ -1,0 +1,53 @@
+name: Deploy Cloudflare Worker
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - 'api/webhook.js'
+  workflow_dispatch:
+
+jobs:
+  deploy-worker:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read # For checking out code
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Wrangler
+        uses: cloudflare/wrangler-action@v3
+        id: wrangler
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+
+      - name: Deploy Worker
+        run: |
+          cd api
+          wrangler deploy webhook.js --name quantum-bot-webhook --env production
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
+          WEBHOOK_SECRET: ${{ secrets.WEBHOOK_SECRET }}
+
+      - name: Set Worker Environment Variables
+        if: success()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const workerUrl = `https://quantum-bot-webhook.${process.env.CLOUDFLARE_ACCOUNT_ID}.workers.dev`;
+            console.log(`Worker deployed at: ${workerUrl}`);
+            console.log(`Add to GitHub Secrets: WORKER_URL = ${workerUrl}`);
+
+  set-secrets:
+    needs: deploy-worker
+    runs-on: ubuntu-latest
+    steps:
+      - name: Add Worker URL to repo (if not exists)
+        run: |
+          # This would need repo permissions with a PAT
+          echo "Worker URL needs to be manually added to secrets if not present"
+          echo "WORKER_URL=https://quantum-bot-webhook.${{ secrets.CLOUDFLARE_ACCOUNT_ID }}.workers.dev"
