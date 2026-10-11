@@ -29,11 +29,8 @@ jobs:
           VITE_API_BASE_URL: https://quantum-bot-usb.foolahmad556.workers.dev
 
       - name: Deploy to Cloudflare Pages
-        uses: cloudflare/pages-action@v1
+        uses: cloudflare/wrangler-action@v3
         with:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          projectName: quantum-bot-usb
-          directory: dist
-          branch: master
-          gitHubToken: ${{ secrets.GITHUB_TOKEN }}
+          command: pages deploy dist --project-name=quantum-bot-usb --branch=master
