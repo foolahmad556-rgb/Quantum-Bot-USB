@@ -1,7 +1,17 @@
 import { initializeApp } from 'firebase/app';
 import { getAuth, GoogleAuthProvider } from 'firebase/auth';
 import { initializeFirestore, doc, getDocFromServer } from 'firebase/firestore';
-import firebaseConfig from '../../firebase-applet-config.json';
+
+// Load Firebase config from environment variable (encrypted at rest, never committed).
+// Set FIREBASE_CREDENTIALS_JSON as a Cloudflare Workers Secret or in your environment.
+const firebaseConfigStr = process.env.FIREBASE_CREDENTIALS_JSON || '{}';
+let firebaseConfig: any;
+try {
+  firebaseConfig = JSON.parse(firebaseConfigStr);
+} catch {
+  console.error('FIREBASE_CREDENTIALS_JSON is missing or invalid.');
+  firebaseConfig = {};
+}
 
 const app = initializeApp(firebaseConfig);
 export const auth = getAuth(app);
