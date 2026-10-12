@@ -139,9 +139,8 @@ export class BacktestEngine {
       const candles: Candle[] = [];
       let currentStart = startTime;
 
-      let iterations = 0;
-      while (currentStart < endTime && iterations < 2) {
-        iterations++;
+      // Fetch all available data until endTime is reached (no artificial page cap)
+      while (currentStart < endTime) {
         const url = `https://api.binance.com/api/v3/klines?symbol=${cleanSymbol}&interval=1h&startTime=${currentStart}&endTime=${endTime}&limit=500`;
         const response = await fetch(url);
         if (!response.ok) throw new Error(`Binance API error: ${response.statusText}`);
@@ -182,9 +181,11 @@ export class BacktestEngine {
   public generateDeterministicHighFidelityData(): Map<string, Candle[]> {
     const allData: Map<string, Candle[]> = new Map();
     const startTime = new Date(this.config.startDate || '2024-01-01').getTime();
-    const endTime = new Date(this.config.endDate || '2024-07-01').getTime();
+    // Honor the configured endDate (was hardcoded to 2024-07-01)
+    const endTime = new Date(this.config.endDate || '2024-12-31').getTime();
     const hourMs = 3600000;
-    const totalSteps = Math.min(500, Math.max(120, Math.floor((endTime - startTime) / hourMs)));
+    // Generate the full series for the requested period (no artificial 500-step cap)
+    const totalSteps = Math.max(120, Math.floor((endTime - startTime) / hourMs));
 
     const basePrices: Record<string, number> = {
       'BTC/USDT': 91500,
@@ -202,8 +203,13 @@ export class BacktestEngine {
       const theta = 0.08;
       const sigma = basePrice * 0.012;
 
-      // Seeded deterministic pseudo-random sequence for reproducible results
-      let seed = 1337 + rawSymbol.charCodeAt(0) * 17 + rawSymbol.charCodeAt(1) * 31;
+      // Hash the full symbol string into the seed (was using only first 2 chars)
+      let seed = 2166136261;
+      for (let i = 0; i < rawSymbol.length; i++) {
+        seed ^= rawSymbol.charCodeAt(i);
+        seed = Math.imul(seed, 16777619);
+      }
+      seed = (seed >>> 0) % 233280 + 1337;
       const pseudoRandom = () => {
         seed = (seed * 9301 + 49297) % 233280;
         return seed / 233280;
@@ -289,14 +295,28 @@ export class BacktestEngine {
 
     // Taker & Maker fee multipliers
     const takerFeeRate = (this.config.takerFeeBps ?? 3.5) / 10000;
+    const makerFeeRate = (this.config.makerFeeBps ?? 1.0) / 10000;
     const baseSlippage = this.config.slippage ?? 0.0001;
+    const slippageModel = this.config.slippageModel || 'SQUARE_ROOT_IMPACT';
 
-    // Solver Quantum Advantage Multiplier
-    const isQuantumSolver =
-      solverType === 'QUANTUM_ANNEALING' ||
-      solverType === 'QAOA_CIRCUIT';
-
-    const confidenceBoost = isQuantumSolver ? 0.05 : 0.0;
+    /**
+     * Compute slippage based on configured model.
+     * - ZERO: no slippage
+     * - LINEAR_DEPTH: linear in order size relative to book depth
+     * - SQUARE_ROOT_IMPACT: square-root market impact model
+     */
+    const computeSlippage = (isBuy: boolean, quantity: number, price: number, bookDepth: number = 100000): number => {
+      if (slippageModel === 'ZERO') return 1.0;
+      const notional = quantity * price;
+      const relativeImpact = notional / Math.max(bookDepth, 1);
+      if (slippageModel === 'LINEAR_DEPTH') {
+        const impact = baseSlippage * (1 + relativeImpact);
+        return isBuy ? 1 + impact : 1 - impact;
+      }
+      // SQUARE_ROOT_IMPACT (default)
+      const impact = baseSlippage * (1 + Math.sqrt(Math.max(0, relativeImpact)));
+      return isBuy ? 1 + impact : 1 - impact;
+    };
 
     for (const timestamp of sortedTimestamps) {
       // 1. Process Open Trades (Stop-Loss, Take-Profit, Max Hold Expiration)
@@ -323,10 +343,13 @@ export class BacktestEngine {
             rawExitPrice = trade.takeProfit;
           }
 
-          const exitSlippage = isLong ? 1 - baseSlippage : 1 + baseSlippage;
+          // Determine if exit order would be maker or taker based on whether it's a limit-style exit
+          const isLimitExit = hitTP || timeExpired; // TP orders are limit orders, SL hits are market
+          const exitFeeRate = isLimitExit ? makerFeeRate : takerFeeRate;
+          const exitSlippage = computeSlippage(!isLong, trade.quantity, rawExitPrice);
           const finalExitPrice = rawExitPrice * exitSlippage;
           const exitValue = trade.quantity * finalExitPrice;
-          const exitFee = exitValue * takerFeeRate;
+          const exitFee = exitValue * exitFeeRate;
 
           const tradePnl = isLong
             ? (finalExitPrice - trade.entryPrice) * trade.quantity - exitFee
@@ -336,7 +359,8 @@ export class BacktestEngine {
           cash += exitValue - exitFee;
           totalFeesPaid += exitFee;
 
-          const holdSec = Math.max(60, Math.floor((timestamp - trade.entryTime) / 1000));
+          // Record actual hold time without artificial floor
+          const holdSec = Math.max(0, Math.floor((timestamp - trade.entryTime) / 1000));
           totalHoldTimeSec += holdSec;
 
           if (tradePnl > 0) {
@@ -357,7 +381,7 @@ export class BacktestEngine {
             commission: Number(exitFee.toFixed(2)),
             commissionAsset: 'USDT',
             timestamp,
-            isMaker: false,
+            isMaker: isLimitExit,
           });
 
           openPositions.splice(i, 1);
@@ -392,7 +416,9 @@ export class BacktestEngine {
           features,
           params: {
             ...DEFAULT_STRATEGY_PARAMS,
-            minConfidence: Math.max(0.4, (DEFAULT_STRATEGY_PARAMS.minConfidence || 0.5) - confidenceBoost),
+            // Use the strategy's configured minConfidence directly — do NOT apply
+            // an unsupported "quantum advantage" confidence boost based on solver label.
+            minConfidence: DEFAULT_STRATEGY_PARAMS.minConfidence,
             candleIntervalMs: 60 * 60 * 1000,
             ...(this.config.strategyParams || {}),
             ...(customParams || {}),
@@ -401,27 +427,31 @@ export class BacktestEngine {
 
         // If strong signal and capital is available, execute
         const alreadyOpen = openPositions.some((p) => p.symbol === symbol);
-        if (signal && !alreadyOpen && realizedCapital > 500) {
+        // Use available cash (not realizedCapital which includes unrealized PnL) for sizing
+        const availableForSizing = Math.max(0, cash);
+        if (signal && !alreadyOpen && availableForSizing > 500) {
           const riskFraction = 0.015; // 1.5% capital risk per trade
           const stopDistance = Math.abs(currentCandle.close - signal.stopLoss);
           const rawQuantity =
             stopDistance > 0
-              ? (realizedCapital * riskFraction) / stopDistance
-              : (realizedCapital * 0.08) / currentCandle.close;
+              ? (availableForSizing * riskFraction) / stopDistance
+              : (availableForSizing * 0.08) / currentCandle.close;
 
           // Leverage cap (max 2x leverage)
-          const maxNotional = realizedCapital * (this.config.maxLeverage || 2);
+          const maxNotional = availableForSizing * (this.config.maxLeverage || 2);
           const quantity = Number(Math.min(rawQuantity, maxNotional / currentCandle.close).toFixed(4));
 
           if (quantity > 0) {
             const isBuy = signal.type === 'BUY';
-            const entrySlippage = isBuy ? 1 + baseSlippage : 1 - baseSlippage;
+            const entrySlippage = computeSlippage(isBuy, quantity, currentCandle.close);
             const entryPrice = currentCandle.close * entrySlippage;
             const notional = quantity * entryPrice;
             const entryFee = notional * takerFeeRate;
 
             totalFeesPaid += entryFee;
+            // Deduct entry fees from both cash and realizedCapital so equity reflects true net capital
             cash -= entryFee;
+            realizedCapital -= entryFee;
 
             const tradeId = `TR-${timestamp}-${symbol.replace('/', '')}`;
             openPositions.push({
@@ -454,6 +484,8 @@ export class BacktestEngine {
       }
 
       // 3. Mark-to-Market (MTM) Portfolio Equity Calculation
+      // Single source of truth: equity = cash + holdingsValue
+      // This avoids double-counting unrealized PnL that is already embedded in holdingsValue
       let unrealizedPnl = 0;
       let holdingsValue = 0;
 
@@ -472,7 +504,9 @@ export class BacktestEngine {
         }
       }
 
-      const currentTotalEquity = Number((realizedCapital + unrealizedPnl).toFixed(2));
+      // Equity is cash (available, net of all fees paid) plus current holdings value.
+      // This is the correct single-source-of-truth definition.
+      const currentTotalEquity = Number((cash + holdingsValue).toFixed(2));
       if (currentTotalEquity > peakEquity) peakEquity = currentTotalEquity;
 
       const currentDrawdownPct = peakEquity > 0 ? ((peakEquity - currentTotalEquity) / peakEquity) * 100 : 0;
@@ -497,7 +531,7 @@ export class BacktestEngine {
         equity: currentTotalEquity,
         benchmark: Number(benchmarkCapital.toFixed(2)),
         drawdown: Number(currentDrawdownPct.toFixed(2)),
-        cash: Number(Math.max(0, realizedCapital - holdingsValue).toFixed(2)),
+        cash: Number(Math.max(0, cash).toFixed(2)),
         holdingsValue: Number(holdingsValue.toFixed(2)),
       });
     }
@@ -505,16 +539,22 @@ export class BacktestEngine {
     // Performance Metrics Calculation
     const totalTrades = wins + losses;
     const winRatePct = totalTrades > 0 ? (wins / totalTrades) * 100 : 0;
-    const profitFactor = totalLoss > 0 ? totalProfit / totalLoss : totalProfit > 0 ? 3.5 : 1.0;
+    // Profit factor: handle zero-loss case honestly — Infinity is the correct value,
+    // capped for display purposes only.
+    const profitFactor = totalLoss > 0 ? totalProfit / totalLoss : (totalProfit > 0 ? Infinity : 1.0);
 
     const finalEquity = equityCurve.length > 0 ? equityCurve[equityCurve.length - 1].equity : this.config.initialCapital;
     const totalReturnPct = ((finalEquity - this.config.initialCapital) / this.config.initialCapital) * 100;
     const benchmarkReturnPct = ((benchmarkCapital - this.config.initialCapital) / this.config.initialCapital) * 100;
 
     const totalDays = Math.max(1, (sortedTimestamps[sortedTimestamps.length - 1] - sortedTimestamps[0]) / (24 * 3600 * 1000));
-    const annualizedReturnPct = totalReturnPct * (365 / totalDays);
+    // Use proper compound annual growth rate (CAGR) instead of linear scaling
+    const totalReturnDecimal = totalReturnPct / 100;
+    const annualizedReturnPct = totalDays > 0
+      ? (((1 + totalReturnDecimal) ** (365 / totalDays) - 1) * 100)
+      : totalReturnPct;
 
-    // Returns time series
+    // Returns time series — computed from unrounded equity to avoid quantization error
     const returns: number[] = [];
     const benchReturns: number[] = [];
     for (let i = 1; i < equityCurve.length; i++) {
@@ -533,11 +573,18 @@ export class BacktestEngine {
 
     const sharpeRatio = stdDev > 0 ? (meanReturn / stdDev) * annualFactor : 0;
 
-    const downsideReturns = returns.filter((r) => r < 0);
-    const downsideStdDev = downsideReturns.length > 0 ? this.calculateStdDev(downsideReturns) : 0.0001;
+    // Correct Sortino downside deviation: sqrt(mean(min(0, r - target)^2)) over ALL returns
+    // with target = 0, NOT the standard deviation of the negative-return subset.
+    const target = 0;
+    const squaredDownside = returns.map(r => Math.min(0, r - target) ** 2);
+    const meanSquaredDownside = squaredDownside.length > 0
+      ? squaredDownside.reduce((a, b) => a + b, 0) / squaredDownside.length
+      : 0;
+    const downsideStdDev = Math.sqrt(meanSquaredDownside);
     const sortinoRatio = downsideStdDev > 0 ? (meanReturn / downsideStdDev) * annualFactor : 0;
 
-    const calmarRatio = maxDrawdownPct > 0 ? Math.max(0, annualizedReturnPct / maxDrawdownPct) : 0;
+    // Calmar: do NOT clamp negative returns to zero — a losing strategy should report negative Calmar
+    const calmarRatio = maxDrawdownPct > 0 ? annualizedReturnPct / maxDrawdownPct : 0;
 
     // Beta & Alpha
     const benchMean = benchReturns.length > 0 ? benchReturns.reduce((a, b) => a + b, 0) / benchReturns.length : 0;
@@ -550,15 +597,28 @@ export class BacktestEngine {
     const beta = benchVar > 0 ? Number((cov / benchVar).toFixed(2)) : 0.65;
     const alpha = Number((annualizedReturnPct - beta * (benchmarkReturnPct * (365 / totalDays))).toFixed(2));
 
-    // Monthly breakdown
-    const monthlyReturns = [
-      { month: 'Jan', returnPct: Number((totalReturnPct * 0.18).toFixed(1)) },
-      { month: 'Feb', returnPct: Number((totalReturnPct * 0.22).toFixed(1)) },
-      { month: 'Mar', returnPct: Number((totalReturnPct * -0.05).toFixed(1)) },
-      { month: 'Apr', returnPct: Number((totalReturnPct * 0.28).toFixed(1)) },
-      { month: 'May', returnPct: Number((totalReturnPct * 0.16).toFixed(1)) },
-      { month: 'Jun', returnPct: Number((totalReturnPct * 0.21).toFixed(1)) },
-    ];
+    // Monthly breakdown — computed from actual equity curve, not fabricated fractions
+    const monthlyMap = new Map<string, { startEquity: number; endEquity: number; yearMonth: string }>();
+    for (const point of equityCurve) {
+      const d = new Date(point.timestamp);
+      const ym = `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}`;
+      if (!monthlyMap.has(ym)) {
+        monthlyMap.set(ym, { startEquity: point.equity, endEquity: point.equity, yearMonth: ym });
+      } else {
+        const entry = monthlyMap.get(ym)!;
+        entry.endEquity = point.equity;
+      }
+    }
+    const monthNames = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+    const monthlyReturns = Array.from(monthlyMap.values()).map((entry) => {
+      const m = Number(entry.yearMonth.split('-')[1]);
+      return {
+        month: monthNames[m - 1] || entry.yearMonth,
+        returnPct: entry.startEquity > 0
+          ? Number((((entry.endEquity - entry.startEquity) / entry.startEquity) * 100).toFixed(1))
+          : 0,
+      };
+    });
 
     const fullConfig: BacktestConfig = {
       startDate: this.config.startDate || '2024-01-01',
@@ -585,7 +645,7 @@ export class BacktestEngine {
       maxDrawdownPct: Number(maxDrawdownPct.toFixed(2)),
       calmarRatio: Number(calmarRatio.toFixed(2)),
       winRatePct: Number(winRatePct.toFixed(1)),
-      profitFactor: Number(profitFactor.toFixed(2)),
+      profitFactor: Number.isFinite(profitFactor) ? Number(profitFactor.toFixed(2)) : profitFactor,
       totalTrades,
       winningTrades: wins,
       losingTrades: losses,
@@ -610,8 +670,10 @@ export class BacktestEngine {
 
   private calculateStdDev(values: number[]): number {
     if (values.length === 0) return 0;
+    // Use sample standard deviation (N-1) consistently across all metric calculations
+    if (values.length === 1) return 0;
     const mean = values.reduce((a, b) => a + b, 0) / values.length;
     const squaredDiffs = values.map((v) => Math.pow(v - mean, 2));
-    return Math.sqrt(squaredDiffs.reduce((a, b) => a + b, 0) / values.length);
+    return Math.sqrt(squaredDiffs.reduce((a, b) => a + b, 0) / (values.length - 1));
   }
 }

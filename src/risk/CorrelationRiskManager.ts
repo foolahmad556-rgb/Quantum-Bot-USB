@@ -58,11 +58,17 @@ export class CorrelationRiskManager {
         return returnsMap;
     }
 
-    /**
-     * Calculate correlation matrix
-     */
+/**
+      * Calculate correlation matrix.
+      *
+      * IMPORTANT: Correlation must be computed on RETURN series, not raw price levels.
+      * Prices are non-stationary (I(1)) — Pearson on levels produces spuriously high
+      * correlations (~1) regardless of actual co-movement, which would classify nearly
+      * everything as CRITICAL and could halt live trading.
+      */
     public calculateCorrelationMatrix(): CorrelationMatrix {
-        const symbols = Array.from(this.priceHistory.keys());
+        const returnsMap = this.getReturnsMap();
+        const symbols = Array.from(returnsMap.keys());
         const matrix: CorrelationMatrix = {};
 
         symbols.forEach(s1 => {
@@ -77,8 +83,8 @@ export class CorrelationRiskManager {
                 const s1 = symbols[i];
                 const s2 = symbols[j];
                 const correlation = this.calculatePearsonCorrelation(
-                    this.priceHistory.get(s1)!,
-                    this.priceHistory.get(s2)!
+                    returnsMap.get(s1)!,
+                    returnsMap.get(s2)!
                 );
                 matrix[s1][s2] = correlation;
                 matrix[s2][s1] = correlation;
