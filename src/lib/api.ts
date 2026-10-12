@@ -1,6 +1,10 @@
 import { auth } from './firebase.ts';
 
 export async function fetchWithAuth(url: string, options: RequestInit = {}) {
+  if (!auth) {
+    throw new Error('Firebase authentication is not configured');
+  }
+
   const user = auth.currentUser;
   if (!user) {
     throw new Error('User not authenticated');

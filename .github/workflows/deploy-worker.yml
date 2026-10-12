@@ -26,12 +26,12 @@ jobs:
       - name: Deploy Worker
         run: |
           cd api
-          wrangler deploy webhook.js --name quantum-bot-webhook --env production
+          wrangler deploy webhook.js --name quantum-bot-webhook
         env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-          SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
           WEBHOOK_SECRET: ${{ secrets.WEBHOOK_SECRET }}
+          FIREBASE_CREDENTIALS_JSON: ${{ secrets.FIREBASE_CREDENTIALS_JSON }}
 
       - name: Set Worker Environment Variables
         if: success()
