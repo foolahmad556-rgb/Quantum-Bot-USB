@@ -375,7 +375,7 @@ export class BacktestEngine {
 
         // Extract historical slice
         const candleHistory = candles
-          .filter((c) => c.timestamp <= timestamp)
+          .filter((c) => c.timestamp < timestamp)
           .slice(-60);
 
         if (candleHistory.length < 20) continue;

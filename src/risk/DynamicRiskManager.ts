@@ -1,7 +1,7 @@
 import { EventEmitter } from 'events';
 
 export interface RiskMetrics {
-  rollingSharpe: number;
+  rollingSharpe: number | null;
   rollingWinRate: number;
   rollingDrawdown: number;
   drawdownVelocity: number; // % loss per day

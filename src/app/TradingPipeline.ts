@@ -1515,16 +1515,23 @@ export class TradingPipeline {
     const metrics = this.db.getPerformanceMetrics();
     const winRate = metrics && metrics.totalTrades > 0 ? (metrics.winningTrades / metrics.totalTrades) : 0.6;
     
-    // Calculate dynamic Sharpe from trade history if available, else standard baseline
+    // Calculate dynamic Sharpe from realized trade P&L history
     const fills = this.userDataStream.getFills();
-    let sharpe = 1.2;
+    const equityForReturns = this.subWalletManager.getCurrentEquity() > 0
+      ? this.subWalletManager.getCurrentEquity()
+      : (balance.totalEquity || this.config.initialCapital || 1000);
+    let sharpe: number | null = null;
     if (fills.length >= 5) {
-      const returns = fills.map(f => (f.side === 'BUY' ? -f.commission : -f.commission));
+      const returns = fills.map(f => {
+        const pnl = Number.isFinite(f.realizedPnl) ? (f.realizedPnl as number) : 0;
+        return equityForReturns > 0 ? pnl / equityForReturns : 0;
+      });
       const mean = returns.reduce((a, b) => a + b, 0) / returns.length;
-      const variance = returns.reduce((a, b) => a + Math.pow(b - mean, 2), 0) / returns.length;
+      const variance = returns.reduce((a, b) => a + Math.pow(b - mean, 2), 0) / Math.max(1, returns.length - 1);
       const std = Math.sqrt(variance);
       if (std > 0) {
-        sharpe = Number(((mean / std) * Math.sqrt(252)).toFixed(2));
+        const periodsPerDay = Math.max(1, Math.round(fills.length / 30));
+        sharpe = Number(((mean / std) * Math.sqrt(365 * periodsPerDay)).toFixed(2));
       }
     }
     
