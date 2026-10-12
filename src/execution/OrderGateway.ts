@@ -641,7 +641,7 @@ export class OrderGateway {
         if (this.fsm.canTransition(order.status, targetStatus)) {
           this.fsm.transition(order, targetStatus);
         } else {
-          order.status = targetStatus;
+          this.fsm.forceTransition(order, targetStatus, 'Exchange REST response reported state outside FSM table');
         }
 
         // Real exchange fills are recorded from ORDER_TRADE_UPDATE (true price / commission).
@@ -657,8 +657,7 @@ export class OrderGateway {
       if (this.fsm.canTransition(order.status, 'REJECTED')) {
         this.fsm.transition(order, 'REJECTED', String(err));
       } else {
-        order.status = 'REJECTED';
-        order.errorMessage = String(err);
+        this.fsm.forceTransition(order, 'REJECTED', String(err));
       }
       this.notifyOrder(order);
     }
@@ -733,7 +732,7 @@ export class OrderGateway {
     if (this.fsm.canTransition(order.status, targetStatus)) {
       this.fsm.transition(order, targetStatus);
     } else {
-      order.status = targetStatus;
+      this.fsm.forceTransition(order, targetStatus, 'Exchange WebSocket reported state outside FSM table');
     }
 
     this.notifyOrder(order);

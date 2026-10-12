@@ -37,6 +37,10 @@ export class OrderStateMachine {
     return allowed.includes(newStatus);
   }
 
+  /**
+   * Attempt a validated state transition. Throws on illegal moves.
+   * Returns the (mutated) order for convenience.
+   */
   public transition(order: Order, newStatus: OrderStatus, reason?: string): Order {
     if (order.status === newStatus) return order;
 
@@ -44,6 +48,24 @@ export class OrderStateMachine {
       throw new Error(`Illegal order state transition from ${order.status} to ${newStatus} for order ${order.id}`);
     }
 
+    return this.applyTransition(order, newStatus, reason);
+  }
+
+  /**
+   * Force a state transition, bypassing the FSM validation table.
+   * Logs a warning so bypasses are auditable. Use only when an external
+   * system (exchange) reports a state the FSM does not model.
+   */
+  public forceTransition(order: Order, newStatus: OrderStatus, reason?: string): Order {
+    if (order.status === newStatus) return order;
+    console.warn(
+      `⚠️ FSM bypass: forcing order ${order.id} from ${order.status} to ${newStatus}` +
+      (reason ? ` — ${reason}` : '')
+    );
+    return this.applyTransition(order, newStatus, reason);
+  }
+
+  private applyTransition(order: Order, newStatus: OrderStatus, reason?: string): Order {
     const fromStatus = order.status;
     order.status = newStatus;
     order.updatedAt = Date.now();

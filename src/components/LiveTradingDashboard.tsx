@@ -148,13 +148,13 @@ export const LiveTradingDashboard: React.FC<DashboardProps> = React.memo(({
       const close = candles[candles.length - 1]?.close || currentPrice;
       const change = open > 0 ? ((close - open) / open) * 100 : 0;
       const vol = candles.reduce((acc, c) => acc + (c?.volume || 0), 0);
-      return { high, low, change, vol: vol || 1420.5 };
+      return { high, low, change, vol };
     }
     return {
-      high: currentPrice * 1.025,
-      low: currentPrice * 0.982,
-      change: +1.84,
-      vol: 12450.8,
+      high: currentPrice,
+      low: currentPrice,
+      change: 0,
+      vol: 0,
     };
   }, [candles, currentPrice]);
 

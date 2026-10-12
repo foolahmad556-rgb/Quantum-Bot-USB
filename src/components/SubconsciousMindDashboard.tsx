@@ -934,10 +934,10 @@ export const SubconsciousMindDashboard: React.FC<SubconsciousMindDashboardProps>
   const lifeProgress = clamp(lifeAge / settings.lifespan, 0, 1);
   const strokeDashoffset = circumference * lifeProgress;
 
-  const totalWalletVal = balance?.totalEquity || 114820.45;
-  const profitVal = balance?.realizedPnl || 8420.00;
-  const lossVal = Math.abs((balance?.unrealizedPnl && balance.unrealizedPnl < 0) ? balance.unrealizedPnl : 412.30);
-  const profitPct = balance?.dailyPnlPct || 14.82;
+  const totalWalletVal = Number.isFinite(balance?.totalEquity) ? balance.totalEquity : 0;
+  const profitVal = Number.isFinite(balance?.realizedPnl) ? balance.realizedPnl : 0;
+  const lossVal = Math.abs(Number.isFinite(balance?.unrealizedPnl) && balance.unrealizedPnl < 0 ? balance.unrealizedPnl : 0);
+  const profitPct = Number.isFinite(balance?.dailyPnlPct) ? balance.dailyPnlPct : 0;
 
   const tabs = [
     { id: 'core', labelEn: 'Subconscious Core', labelAr: 'عقل اللاوعي الكمي', icon: Sparkles },
@@ -1102,7 +1102,7 @@ export const SubconsciousMindDashboard: React.FC<SubconsciousMindDashboardProps>
               </span>
             </div>
             <span className="hidden sm:inline-block font-mono text-[9px] font-semibold px-1.5 py-0.5 rounded bg-[rgba(255,61,127,0.14)] text-[var(--rose)]">
-              −{(riskMetrics?.currentDrawdownPct || 0.88).toFixed(2)}%
+              −{(riskMetrics ? Number(riskMetrics.currentDrawdownPct) : 0).toFixed(2)}%
             </span>
           </div>
         </div>
@@ -1639,7 +1639,7 @@ export const SubconsciousMindDashboard: React.FC<SubconsciousMindDashboardProps>
             <div className="p-3 rounded-xl bg-white/[0.02] border border-white/5">
               <span className="font-mono text-[10px] text-slate-400 block">{isAr ? 'التراجع اللحظي' : 'Current Drawdown'}</span>
               <span className="font-mono text-sm font-bold text-[var(--rose)]">
-                {(riskMetrics?.currentDrawdownPct || 0.88).toFixed(2)}%
+                {(riskMetrics ? Number(riskMetrics.currentDrawdownPct) : 0).toFixed(2)}%
               </span>
             </div>
             <div className="p-3 rounded-xl bg-white/[0.02] border border-white/5">
@@ -1651,7 +1651,7 @@ export const SubconsciousMindDashboard: React.FC<SubconsciousMindDashboardProps>
             <div className="p-3 rounded-xl bg-white/[0.02] border border-white/5">
               <span className="font-mono text-[10px] text-slate-400 block">{isAr ? 'القيمة المعرضة للخطر (VaR 95%)' : 'VaR 95%'}</span>
               <span className="font-mono text-sm font-bold text-[var(--amber)]">
-                ${(riskMetrics?.var95 || 1450).toLocaleString()}
+                ${((riskMetrics ? Number(riskMetrics.var95) : 0)).toLocaleString()}
               </span>
             </div>
             <div className="p-3 rounded-xl bg-white/[0.02] border border-white/5">

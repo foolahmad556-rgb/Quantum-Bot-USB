@@ -47,7 +47,7 @@ export const NexusHUD: React.FC<NexusHUDProps> = React.memo(({
   killSwitchActive,
   onEmergencyKill,
   onResetKill,
-  drawdownPct = 0.88,
+  drawdownPct = 0,
 }) => {
   const isAr = lang === 'ar';
   const [showWalletModal, setShowWalletModal] = useState<boolean>(false);
