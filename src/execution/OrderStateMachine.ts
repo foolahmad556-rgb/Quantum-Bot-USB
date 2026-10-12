@@ -45,16 +45,9 @@ export class OrderStateMachine {
     }
 
     const fromStatus = order.status;
-
-    // Return a NEW Order object — do NOT mutate the input parameter.
-    // Mutating shared Order instances causes race conditions when the same
-    // Order is referenced across components or concurrent async paths.
-    const updatedOrder: Order = {
-      ...order,
-      status: newStatus,
-      updatedAt: Date.now(),
-      errorMessage: reason || order.errorMessage,
-    };
+    order.status = newStatus;
+    order.updatedAt = Date.now();
+    if (reason) order.errorMessage = reason;
 
     const event: StateTransitionEvent = {
       orderId: order.id,
@@ -67,7 +60,7 @@ export class OrderStateMachine {
     this.history.unshift(event);
     if (this.history.length > 200) this.history.pop();
 
-    return updatedOrder;
+    return order;
   }
 
   public getHistory(): StateTransitionEvent[] {
