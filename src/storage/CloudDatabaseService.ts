@@ -4,7 +4,7 @@ import { db as pgDb } from '../db/index.ts';
 import { trades, balanceHistory, users } from '../db/schema.ts';
 import { eq, desc, and } from 'drizzle-orm';
 import { initializeApp, getApps, App } from 'firebase-admin/app';
-import { getFirestore, Firestore } from 'firebase-admin/firestore';
+import { getFirestore, Firestore, QueryDocumentSnapshot } from 'firebase-admin/firestore';
 
 // Load Firebase config from environment variable (encrypted at rest, never committed).
 // Set FIREBASE_CREDENTIALS_JSON as a secret or in your environment.
@@ -77,7 +77,7 @@ export class CloudDatabaseService {
       .limit(limit)
       .get();
     
-    return snapshot.docs.map(doc => ({
+    return snapshot.docs.map((doc: QueryDocumentSnapshot) => ({
       timestamp: doc.data().timestamp,
       symbol,
       price: doc.data().price
