@@ -568,7 +568,7 @@ export const LiveTradingDashboard: React.FC<DashboardProps> = React.memo(({
                   </div>
                   <div className="flex items-center gap-2 shrink-0">
                     <span className="text-[10px] text-cyan-400 font-bold">
-                      {(((sig as any).confidence || 0.9) * 100).toFixed(0)}% {isAr ? 'دقة' : 'CONF'}
+                      {((Number.isFinite((sig as any).confidence) ? (sig as any).confidence : 0) * 100).toFixed(0)}% {isAr ? 'دقة' : 'CONF'}
                     </span>
                     <div className={`w-2 h-2 rounded-full ${
                       sig.type.includes('BUY') ? 'bg-emerald-400' : sig.type.includes('SELL') ? 'bg-rose-400' : 'bg-cyan-400'

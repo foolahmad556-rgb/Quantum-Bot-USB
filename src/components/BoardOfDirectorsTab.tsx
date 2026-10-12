@@ -224,7 +224,7 @@ export const BoardOfDirectorsTab: React.FC<BoardOfDirectorsTabProps> = ({
             <div className="w-full bg-white/10 h-1.5 rounded-full mt-2 overflow-hidden">
               <div
                 className="h-full bg-gradient-to-r from-cyan-500 to-emerald-400 rounded-full transition-all duration-500"
-                style={{ width: `${Math.min(100, Math.max(10, (latestDecision?.approvalRatio || 0.74) * 100))}%` }}
+                style={{ width: `${Math.min(100, Math.max(10, (Number.isFinite(latestDecision?.approvalRatio) ? Number(latestDecision?.approvalRatio) : 0) * 100))}%` }}
               />
             </div>
           </div>

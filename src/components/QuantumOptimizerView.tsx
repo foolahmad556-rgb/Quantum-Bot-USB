@@ -93,7 +93,7 @@ export const QuantumOptimizerView: React.FC<QuantumViewProps> = ({
       const sa = QuantumInspiredSolver.solveSimulatedAnnealing(activeSymbols, qubo, expectedReturns, covMatrix, { numSweeps: 500 });
       const tabu = QuantumInspiredSolver.solveTabuSearch(activeSymbols, qubo, expectedReturns, covMatrix, { numSweeps: 300 });
       const markowitz = ClassicalBaseline.solveMarkowitz(activeSymbols, expectedReturns, covMatrix, riskLambda);
-const qaoa = QAOAAdapter.simulateQAOA(qubo, { pLayers: qaoaLayers });
+      const qaoa = QAOAAdapter.simulateQAOA(qubo, { pLayers: qaoaLayers });
       const qaoaSolution = QuboPortfolio.decodeWeights(
         activeSymbols,
         qubo,
@@ -104,7 +104,6 @@ const qaoa = QAOAAdapter.simulateQAOA(qubo, { pLayers: qaoaLayers });
         qaoa.solveTimeMs || 0,
         qaoa.circuitDepth || 0
       );
-
       setQaoaSimResult(qaoa);
 
       setBenchmarkData([
@@ -413,8 +412,8 @@ const qaoa = QAOAAdapter.simulateQAOA(qubo, { pLayers: qaoaLayers });
               </h3>
               <p className="text-xs text-slate-400 mt-0.5">
                 {isAr
-                  ? `أعلى الحالات الكمومية طاقة صغرى (الدقة: ${((qaoaSimResult?.fidelityScore || 0.88) * 100).toFixed(1)}%)`
-                  : `Top computational basis states by measurement probability (Fidelity: ${((qaoaSimResult?.fidelityScore || 0.88) * 100).toFixed(1)}%)`}
+                  ? `أعلى الحالات الكمومية طاقة صغرى (الدقة: ${((qaoaSimResult ? Number(qaoaSimResult.fidelityScore) : 0) * 100).toFixed(1)}%)`
+                  : `Top computational basis states by measurement probability (Fidelity: ${((qaoaSimResult ? Number(qaoaSimResult.fidelityScore) : 0) * 100).toFixed(1)}%)`}
               </p>
             </div>
           </div>

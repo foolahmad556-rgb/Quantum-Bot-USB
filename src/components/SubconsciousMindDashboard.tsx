@@ -1645,7 +1645,7 @@ export const SubconsciousMindDashboard: React.FC<SubconsciousMindDashboardProps>
             <div className="p-3 rounded-xl bg-white/[0.02] border border-white/5">
               <span className="font-mono text-[10px] text-slate-400 block">{isAr ? 'أقصى حد للتراجع' : 'Max Allowed DD'}</span>
               <span className="font-mono text-sm font-bold text-white">
-                {(riskLimits?.maxDrawdownPct || 5.0).toFixed(1)}%
+                {(Number.isFinite(riskLimits?.maxDrawdownPct) ? Number(riskLimits?.maxDrawdownPct) : 0).toFixed(1)}%
               </span>
             </div>
             <div className="p-3 rounded-xl bg-white/[0.02] border border-white/5">
