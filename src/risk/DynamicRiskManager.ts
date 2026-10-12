@@ -115,13 +115,14 @@ export class DynamicRiskManager extends EventEmitter {
       action = 'REDUCE_SIZE';
     }
 
-    if (this.metrics.rollingSharpe < this.thresholds.sharpePoor) {
-      reasons.push(`Critical: Rolling Sharpe ${this.metrics.rollingSharpe.toFixed(2)} < ${this.thresholds.sharpePoor}`);
+    const sharpe = this.metrics.rollingSharpe;
+    if (sharpe !== null && sharpe < this.thresholds.sharpePoor) {
+      reasons.push(`Critical: Rolling Sharpe ${sharpe.toFixed(2)} < ${this.thresholds.sharpePoor}`);
       leverageMultiplier *= 0.25;
       positionSizeMultiplier *= 0.5;
       action = 'REDUCE_LEVERAGE';
-    } else if (this.metrics.rollingSharpe < this.thresholds.sharpeGood) {
-      reasons.push(`Warning: Rolling Sharpe ${this.metrics.rollingSharpe.toFixed(2)} < ${this.thresholds.sharpeGood}`);
+    } else if (sharpe !== null && sharpe < this.thresholds.sharpeGood) {
+      reasons.push(`Warning: Rolling Sharpe ${sharpe.toFixed(2)} < ${this.thresholds.sharpeGood}`);
       leverageMultiplier *= 0.5;
       positionSizeMultiplier *= 0.75;
       action = 'REDUCE_LEVERAGE';

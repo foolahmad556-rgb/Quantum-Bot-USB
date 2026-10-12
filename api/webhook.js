@@ -27,6 +27,43 @@ function bufferToBase64Url(buffer) {
   return base64UrlEncode(binary);
 }
 
+/**
+ * Constant-time string comparison to prevent timing attacks on webhook secrets.
+ */
+function constantTimeCompare(a, b) {
+  if (typeof a !== 'string' || typeof b !== 'string') return false;
+  if (a.length !== b.length) return false;
+  let result = 0;
+  for (let i = 0; i < a.length; i++) {
+    result |= a.charCodeAt(i) ^ b.charCodeAt(i);
+  }
+  return result === 0;
+}
+
+/**
+ * Validate incoming webhook signal payload.
+ * Returns null if valid, or an error message string if invalid.
+ */
+function validateSignal(signal) {
+  if (!signal || typeof signal !== 'object') return 'Invalid payload: expected a JSON object';
+  if (typeof signal.symbol !== 'string' || signal.symbol.trim().length === 0 || signal.symbol.length > 32) {
+    return 'Invalid payload: symbol must be a non-empty string (max 32 chars)';
+  }
+  if (typeof signal.action !== 'string' || !['BUY', 'SELL', 'HOLD'].includes(signal.action.toUpperCase())) {
+    return 'Invalid payload: action must be one of BUY, SELL, HOLD';
+  }
+  if (signal.price !== undefined && (typeof signal.price !== 'number' || !Number.isFinite(signal.price) || signal.price < 0)) {
+    return 'Invalid payload: price must be a non-negative number';
+  }
+  return null;
+}
+
+const CORS_HEADERS = {
+  'Access-Control-Allow-Origin': '*',
+  'Access-Control-Allow-Methods': 'POST, OPTIONS',
+  'Access-Control-Allow-Headers': 'Content-Type, Authorization'
+};
+
 async function getGoogleAuthToken(credentials) {
   const keyBuffer = pemToArrayBuffer(credentials.private_key);
   const key = await crypto.subtle.importKey(
@@ -68,7 +105,7 @@ async function getGoogleAuthToken(credentials) {
 
   const tokenData = await tokenRes.json();
   if (!tokenRes.ok || !tokenData.access_token) {
-    throw new Error(`Google OAuth error: ${JSON.stringify(tokenData)}`);
+    throw new Error('Google OAuth token request failed');
   }
   return tokenData.access_token;
 }
@@ -77,23 +114,36 @@ export default {
   async fetch(request, env) {
     const url = new URL(request.url);
 
+    if (request.method === 'OPTIONS') {
+      return new Response(null, { status: 204, headers: CORS_HEADERS });
+    }
+
     if (url.pathname === '/health' || url.pathname === '/') {
       return new Response('Quantum-Bot Webhook Active (Firebase Native)', {
-        headers: { 'Content-Type': 'text/plain' }
+        headers: { 'Content-Type': 'text/plain', ...CORS_HEADERS }
       });
     }
 
     if (url.pathname === '/webhook' && request.method === 'POST') {
       try {
         const auth = request.headers.get('Authorization');
-        if (!auth || auth !== `Bearer ${env.WEBHOOK_SECRET}`) {
+        const expected = `Bearer ${env.WEBHOOK_SECRET}`;
+        if (!auth || !constantTimeCompare(auth, expected)) {
           return new Response(JSON.stringify({ error: 'Unauthorized' }), {
             status: 401,
-            headers: { 'Content-Type': 'application/json' }
+            headers: { 'Content-Type': 'application/json', ...CORS_HEADERS }
           });
         }
 
         const signal = await request.json();
+        const validationError = validateSignal(signal);
+        if (validationError) {
+          return new Response(JSON.stringify({ error: validationError }), {
+            status: 400,
+            headers: { 'Content-Type': 'application/json', ...CORS_HEADERS }
+          });
+        }
+
         const creds = JSON.parse(env.FIREBASE_CREDENTIALS_JSON || '{}');
         if (!creds.client_email || !creds.private_key || !creds.project_id) {
           throw new Error('Missing or invalid FIREBASE_CREDENTIALS_JSON');
@@ -110,10 +160,10 @@ export default {
           },
           body: JSON.stringify({
             fields: {
-              symbol: { stringValue: String(signal.symbol || 'UNKNOWN') },
-              action: { stringValue: String(signal.action || 'HOLD') },
+              symbol: { stringValue: String(signal.symbol || 'UNKNOWN').toUpperCase().slice(0, 32) },
+              action: { stringValue: String(signal.action || 'HOLD').toUpperCase() },
               price: { doubleValue: Number(signal.price) || 0 },
-              timestamp: { timestampValue: new Date().toISOString() },
+              timestamp: { TimestampValue: new Date().toISOString() },
               raw: { stringValue: JSON.stringify(signal) }
             }
           })
@@ -121,21 +171,21 @@ export default {
 
         const firestoreData = await firestoreRes.json();
         if (!firestoreRes.ok) {
-          throw new Error(`Firestore error: ${JSON.stringify(firestoreData)}`);
+          throw new Error('Firestore write failed');
         }
 
         return new Response(JSON.stringify({ status: 'ok', data: firestoreData }), {
           status: 200,
-          headers: { 'Content-Type': 'application/json' }
+          headers: { 'Content-Type': 'application/json', ...CORS_HEADERS }
         });
       } catch (err) {
-        return new Response(JSON.stringify({ error: err.message }), {
+        return new Response(JSON.stringify({ error: 'Internal server error' }), {
           status: 500,
-          headers: { 'Content-Type': 'application/json' }
+          headers: { 'Content-Type': 'application/json', ...CORS_HEADERS }
         });
       }
     }
 
-    return new Response('Not Found', { status: 404 });
+    return new Response('Not Found', { status: 404, headers: CORS_HEADERS });
   }
 };

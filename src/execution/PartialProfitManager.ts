@@ -288,12 +288,17 @@ export class PartialProfitManager {
     await this.orderGateway.cancelProtectiveOrders(position.symbol, position.orderId);
 
     const closeSide = position.side === 'BUY' ? 'SELL' : 'BUY';
-    await this.orderGateway.sendStopLoss(
+    const slId = await this.orderGateway.sendStopLoss(
       position.symbol,
       closeSide,
       position.remainingQuantity,
       stopPrice
     );
+
+    if (!slId) {
+      console.error(`❌ Failed to place Stop Loss for ${position.symbol} @ $${stopPrice.toFixed(2)} — protective order NOT active`);
+      throw new Error(`Stop Loss placement failed for ${position.symbol}`);
+    }
   }
 
   public removePosition(orderId: string): void {

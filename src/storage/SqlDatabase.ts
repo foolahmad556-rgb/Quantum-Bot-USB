@@ -12,6 +12,9 @@ interface StoredTrade {
   side: string;
   price: number;
   quantity: number;
+  pnl?: number;
+  exitPrice?: number;
+  fee?: number;
   timestamp: number;
   status: string;
 }
@@ -99,10 +102,17 @@ export class SqlDatabaseStore {
 
   public getPerformanceMetrics() {
     const trades = Object.values(this.data.trades);
-    const filledTrades = trades.filter(t => t.status === 'FILLED');
+    const closedTrades = trades.filter(t => t.status === 'CLOSED' || t.status === 'FILLED');
+    const totalTrades = closedTrades.length;
+    const winningTrades = closedTrades.filter(t => (t.pnl || 0) > 0).length;
+    const totalPnl = closedTrades.reduce((sum, t) => sum + (t.pnl || 0), 0);
+
     return {
       totalTrades: trades.length,
-      winRate: trades.length > 0 ? (filledTrades.length / trades.length) * 100 : 0
+      closedTrades,
+      winningTrades,
+      winRate: totalTrades > 0 ? (winningTrades / totalTrades) * 100 : 0,
+      totalPnl
     };
   }
 

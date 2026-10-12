@@ -27,6 +27,7 @@ export class UserDataStream {
   
   private onEvent?: EventCallback;
   private isRunning: boolean = false;
+  private lastSequence: number | null = null;
   private balanceListeners: Set<(b: AccountBalance) => void> = new Set();
   private fillListeners: Set<(f: Fill) => void> = new Set();
   private closedListeners: Set<(s: AssetSymbol) => void> = new Set();
@@ -309,24 +310,34 @@ export class UserDataStream {
 
     this.ws.on('open', () => {
       console.log('✅ UserDataStream: WebSocket Connected.');
+      // Reset stale state on reconnect so we don't double-apply old messages
+      this.lastSequence = null;
     });
 
     this.ws.on('message', (data: any) => {
       try {
         const msg = JSON.parse(data.toString());
+        if (msg.e === 'keepalive' || msg.e === 'NONE') return;
         this.handleMessage(msg);
       } catch (e) {
         console.error('❌ UserDataStream: Error parsing message', e);
       }
     });
 
-    this.ws.on('close', () => {
-      console.log('⚠️ UserDataStream: WebSocket Closed.');
+    this.ws.on('close', (code: number, reason: Buffer) => {
+      console.log(`⚠️ UserDataStream: WebSocket Closed. code=${code} reason=${reason.toString()}`);
       if (this.isRunning) this.scheduleReconnect();
     });
 
     this.ws.on('error', (err) => {
       console.error('❌ UserDataStream: WebSocket Error', err);
+    });
+
+    // Heartbeat: respond to server pings to prevent idle timeout
+    this.ws.on('ping', (payload: Buffer) => {
+      if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+        this.ws.pong(payload);
+      }
     });
   }
 
@@ -454,9 +465,13 @@ export class UserDataStream {
     this.reconnectTimer = setTimeout(async () => {
       this.reconnectTimer = null;
       try {
+        // Re-acquire a fresh listen key and sync account state from REST
+        // so we don't carry stale position/balance data across the reconnect.
         await this.getListenKey();
         this.connectWebSocket();
+        await this.fetchInitialAccountData();
       } catch (e) {
+        console.error('❌ UserDataStream: Reconnect failed, retrying...', e);
         this.scheduleReconnect();
       }
     }, 5000);

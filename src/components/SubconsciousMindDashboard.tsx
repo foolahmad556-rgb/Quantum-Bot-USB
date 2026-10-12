@@ -1657,7 +1657,7 @@ export const SubconsciousMindDashboard: React.FC<SubconsciousMindDashboardProps>
             <div className="p-3 rounded-xl bg-white/[0.02] border border-white/5">
               <span className="font-mono text-[10px] text-slate-400 block">{isAr ? 'معدل شارب' : 'Sharpe Ratio'}</span>
               <span className="font-mono text-sm font-bold text-[var(--lime)]">
-                {(riskMetrics?.sharpeRatio || 2.35).toFixed(2)}
+                {(riskMetrics?.sharpeRatio ? riskMetrics.sharpeRatio : 0).toFixed(2)}
               </span>
             </div>
           </div>

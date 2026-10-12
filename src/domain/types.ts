@@ -185,9 +185,11 @@ export interface QAOAResult {
   optimalBeta: number[];
   expectationValue: number;
   groundStateProbability: number;
+  groundStateBits: number[]; // Bit vector of the lowest-energy basis state
   stateProbabilities: { state: string; probability: number; energy: number; symbols: string[] }[];
   circuitDepth: number;
   qubitCount: number;
+  solveTimeMs: number;
   fidelityScore: number;
 }
 

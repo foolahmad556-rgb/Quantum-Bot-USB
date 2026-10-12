@@ -1519,7 +1519,7 @@ export class TradingPipeline {
     const fills = this.userDataStream.getFills();
     const equityForReturns = this.subWalletManager.getCurrentEquity() > 0
       ? this.subWalletManager.getCurrentEquity()
-      : (balance.totalEquity || this.config.initialCapital || 1000);
+      : (balance.totalEquity || 1000);
     let sharpe: number | null = null;
     if (fills.length >= 5) {
       const returns = fills.map(f => {
