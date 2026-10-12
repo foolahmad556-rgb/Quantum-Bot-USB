@@ -10,11 +10,5 @@ SUPABASE_URL = "https://msktxfryadglugpznfsb.supabase.co"
 #   npx wrangler secret put SUPABASE_ANON_KEY
 #   npx wrangler secret put WEBHOOK_SECRET
 
-[triggers]
-crons = []
-
 [env.production]
 name = "quantum-bot-usb"
-
-[dev]
-url = "http://localhost:8787"
