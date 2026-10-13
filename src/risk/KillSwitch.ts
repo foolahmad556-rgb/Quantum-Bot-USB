@@ -17,8 +17,8 @@ const ORDER: Record<KillSwitchLevel, number> = {
   NORMAL: 0,
   SOFT_HALT: 1,
   CIRCUIT_BREAKER: 2,
-  HARD_HALT: 2,
-  EMERGENCY_LIQUIDATE: 3,
+  HARD_HALT: 3,
+  EMERGENCY_LIQUIDATE: 4,
 };
 
 export class KillSwitch {

@@ -26,6 +26,7 @@ export interface BacktestEngineConfig {
   slippage?: number; // e.g. 0.0001 (1 bp)
   makerFeeBps?: number;
   takerFeeBps?: number;
+  /** @deprecated declared but never applied; slippage is the flat `slippage` value. */
   slippageModel?: 'ZERO' | 'LINEAR_DEPTH' | 'SQUARE_ROOT_IMPACT';
   executionLatencyMs?: number;
   rebalanceFrequency?: 'TICK' | '1M' | '5M' | '1H' | '1D';
@@ -47,8 +48,7 @@ export class BacktestEngine {
       commission: config.commission ?? 0.0004,
       slippage: config.slippage ?? 0.0001,
       makerFeeBps: config.makerFeeBps ?? 1.0,
-      takerFeeBps: config.takerFeeBps ?? 3.5,
-      slippageModel: config.slippageModel || 'SQUARE_ROOT_IMPACT',
+      takerFeeBps: config.takerFeeBps ?? 5.0, // Binance USDS-M regular taker 0.05%
       executionLatencyMs: config.executionLatencyMs ?? 15,
       rebalanceFrequency: config.rebalanceFrequency || '1H',
       solver: config.solver || 'QUANTUM_ANNEALING',
@@ -286,10 +286,12 @@ export class BacktestEngine {
     }
 
     const openPositions: InternalTrade[] = [];
+    // Look-ahead fix: a signal computed from bar T's close is queued and filled at bar T+1's open.
+    const pendingEntries: Array<{ symbol: AssetSymbol; isBuy: boolean; stopLoss: number; takeProfit: number; maxHoldMs?: number; quantityRiskPerUnit: number }> = [];
 
     // Taker & Maker fee multipliers
-    const takerFeeRate = (this.config.takerFeeBps ?? 3.5) / 10000;
-    const baseSlippage = this.config.slippage ?? 0.0001;
+    const takerFeeRate = (this.config.takerFeeBps ?? 5.0) / 10000;
+    const baseSlippage = this.config.slippage ?? 0.0010; // 10 bps altcoin base (ASSUMPTION)
 
     // Solver Quantum Advantage Multiplier
     const isQuantumSolver =
@@ -299,6 +301,47 @@ export class BacktestEngine {
     const confidenceBoost = isQuantumSolver ? 0.05 : 0.0;
 
     for (const timestamp of sortedTimestamps) {
+      // 0. Fill entries queued on the previous bar at THIS bar's open (never the signal bar's close).
+      while (pendingEntries.length > 0) {
+        const order = pendingEntries.shift()!;
+        const candles = historicalData.get(order.symbol);
+        const bar = candles?.find((c) => c.timestamp === timestamp);
+        if (!bar || !(bar.open > 0)) continue;
+        const entrySlippage = order.isBuy ? 1 + baseSlippage : 1 - baseSlippage;
+        const entryPrice = bar.open * entrySlippage;
+        const quantity = Number(order.quantityRiskPerUnit > 0 ? order.quantityRiskPerUnit : 0);
+        if (!(quantity > 0)) continue;
+        const notional = quantity * entryPrice;
+        const entryFee = notional * takerFeeRate;
+        totalFeesPaid += entryFee;
+        cash -= entryFee;
+        const tradeId = `TR-${timestamp}-${order.symbol.replace('/', '')}`;
+        openPositions.push({
+          id: tradeId,
+          symbol: order.symbol,
+          side: order.isBuy ? 'BUY' : 'SELL',
+          entryPrice,
+          entryTime: timestamp,
+          quantity,
+          stopLoss: order.stopLoss,
+          takeProfit: order.takeProfit,
+          maxHoldMs: order.maxHoldMs,
+          status: 'OPEN',
+        });
+        trades.push({
+          fillId: `FILL-ENT-${tradeId}`,
+          orderId: `ORD-ENT-${tradeId}`,
+          symbol: order.symbol,
+          side: order.isBuy ? 'BUY' : 'SELL',
+          price: Number(entryPrice.toFixed(4)),
+          quantity,
+          commission: Number(entryFee.toFixed(2)),
+          commissionAsset: 'USDT',
+          timestamp,
+          isMaker: false,
+        });
+      }
+
       // 1. Process Open Trades (Stop-Loss, Take-Profit, Max Hold Expiration)
       for (let i = openPositions.length - 1; i >= 0; i--) {
         const trade = openPositions[i];
@@ -400,7 +443,7 @@ export class BacktestEngine {
         });
 
         // If strong signal and capital is available, execute
-        const alreadyOpen = openPositions.some((p) => p.symbol === symbol);
+        const alreadyOpen = openPositions.some((p) => p.symbol === symbol) || pendingEntries.some((p) => p.symbol === symbol);
         if (signal && !alreadyOpen && realizedCapital > 500) {
           const riskFraction = 0.015; // 1.5% capital risk per trade
           const stopDistance = Math.abs(currentCandle.close - signal.stopLoss);
@@ -414,40 +457,14 @@ export class BacktestEngine {
           const quantity = Number(Math.min(rawQuantity, maxNotional / currentCandle.close).toFixed(4));
 
           if (quantity > 0) {
-            const isBuy = signal.type === 'BUY';
-            const entrySlippage = isBuy ? 1 + baseSlippage : 1 - baseSlippage;
-            const entryPrice = currentCandle.close * entrySlippage;
-            const notional = quantity * entryPrice;
-            const entryFee = notional * takerFeeRate;
-
-            totalFeesPaid += entryFee;
-            cash -= entryFee;
-
-            const tradeId = `TR-${timestamp}-${symbol.replace('/', '')}`;
-            openPositions.push({
-              id: tradeId,
+            // Queue, do not fill: entry executes at the NEXT bar's open (step 0 above).
+            pendingEntries.push({
               symbol,
-              side: isBuy ? 'BUY' : 'SELL',
-              entryPrice,
-              entryTime: timestamp,
-              quantity,
+              isBuy: signal.type === 'BUY',
               stopLoss: signal.stopLoss,
               takeProfit: signal.takeProfit,
               maxHoldMs: signal.maxHoldMs,
-              status: 'OPEN',
-            });
-
-            trades.push({
-              fillId: `FILL-ENT-${tradeId}`,
-              orderId: `ORD-ENT-${tradeId}`,
-              symbol,
-              side: isBuy ? 'BUY' : 'SELL',
-              price: Number(entryPrice.toFixed(4)),
-              quantity,
-              commission: Number(entryFee.toFixed(2)),
-              commissionAsset: 'USDT',
-              timestamp,
-              isMaker: false,
+              quantityRiskPerUnit: quantity,
             });
           }
         }
@@ -565,9 +582,9 @@ export class BacktestEngine {
       endDate: this.config.endDate || '2024-12-31',
       initialCapital: this.config.initialCapital,
       symbols: this.config.symbols as AssetSymbol[],
+      slippageModel: this.config.slippageModel ?? 'SQUARE_ROOT_IMPACT',
       makerFeeBps: this.config.makerFeeBps ?? 1.0,
-      takerFeeBps: this.config.takerFeeBps ?? 3.5,
-      slippageModel: this.config.slippageModel || 'SQUARE_ROOT_IMPACT',
+      takerFeeBps: this.config.takerFeeBps ?? 5.0,
       executionLatencyMs: this.config.executionLatencyMs ?? 15,
       rebalanceFrequency: this.config.rebalanceFrequency || '1H',
       solver: this.config.solver || 'QUANTUM_ANNEALING',

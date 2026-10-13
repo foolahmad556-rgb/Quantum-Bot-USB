@@ -164,6 +164,9 @@ export interface BoardConfig {
   minBootstrapCi: number;
   maxStressLoss: number;
   adaptiveThresholds: boolean;
+  tradingCostPerSide: number; // fee + slippage per side (verified Binance taker 5 bps futures; slippage ASSUMPTION)
+  liquidationBufferRatio: number;
+  maxLeverage: number; // liquidation proxy leverage (matches activePolicy.dynamicLeverageCap default 3.0) // fraction of 1/leverage that a single-bar adverse move may consume
   minGuardsPassed: number;
   minBasicApproved: number;
   approvalRatioNormal: number;
@@ -182,6 +185,9 @@ export const DEFAULT_BOARD_CONFIG: BoardConfig = {
   minBootstrapCi: 0.0,
   maxStressLoss: 0.20,
   adaptiveThresholds: true,
+  tradingCostPerSide: 0.0020,
+  liquidationBufferRatio: 0.8,
+  maxLeverage: 3.0,
   minGuardsPassed: 5,
   minBasicApproved: 3,
   approvalRatioNormal: 0.60,
@@ -191,6 +197,8 @@ export const DEFAULT_BOARD_CONFIG: BoardConfig = {
 // Base Abstract Expert Agent
 export class ExpertAgent {
   public profile: AgentProfile;
+  // Runtime config for guards; set by subclass constructors that receive BoardConfig.
+  public config!: BoardConfig;
 
   constructor(name: string, arabicName: string, role: string, type: 'alpha' | 'guard', initialConfidence = 0.75) {
     this.profile = {
@@ -395,20 +403,26 @@ export class MarketExpertAgent extends ExpertAgent {
 }
 
 export class RiskControllerAgent extends ExpertAgent {
-  constructor() {
+  private readonly limit: number;
+
+  constructor(limit: number = DEFAULT_BOARD_CONFIG.maxRiskPerTrade) {
     super('RiskController', 'خبير إدارة المخاطر وحماية رأس المال', 'حق النقض الصارم وحساب كسر كيلي والمخاطر التراكمية', 'alpha', 0.95);
+    this.limit = limit;
   }
 
   public vote(proposals: AgentVoteProposal[], capital: number): AgentVoteProposal {
     const totalRisk = proposals.reduce((acc, p) => acc + (p.riskPct || 0), 0) / Math.max(proposals.length, 1);
+    const maxRisk = proposals.reduce((acc, p) => Math.max(acc, p.riskPct || 0), 0);
     const avgConf = proposals.reduce((acc, p) => acc + (p.confidence || 0.5), 0) / Math.max(proposals.length, 1);
+    const limit = this.limit;
 
-    if (totalRisk > DEFAULT_BOARD_CONFIG.maxRiskPerTrade) {
+    // Hard veto on the largest single proposal: an average cannot hide one over-cap sizing request.
+    if (maxRisk > limit) {
       return {
         verdict: 'rejected',
-        riskPct: totalRisk,
+        riskPct: maxRisk,
         confidence: 0,
-        note: `❌ فيتو المخاطر: المخاطرة المقترحة ${(totalRisk * 100).toFixed(1)}% تتجاوز الحد الأقصى ${(DEFAULT_BOARD_CONFIG.maxRiskPerTrade * 100).toFixed(1)}%`
+        note: `❌ فيتو المخاطر: المخاطرة المقترحة ${(maxRisk * 100).toFixed(1)}% تتجاوز الحد الأقصى ${(limit * 100).toFixed(1)}%`
       };
     }
     if (avgConf < 0.52) {
@@ -433,15 +447,26 @@ export class RiskControllerAgent extends ExpertAgent {
 // -------------------------------------------------------------
 
 // Helper math for guards
-function calculatePnLSeries(candles: Array<{ close: number; high?: number; low?: number }>, atrMultiplier = 1.5): number[] {
+// Round-trip cost per bar derived from config (cost per side x 2).
+function pnlRoundTrip(cfg?: BoardConfig): number {
+  return 2 * (cfg?.tradingCostPerSide ?? DEFAULT_BOARD_CONFIG.tradingCostPerSide);
+}
+
+export function calculatePnLSeries(candles: Array<{ close: number; high?: number; low?: number }>, atrMultiplier = 1.5, roundTripCost = pnlRoundTrip()): number[] {
   const pnls: number[] = [];
   if (!candles || candles.length < 20) return [0.01];
   for (let i = 15; i < candles.length - 1; i++) {
     const entry = candles[i].close;
     const next = candles[i + 1].close;
     let pnl = (next - entry) / entry;
-    // apply slippage & commission
-    pnl -= 0.0008;
+    // stop-loss: adverse move capped at atrMultiplier * bar range (ATR proxy); makes the multiplier matter
+    const range = candles[i].high !== undefined && candles[i].low !== undefined
+      ? (candles[i].high! - candles[i].low!) / entry
+      : 0.01;
+    const stop = -atrMultiplier * range;
+    if (pnl < stop) pnl = stop;
+    // apply slippage & commission (round trip from config)
+    pnl -= roundTripCost;
     pnls.push(pnl);
   }
   return pnls.length > 0 ? pnls : [0.005];
@@ -456,8 +481,9 @@ function calculateSharpe(pnls: number[]): number {
 }
 
 export class WalkForwardGuard extends ExpertAgent {
-  constructor() {
-    super('WalkForwardGuard', 'حارس التحليل الأمامي (Walk-Forward)', 'قياس فجوة الأداء بين التدريب والاختبار الزمني المتدحرج', 'guard', 0.90);
+  constructor(config: BoardConfig) {
+    super('WalkForwardGuard', 'حارس التحليل الأمامي (Walk-Forward', 'قياس فجوة الأداء بين التدريب والاختبار الزمني المتدحرج', 'guard', 0.90);
+    this.config = config;
   }
 
   public vote(candles: Array<{ close: number }>): AgentVoteProposal {
@@ -470,27 +496,28 @@ export class WalkForwardGuard extends ExpertAgent {
     for (let split = 1; split <= 3; split++) {
       const trainSet = candles.slice(0, split * splitSize);
       const testSet = candles.slice(split * splitSize, (split + 1) * splitSize);
-      const trainSharpe = calculateSharpe(calculatePnLSeries(trainSet));
-      const testSharpe = calculateSharpe(calculatePnLSeries(testSet));
+      const trainSharpe = calculateSharpe(calculatePnLSeries(trainSet, 1.5, pnlRoundTrip(this.config)));
+      const testSharpe = calculateSharpe(calculatePnLSeries(testSet, 1.5, pnlRoundTrip(this.config)));
       gaps.push(Math.abs(trainSharpe - testSharpe));
     }
     const avgGap = gaps.reduce((a, b) => a + b, 0) / gaps.length;
-    const passed = avgGap <= DEFAULT_BOARD_CONFIG.maxWfGap;
+        const passed = avgGap <= this.config.maxWfGap;
 
-    return {
-      verdict: passed ? 'approved' : 'challenge',
-      confidence: passed ? 0.92 : 0.40,
-      riskPct: passed ? 0.015 : 0.005,
-      note: passed
-        ? `✅ فجوة التحليل الأمامي (${(avgGap * 100).toFixed(1)}%) ضمن الحد المسموح`
-        : `⚠️ فجوة التحليل الأمامي (${(avgGap * 100).toFixed(1)}%) مرتفعة > ${(DEFAULT_BOARD_CONFIG.maxWfGap * 100).toFixed(0)}%`
-    };
-  }
-}
+        return {
+          verdict: passed ? 'approved' : 'rejected',
+          confidence: passed ? 0.92 : 0.40,
+          riskPct: passed ? 0.015 : 0.005,
+          note: passed
+            ? `✅ فجوة التحليل الأمامي (${(avgGap * 100).toFixed(1)}%) ضمن الحد المسموح`
+            : `⚠️ فجوة التحليل الأمامي (${(avgGap * 100).toFixed(1)}%) مرتفعة > ${(this.config.maxWfGap * 100).toFixed(0)}%`
+        };
+      }
+    }
 
 export class OutOfSampleGuard extends ExpertAgent {
-  constructor() {
+  constructor(config: BoardConfig) {
     super('OutOfSampleGuard', 'حارس العينة الخارجية (Out-of-Sample)', 'التحقق من احتفاظ الاستراتيجية بكفاءتها في 30% الأخيرة', 'guard', 0.88);
+    this.config = config;
   }
 
   public vote(candles: Array<{ close: number }>): AgentVoteProposal {
@@ -501,25 +528,27 @@ export class OutOfSampleGuard extends ExpertAgent {
     const inSample = candles.slice(0, splitIdx);
     const outSample = candles.slice(splitIdx);
 
-    const inSharpe = Math.max(0.01, calculateSharpe(calculatePnLSeries(inSample)));
-    const outSharpe = calculateSharpe(calculatePnLSeries(outSample));
-    const ratio = Math.max(0, outSharpe / inSharpe);
-
-    const passed = ratio >= DEFAULT_BOARD_CONFIG.minOosRatio;
-    return {
-      verdict: passed ? 'approved' : 'challenge',
-      confidence: passed ? 0.90 : 0.35,
-      riskPct: passed ? 0.015 : 0.005,
-      note: passed
-        ? `✅ نسبة العينة الخارجية OOS (${(ratio * 100).toFixed(0)}%) قوية ومستقرة`
-        : `⚠️ تراجع الأداء خارج العينة (${(ratio * 100).toFixed(0)}% < ${(DEFAULT_BOARD_CONFIG.minOosRatio * 100).toFixed(0)}%)`
-    };
+    const inSharpe = calculateSharpe(calculatePnLSeries(inSample, 1.5, pnlRoundTrip(this.config)));
+    const outSharpe = calculateSharpe(calculatePnLSeries(outSample, 1.5, pnlRoundTrip(this.config)));
+    // No in-sample edge (Sharpe <= 0) means nothing to validate: fail. Never floor it to approve.
+    const ratio = inSharpe > 0 ? Math.max(0, outSharpe / inSharpe) : 0;
+    const passed = inSharpe > 0 && ratio >= this.config.minOosRatio;
+        const verdict = passed ? 'approved' : 'rejected';
+        return {
+          verdict: verdict,
+          confidence: passed ? 0.90 : 0.35,
+          riskPct: passed ? 0.015 : 0.005,
+          note: passed
+            ? `✅ نسبة العينة الخارجية OOS (${(ratio * 100).toFixed(0)}%) قوية ومستقرة`
+            : `⚠️ تراجع الأداء خارج العينة (${(ratio * 100).toFixed(0)}% < ${(this.config.minOosRatio * 100).toFixed(0)}%)`
+        };
   }
 }
 
 export class CrossAssetGuard extends ExpertAgent {
-  constructor() {
+  constructor(config: BoardConfig) {
     super('CrossAssetGuard', 'حارس تعدد العملات (Cross-Asset)', 'فحص عدم اقتصار الربح على عملة واحدة دون غيرها', 'guard', 0.85);
+    this.config = config;
   }
 
   public vote(candlesMap: Record<string, Array<{ close: number }>>): AgentVoteProposal {
@@ -527,25 +556,26 @@ export class CrossAssetGuard extends ExpertAgent {
     if (symbols.length < 2) {
       return { verdict: 'approved', confidence: 0.7, riskPct: 0.01, note: 'عملة واحدة متاحة في الذاكرة الحية' };
     }
-    const sharpes = symbols.slice(0, 3).map(sym => calculateSharpe(calculatePnLSeries(candlesMap[sym] || [])));
+    const sharpes = symbols.slice(0, 3).map(sym => calculateSharpe(calculatePnLSeries(candlesMap[sym] || [], 1.5, pnlRoundTrip(this.config))));
     const mean = sharpes.reduce((a, b) => a + b, 0) / sharpes.length;
     const std = Math.sqrt(sharpes.reduce((a, b) => a + Math.pow(b - mean, 2), 0) / Math.max(sharpes.length - 1, 1));
 
-    const passed = std <= DEFAULT_BOARD_CONFIG.maxCrossAssetStd;
+    const passed = std <= this.config.maxCrossAssetStd;
     return {
       verdict: passed ? 'approved' : 'challenge',
       confidence: passed ? 0.85 : 0.40,
       riskPct: passed ? 0.015 : 0.005,
       note: passed
         ? `✅ استقرار أداء الاستراتيجية بين العملات (تشتت: ${std.toFixed(2)})`
-        : `⚠️ تشتت مرتفع للأداء بين العملات (${std.toFixed(2)} > ${DEFAULT_BOARD_CONFIG.maxCrossAssetStd})`
+        : `⚠️ تشتت مرتفع للأداء بين العملات (${std.toFixed(2)} > ${this.config.maxCrossAssetStd})`
     };
   }
 }
 
 export class MultiTimeframeGuard extends ExpertAgent {
-  constructor() {
+  constructor(config: BoardConfig = DEFAULT_BOARD_CONFIG) {
     super('MultiTimeframeGuard', 'حارس تعدد الأطر الزمنية (Multi-Timeframe)', 'التحقق من ربحية المنظومة على إطارات (15m, 1h, 4h)', 'guard', 0.84);
+    this.config = config;
   }
 
   public vote(candles: Array<{ close: number }>): AgentVoteProposal {
@@ -558,11 +588,11 @@ export class MultiTimeframeGuard extends ExpertAgent {
     const tf3 = candles.filter((_, i) => i % 4 === 0);
 
     let passes = 0;
-    if (calculateSharpe(calculatePnLSeries(tf1)) > 0.1) passes++;
-    if (calculateSharpe(calculatePnLSeries(tf2)) > 0.1) passes++;
-    if (calculateSharpe(calculatePnLSeries(tf3)) > 0.1) passes++;
+    if (calculateSharpe(calculatePnLSeries(tf1, 1.5, pnlRoundTrip(this.config))) > 0.1) passes++;
+    if (calculateSharpe(calculatePnLSeries(tf2, 1.5, pnlRoundTrip(this.config))) > 0.1) passes++;
+    if (calculateSharpe(calculatePnLSeries(tf3, 1.5, pnlRoundTrip(this.config))) > 0.1) passes++;
 
-    const passed = passes >= DEFAULT_BOARD_CONFIG.minTimeframePass;
+    const passed = passes >= this.config.minTimeframePass;
     return {
       verdict: passed ? 'approved' : 'challenge',
       confidence: passed ? 0.85 : 0.35,
@@ -575,32 +605,35 @@ export class MultiTimeframeGuard extends ExpertAgent {
 }
 
 export class SensitivityGuard extends ExpertAgent {
-  constructor() {
+  private readonly guardConfig: BoardConfig;
+
+  constructor(config: BoardConfig = DEFAULT_BOARD_CONFIG) {
     super('SensitivityGuard', 'حارس حساسية المعاملات (Parameter Sensitivity)', 'اختبار ثبات النتائج عند تغيير المعاملات بنسبة ±30%', 'guard', 0.90);
+    this.guardConfig = config;
   }
 
   public vote(candles: Array<{ close: number }>): AgentVoteProposal {
     if (!candles || candles.length < 30) {
       return { verdict: 'approved', confidence: 0.7, riskPct: 0.01, note: 'بيانات غير كافية لاختبار الحساسية' };
     }
-    const baseSharpe = calculateSharpe(calculatePnLSeries(candles, 1.5));
+    const baseSharpe = calculateSharpe(calculatePnLSeries(candles, 1.5, pnlRoundTrip(this.config)));
     const variations = [0.7, 0.85, 1.15, 1.3];
     let maxDrop = 0;
 
     for (const v of variations) {
-      const testSharpe = calculateSharpe(calculatePnLSeries(candles, 1.5 * v));
+      const testSharpe = calculateSharpe(calculatePnLSeries(candles, 1.5 * v, pnlRoundTrip(this.config)));
       const drop = Math.abs((baseSharpe - testSharpe) / (Math.abs(baseSharpe) + 1e-6));
       maxDrop = Math.max(maxDrop, drop);
     }
 
-    const passed = maxDrop <= DEFAULT_BOARD_CONFIG.maxParamSensitivity;
+    const passed = maxDrop <= this.guardConfig.maxParamSensitivity;
     return {
       verdict: passed ? 'approved' : 'challenge',
       confidence: passed ? 0.90 : 0.35,
       riskPct: passed ? 0.015 : 0.005,
       note: passed
         ? `✅ استقرار المعاملات عند الاضطراب (تغير: ${(maxDrop * 100).toFixed(0)}%)`
-        : `⚠️ حساسية مفرطة لتغير المعاملات (${(maxDrop * 100).toFixed(0)}% > ${(DEFAULT_BOARD_CONFIG.maxParamSensitivity * 100).toFixed(0)}%)`
+        : `⚠️ حساسية مفرطة لتغير المعاملات (${(maxDrop * 100).toFixed(0)}% > ${(this.guardConfig.maxParamSensitivity * 100).toFixed(0)}%)`
     };
   }
 }
@@ -608,13 +641,14 @@ export class SensitivityGuard extends ExpertAgent {
 export class BootstrapGuard extends ExpertAgent {
   private readonly seed?: number;
 
-  constructor(seed?: number) {
+  constructor(seed?: number, config: BoardConfig = DEFAULT_BOARD_CONFIG) {
     super('BootstrapGuard', 'حارس فواصل الثقة (Bootstrap CI 95%)', '1,000 محاكاة عشوائية بدون نماذج لضمان إيجابية الربح المتوقع', 'guard', 0.92);
     this.seed = seed;
+    this.config = config;
   }
 
   public vote(candles: Array<{ close: number }>): AgentVoteProposal {
-    const pnls = calculatePnLSeries(candles);
+    const pnls = calculatePnLSeries(candles, 1.5, pnlRoundTrip(this.config));
     if (pnls.length < 10) {
       return { verdict: 'approved', confidence: 0.7, riskPct: 0.01, note: 'عينة محدودة للمحاكاة العشوائية' };
     }
@@ -633,7 +667,7 @@ export class BootstrapGuard extends ExpertAgent {
     means.sort((a, b) => a - b);
     // 2.5 percentile = 95% Confidence Interval Lower Bound
     const ciLower = means[Math.floor(iterations * 0.025)];
-    const passed = ciLower >= DEFAULT_BOARD_CONFIG.minBootstrapCi;
+    const passed = ciLower >= this.config.minBootstrapCi;
 
     return {
       verdict: passed ? 'approved' : 'challenge',
@@ -647,31 +681,40 @@ export class BootstrapGuard extends ExpertAgent {
 }
 
 export class StressTestGuard extends ExpertAgent {
-  constructor() {
-    super('StressTestGuard', 'حارس الاختبار الصادم (Stress Test Worst 20%)', 'قياس أسوأ 20% هبوط تاريخي لحماية رصيد المحفظة', 'guard', 0.94);
+  constructor(config: BoardConfig = DEFAULT_BOARD_CONFIG) {
+    super('StressTestGuard', 'حارس الاختبار الصادم (Stress Test Compounded Drawdown)', 'قياس أقصى تراجع مركّب على منحنى الرصيد وفحص التصفية عند الرافعة القصوى', 'guard', 0.94);
+    this.config = config;
   }
 
   public vote(candles: Array<{ close: number }>, capital: number): AgentVoteProposal {
-    const pnls = calculatePnLSeries(candles);
+    const pnls = calculatePnLSeries(candles, 1.5, pnlRoundTrip(this.config));
     if (pnls.length < 10) {
       return { verdict: 'approved', confidence: 0.7, riskPct: 0.01, note: 'بيانات غير كافية للاختبار الصادم' };
     }
-    const sorted = [...pnls].sort((a, b) => a - b);
-    const worstCount = Math.max(1, Math.floor(sorted.length * 0.20));
-    const worst20 = sorted.slice(0, worstCount);
-    const worstAvg = worst20.reduce((a, b) => a + b, 0) / worstCount;
-    const worstDollarLoss = Math.abs(worstAvg * capital);
-
-    const maxAllowedDollar = capital * DEFAULT_BOARD_CONFIG.maxStressLoss;
-    const passed = worstDollarLoss <= maxAllowedDollar;
+    // Compounded equity curve: max peak-to-trough drawdown (not a per-bar average, which cancels capital).
+    let equity = 1, peak = 1, maxDd = 0;
+    for (const p of pnls) {
+      equity *= (1 + p);
+      peak = Math.max(peak, equity);
+      maxDd = Math.max(maxDd, (peak - equity) / peak);
+    }
+    // Liquidation proxy: a single-bar adverse move consuming ~1/leverage of margin.
+    const worstBar = Math.max(0, -Math.min(...pnls));
+    const liqThreshold = this.config.liquidationBufferRatio / this.config.maxLeverage;
+    const liquidated = worstBar >= liqThreshold;
+    const ddDollar = maxDd * capital;
+    const maxAllowedDollar = capital * this.config.maxStressLoss;
+    const passed = !liquidated && maxDd <= this.config.maxStressLoss;
 
     return {
       verdict: passed ? 'approved' : 'challenge',
       confidence: passed ? 0.92 : 0.25,
       riskPct: passed ? 0.015 : 0.003,
       note: passed
-        ? `✅ خسارة أسوأ 20% صدمات ($${worstDollarLoss.toFixed(2)}) ضمن سقف الأمان ($${maxAllowedDollar.toFixed(2)})`
-        : `⚠️ خسارة أسوأ 20% صدمات ($${worstDollarLoss.toFixed(2)}) تتجاوز الحد الأقصى ($${maxAllowedDollar.toFixed(2)})`
+        ? `✅ أقصى تراجع مركّب ($${ddDollar.toFixed(2)}) ضمن سقف الأمان ($${maxAllowedDollar.toFixed(2)})`
+        : liquidated
+          ? `⚠️ حركة عكسية لحظية ${(worstBar * 100).toFixed(1)}% تبلغ عتبة التصفية ${(liqThreshold * 100).toFixed(1)}%`
+          : `⚠️ أقصى تراجع مركّب ($${ddDollar.toFixed(2)}) يتجاوز الحد الأقصى ($${maxAllowedDollar.toFixed(2)})`
     };
   }
 }
@@ -745,13 +788,13 @@ export class BoardOfDirectorsEngine {
       risk: new RiskControllerAgent(),
 
       // 8 Anti-Overfitting Guards
-      wf: new WalkForwardGuard(),
-      oos: new OutOfSampleGuard(),
-      cross: new CrossAssetGuard(),
-      tf: new MultiTimeframeGuard(),
-      sens: new SensitivityGuard(),
-      boot: new BootstrapGuard(),
-      stress: new StressTestGuard(),
+      wf: new WalkForwardGuard(this.config),
+      oos: new OutOfSampleGuard(this.config),
+      cross: new CrossAssetGuard(this.config),
+      tf: new MultiTimeframeGuard(this.config),
+      sens: new SensitivityGuard(this.config),
+      boot: new BootstrapGuard(undefined, this.config),
+      stress: new StressTestGuard(this.config),
       regime: new RegimeShiftGuard()
     };
 

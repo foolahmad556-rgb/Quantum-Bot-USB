@@ -72,6 +72,7 @@ export interface TradeLearningEvent {
   isWin: boolean;
   reason?: string;
   shifts: Record<string, { deltaConf: number; deltaAcc: number; newConf: number; newAcc: number }>;
+  source?: 'LIVE' | 'SIMULATION';
 }
 
 export interface BoardStatusReport {
@@ -85,8 +86,86 @@ export interface BoardStatusReport {
   recentLearningEvents?: TradeLearningEvent[];
 }
 
-// Institutional default agent templates
-const INITIAL_AGENTS: AgentProfileReport[] = [
+export type AgentVote = 'approved' | 'challenge' | 'rejected';
+
+// Mirrors BoardOfDirectorsEngine DEFAULT_BOARD_CONFIG.learningRate and its clamps
+// (learn(): +learningRate on correct, -2*learningRate on wrong, floor 0.30, ceiling 0.98).
+export const LEARNING_RATE = 0.05;
+export const CONFIDENCE_MIN = 0.30;
+export const CONFIDENCE_MAX = 0.98;
+
+// Confidence only moves once an agent has this many decisions (the decision being recorded counts).
+export const MIN_DECISIONS_FOR_CONFIDENCE_UPDATE = 10;
+
+// |pnl| magnitude scaling: scale = clamp(|pnl| / PNL_REFERENCE, PNL_SCALE_MIN, PNL_SCALE_MAX).
+// Bounded so one trade moves confidence by at most LEARNING_RATE * 2 * PNL_SCALE_MAX (0.20),
+// which cannot drive an agent from the ceiling to the floor in a single trade.
+export const PNL_REFERENCE = 0.05;
+export const PNL_SCALE_MIN = 0.5;
+export const PNL_SCALE_MAX = 2.0;
+
+export function computePnlMagnitudeScale(pnl: number): number {
+  if (Number.isNaN(pnl)) return PNL_SCALE_MIN;
+  const raw = Math.abs(pnl) / PNL_REFERENCE;
+  return Math.min(Math.max(raw, PNL_SCALE_MIN), PNL_SCALE_MAX);
+}
+
+/** Per-agent credit: winning trade credits 'approved'; losing trade credits 'challenge' or 'rejected'.
+ *  No recorded vote falls back to isWin (engine behaviour). */
+export function agentVoteWasCorrect(vote: AgentVote | undefined, isWin: boolean): boolean {
+  if (vote === undefined) return isWin;
+  return isWin ? vote === 'approved' : vote !== 'approved';
+}
+
+/** Pure per-agent learning step. Counts the decision always; moves confidence only past the sample gate. */
+export function applyAgentLearning(
+  agent: Pick<AgentProfileReport, 'confidence' | 'accuracy' | 'totalDecisions' | 'correctDecisions' | 'learningCurve'>,
+  opts: { agentWasCorrect: boolean; magnitudeScale: number }
+): {
+  confidence: number;
+  accuracy: number;
+  totalDecisions: number;
+  correctDecisions: number;
+  weight: number;
+  learningCurve: number[];
+  deltaConf: number;
+  deltaAcc: number;
+} {
+  const prevConf = agent.confidence;
+  const prevAcc = agent.accuracy;
+
+  const newTotal = agent.totalDecisions + 1;
+  const newCorrect = agent.correctDecisions + (opts.agentWasCorrect ? 1 : 0);
+  const newAcc = Number((newCorrect / Math.max(newTotal, 1)).toFixed(4));
+
+  let newConf = prevConf;
+  if (newTotal >= MIN_DECISIONS_FOR_CONFIDENCE_UPDATE) {
+    const baseDelta = opts.agentWasCorrect ? LEARNING_RATE : -LEARNING_RATE * 2;
+    const scaled = baseDelta * opts.magnitudeScale;
+    newConf = opts.agentWasCorrect
+      ? Math.min(Number((prevConf + scaled).toFixed(4)), CONFIDENCE_MAX)
+      : Math.max(Number((prevConf + scaled).toFixed(4)), CONFIDENCE_MIN);
+  }
+
+  const newWeight = Number((newConf * (0.5 + newAcc * 0.5)).toFixed(4));
+  const curve = [...(agent.learningCurve || [])];
+  curve.push(newAcc);
+  if (curve.length > 25) curve.shift();
+
+  return {
+    confidence: newConf,
+    accuracy: newAcc,
+    totalDecisions: newTotal,
+    correctDecisions: newCorrect,
+    weight: newWeight,
+    learningCurve: curve,
+    deltaConf: Number((newConf - prevConf).toFixed(4)),
+    deltaAcc: Number((newAcc - prevAcc).toFixed(4)),
+  };
+}
+
+// Institutional default agent templates (display fixtures; see INITIAL_AGENTS below)
+const SEED_FIXTURES: AgentProfileReport[] = [
   // 6 Decision Makers
   { id: 'algo', name: 'AlgoEngineer', arabicName: 'خبير الخوارزميات والهندسة', role: 'فحص سلامة التنفيذ والتعقيد الحسابي', type: 'alpha', confidence: 0.85, accuracy: 0.65, totalDecisions: 24, correctDecisions: 16, weight: 0.70, learningCurve: [0.55, 0.58, 0.62, 0.60, 0.65] },
   { id: 'trading', name: 'TradingEngineer', arabicName: 'خبير الصفقات وتطابق الإشارات', role: 'التحقق من تناغم إشارات الدخول والوقف', type: 'alpha', confidence: 0.82, accuracy: 0.62, totalDecisions: 24, correctDecisions: 15, weight: 0.66, learningCurve: [0.50, 0.54, 0.58, 0.61, 0.62] },
@@ -105,6 +184,19 @@ const INITIAL_AGENTS: AgentProfileReport[] = [
   { id: 'stress', name: 'StressTestGuard', arabicName: 'حارس الاختبار الصادم', role: 'قياس أسوأ 20% هبوط تاريخي لحماية الرصيد', type: 'guard', confidence: 0.94, accuracy: 0.82, totalDecisions: 24, correctDecisions: 20, weight: 0.85, learningCurve: [0.72, 0.75, 0.78, 0.80, 0.82] },
   { id: 'regime', name: 'RegimeShiftGuard', arabicName: 'حارس تغير أنماط السوق', role: 'فحص استمرارية الأداء في جميع الأنماط', type: 'guard', confidence: 0.86, accuracy: 0.68, totalDecisions: 24, correctDecisions: 16, weight: 0.72, learningCurve: [0.60, 0.62, 0.64, 0.66, 0.68] },
 ];
+
+// Neutral starting state. SEED_FIXTURES are display fixtures only: they are used as live weights
+// when no server snapshot is present (the server effect only overwrites when 14 agents arrive),
+// so track counts and accuracy start at zero/neutral here.
+const SEED_NEUTRAL_ACCURACY = 0.5;
+const INITIAL_AGENTS: AgentProfileReport[] = SEED_FIXTURES.map(a => ({
+  ...a,
+  totalDecisions: 0,
+  correctDecisions: 0,
+  accuracy: SEED_NEUTRAL_ACCURACY,
+  weight: Number((a.confidence * (0.5 + SEED_NEUTRAL_ACCURACY * 0.5)).toFixed(4)),
+  learningCurve: [SEED_NEUTRAL_ACCURACY],
+}));
 
 export function useBoardLearningSync(initialBoardData?: BoardStatusReport | null) {
   const [agents, setAgents] = useState<AgentProfileReport[]>(() => {
@@ -139,6 +231,11 @@ export function useBoardLearningSync(initialBoardData?: BoardStatusReport | null
 
   const [isSyncing, setIsSyncing] = useState<boolean>(false);
   const syncTimeoutRef = useRef<any>(null);
+  // Latest-value refs so learnFromOutcome (stable useCallback) reads current agents and votes synchronously.
+  const agentsRef = useRef<AgentProfileReport[]>(agents);
+  const latestDecisionRef = useRef<BoardDecision | null>(latestDecision);
+  useEffect(() => { agentsRef.current = agents; }, [agents]);
+  useEffect(() => { latestDecisionRef.current = latestDecision; }, [latestDecision]);
 
   // Sync with incoming server status report if it provides fresher data
   useEffect(() => {
@@ -173,87 +270,65 @@ export function useBoardLearningSync(initialBoardData?: BoardStatusReport | null
   }, [initialBoardData]);
 
   /**
-   * 🧠 Core `learn_from_outcome` logic implemented directly within React app state
-   * Updates all 14 agents' confidence & accuracy, computes shifts, and syncs with backend.
+   * 🧠 Core `learn_from_outcome` logic, mirroring BoardOfDirectorsEngine.learnFromOutcome.
+   * source 'LIVE' (default): updates all 14 agents, counts decisions, syncs with server.
+   * source 'SIMULATION': returns shifts for telemetry only; no agent state, log, or server writes.
+   * Each agent is credited by its own vote from the latest decision for this symbol;
+   * with no recorded vote, credit falls back to isWin (engine behaviour).
    */
-  const learnFromOutcome = useCallback((pnl: number, symbol = 'BTC/USDT', reason?: string) => {
+  const learnFromOutcome = useCallback((pnl: number, symbol = 'BTC/USDT', reason?: string, source: 'LIVE' | 'SIMULATION' = 'LIVE') => {
     const isWin = pnl > 0;
     const now = Date.now();
-    const learningRate = 0.05;
+    const magnitudeScale = computePnlMagnitudeScale(pnl);
+    const lastDecision = latestDecisionRef.current;
+    const votes = lastDecision && lastDecision.symbol === symbol ? lastDecision.votes : undefined;
 
     const newShifts: Record<string, AgentConfidenceShift> = {};
     const shiftsRecord: Record<string, { deltaConf: number; deltaAcc: number; newConf: number; newAcc: number }> = {};
 
-    setAgents(prevAgents => {
-      return prevAgents.map(agent => {
-        const prevConf = agent.confidence;
-        const prevAcc = agent.accuracy;
+    const nextAgents = agentsRef.current.map(agent => {
+      const agentWasCorrect = agentVoteWasCorrect(votes?.[agent.id] as AgentVote | undefined, isWin);
+      const r = applyAgentLearning(agent, { agentWasCorrect, magnitudeScale });
 
-        // 1. Calculate new confidence
-        let newConf = prevConf;
-        if (isWin) {
-          newConf = Math.min(Number((prevConf + learningRate).toFixed(4)), 0.98);
-        } else {
-          newConf = Math.max(Number((prevConf - learningRate * 2).toFixed(4)), 0.30);
-        }
+      newShifts[agent.id] = {
+        agentId: agent.id,
+        deltaConf: r.deltaConf,
+        deltaAcc: r.deltaAcc,
+        direction: agentWasCorrect ? 'up' : 'down',
+        timestamp: now
+      };
+      shiftsRecord[agent.id] = { deltaConf: r.deltaConf, deltaAcc: r.deltaAcc, newConf: r.confidence, newAcc: r.accuracy };
 
-        // 2. Calculate new accuracy
-        const newTotal = agent.totalDecisions + 1;
-        const newCorrect = agent.correctDecisions + (isWin ? 1 : 0);
-        const newAcc = Number((newCorrect / Math.max(newTotal, 1)).toFixed(4));
-
-        // 3. New vote weight
-        const newWeight = Number((newConf * (0.5 + newAcc * 0.5)).toFixed(4));
-
-        // 4. Update performance curve
-        const curve = [...(agent.learningCurve || [])];
-        curve.push(newAcc);
-        if (curve.length > 25) curve.shift();
-
-        // 5. Compute deltas for visual shifts
-        const deltaConf = Number((newConf - prevConf).toFixed(4));
-        const deltaAcc = Number((newAcc - prevAcc).toFixed(4));
-
-        newShifts[agent.id] = {
-          agentId: agent.id,
-          deltaConf,
-          deltaAcc,
-          direction: isWin ? 'up' : 'down',
-          timestamp: now
-        };
-
-        shiftsRecord[agent.id] = {
-          deltaConf,
-          deltaAcc,
-          newConf,
-          newAcc
-        };
-
-        return {
-          ...agent,
-          confidence: newConf,
-          accuracy: newAcc,
-          totalDecisions: newTotal,
-          correctDecisions: newCorrect,
-          weight: newWeight,
-          learningCurve: curve
-        };
-      });
+      return {
+        ...agent,
+        confidence: r.confidence,
+        accuracy: r.accuracy,
+        totalDecisions: r.totalDecisions,
+        correctDecisions: r.correctDecisions,
+        weight: r.weight,
+        learningCurve: r.learningCurve
+      };
     });
 
-    setRecentShifts(newShifts);
-    setLastTradeResult({ pnl, symbol, isWin, timestamp: now });
-
     const newEvent: TradeLearningEvent = {
-      id: `learn-${now}-${secureUUID().slice(0, 8)}`,
+      id: `${source === 'LIVE' ? 'learn' : 'sim-learn'}-${now}-${secureUUID().slice(0, 8)}`,
       timestamp: new Date().toISOString(),
       pnl,
       symbol,
       isWin,
       reason,
-      shifts: shiftsRecord
+      shifts: shiftsRecord,
+      source
     };
 
+    if (source === 'SIMULATION') {
+      return newEvent;
+    }
+
+    agentsRef.current = nextAgents;
+    setAgents(nextAgents);
+    setRecentShifts(newShifts);
+    setLastTradeResult({ pnl, symbol, isWin, timestamp: now });
     setLearningLog(prev => [newEvent, ...prev.slice(0, 19)]);
 
     // Clear visual shift badge pulses after 4.5 seconds
