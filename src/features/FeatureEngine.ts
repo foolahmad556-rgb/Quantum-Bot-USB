@@ -31,7 +31,7 @@ export interface CalculatedFeatures {
 
 export class FeatureEngine {
   private priceWindows: Map<AssetSymbol, number[]> = new Map();
-  private maxWindowSize: number = 200;
+  private maxWindowSize: number = 500;
   private regimeDetector: RegimeDetector = new RegimeDetector();
 
   public updateRegime(candles: Candle[]): void {

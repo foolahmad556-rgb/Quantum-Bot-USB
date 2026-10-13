@@ -161,6 +161,12 @@ export class ExchangeMarketData extends EventEmitter {
   private lastUpdateTimes: Map<AssetSymbol, number> = new Map();
   private hawkesIntensity: Map<AssetSymbol, number> = new Map();
   private candleHistory: Map<AssetSymbol, Candle[]> = new Map();
+  
+  // Multi-exchange price aggregation
+  private exchangePrices: Map<string, Map<AssetSymbol, number>> = new Map(); // exchange -> symbol -> price
+  private exchangeBids: Map<string, Map<AssetSymbol, number>> = new Map();
+  private exchangeAsks: Map<string, Map<AssetSymbol, number>> = new Map();
+  
   private orderBookBuilder: OrderBookBuilder;
   private tickListeners: Set<(tick: Tick) => void> = new Set();
   
@@ -258,7 +264,7 @@ export class ExchangeMarketData extends EventEmitter {
     await Promise.all(primarySymbols.map(async (sym) => {
       const binanceSym = sym.replace('/', '').toUpperCase();
       try {
-        const res = await fetch(`${baseUrl}/fapi/v1/klines?symbol=${binanceSym}&interval=1m&limit=100`);
+        const res = await fetch(`${baseUrl}/fapi/v1/klines?symbol=${binanceSym}&interval=1m&limit=500`);
         if (!res.ok) {
           console.warn(`⚠️ ExchangeMarketData: Could not fetch candles for ${sym}: HTTP ${res.status}`);
           return;
@@ -498,7 +504,7 @@ export class ExchangeMarketData extends EventEmitter {
       lastCandle.vwap = lastCandle.volume > 0 ? (lastCandle.vwap + price) / 2 : price;
     } else {
       candlesArr.push({ timestamp: now, open: price, high: price, low: price, close: price, volume, vwap: price });
-      if (candlesArr.length > 120) candlesArr.shift();
+      if (candlesArr.length > 500) candlesArr.shift();
     }
   }
 
@@ -622,7 +628,7 @@ export class ExchangeMarketData extends EventEmitter {
     }
 
     // 2. Candlestick Kline Update
-    if (stream.includes('@kline') && data.k) {
+if (stream.includes('@kline') && data.k) {
       const candle: Candle = {
         timestamp: data.k.t,
         open: parseFloat(data.k.o),
@@ -630,8 +636,8 @@ export class ExchangeMarketData extends EventEmitter {
         low: parseFloat(data.k.l),
         close: parseFloat(data.k.c),
         volume: parseFloat(data.k.v),
-        vwap: parseFloat(data.k.V) > 0 && parseFloat(data.k.v) > 0 
-          ? parseFloat(data.k.V) / parseFloat(data.k.v) 
+        vwap: parseFloat(data.k.V) > 0 && parseFloat(data.k.v) > 0
+          ? parseFloat(data.k.V) / parseFloat(data.k.v)
           : parseFloat(data.k.c)
       };
 
@@ -645,7 +651,7 @@ export class ExchangeMarketData extends EventEmitter {
         candlesArr[candlesArr.length - 1] = candle;
       } else {
         candlesArr.push(candle);
-        if (candlesArr.length > 120) candlesArr.shift();
+        if (candlesArr.length > 500) candlesArr.shift();
       }
 
       this.currentPrices.set(symbol, candle.close);
@@ -712,4 +718,166 @@ export class ExchangeMarketData extends EventEmitter {
     }, 5000);
   }
 
+// --- Multi-Exchange Price Aggregation ---
+  public async fetchBybitPrices(symbols: AssetSymbol[] = this.activeCryptoSymbols): Promise<void> {
+    try {
+      // Bybit v5 tickers
+      const response = await fetch('https://api.bybit.com/v5/market/tickers?category=linear');
+      if (!response.ok) return;
+      const data = await response.json();
+      if (data.retCode !== 0 || !data.result || !data.result.list) return;
+      
+      const bybitPrices = new Map<AssetSymbol, number>();
+      const bybitBids = new Map<AssetSymbol, number>();
+      const bybitAsks = new Map<AssetSymbol, number>();
+      
+      for (const item of data.result.list) {
+        const bybitSymbol = item.symbol; // e.g., BTCUSDT
+        const sysSymbol = bybitSymbol.endsWith('USDT') ? 
+          bybitSymbol.slice(0, -4) + '/USDT' as AssetSymbol : 
+          bybitSymbol as AssetSymbol;
+        if (symbols.includes(sysSymbol)) {
+          const lastPrice = parseFloat(item.lastPrice);
+          const bid = parseFloat(item.bid1Price);
+          const ask = parseFloat(item.ask1Price);
+          if (!isNaN(lastPrice)) {
+            bybitPrices.set(sysSymbol, lastPrice);
+          }
+          if (!isNaN(bid)) bybitBids.set(sysSymbol, bid);
+          if (!isNaN(ask)) bybitAsks.set(sysSymbol, ask);
+        }
+      }
+      this.exchangePrices.set('bybit', bybitPrices);
+      this.exchangeBids.set('bybit', bybitBids);
+      this.exchangeAsks.set('bybit', bybitAsks);
+    } catch (error) {
+      // Silently ignore
+    }
+  }
+
+  public async fetchOkxPrices(symbols: AssetSymbol[] = this.activeCryptoSymbols): Promise<void> {
+    try {
+      const response = await fetch('https://www.okx.com/api/v5/market/tickers?instType=SWAP');
+      if (!response.ok) return;
+      const data = await response.json();
+      if (data.code !== '0' || !data.data) return;
+      
+      const okxPrices = new Map<AssetSymbol, number>();
+      const okxBids = new Map<AssetSymbol, number>();
+      const okxAsks = new Map<AssetSymbol, number>();
+      
+      for (const item of data.data) {
+        const okxSymbol = item.instId; // e.g., BTC-USDT-SWAP
+        if (okxSymbol.endsWith('-SWAP') && okxSymbol.includes('USDT')) {
+          const base = okxSymbol.split('-')[0];
+          const sysSymbol = base + '/USDT' as AssetSymbol;
+          if (symbols.includes(sysSymbol)) {
+            const lastPrice = parseFloat(item.last);
+            const bid = parseFloat(item.bidPx);
+            const ask = parseFloat(item.askPx);
+            if (!isNaN(lastPrice)) {
+              okxPrices.set(sysSymbol, lastPrice);
+            }
+            if (!isNaN(bid)) okxBids.set(sysSymbol, bid);
+            if (!isNaN(ask)) okxAsks.set(sysSymbol, ask);
+          }
+        }
+      }
+      this.exchangePrices.set('okx', okxPrices);
+      this.exchangeBids.set('okx', okxBids);
+      this.exchangeAsks.set('okx', okxAsks);
+    } catch (error) {
+      // Silently ignore
+    }
+  }
+
+  public async fetchAllExchangePrices(symbols: AssetSymbol[] = this.activeCryptoSymbols): Promise<void> {
+    await Promise.allSettled([
+      this.fetchLiveRestPrices(),
+      this.fetchBybitPrices(symbols),
+      this.fetchOkxPrices(symbols),
+    ]);
+  }
+
+  public getConsolidatedPrice(symbol: AssetSymbol): number {
+    // Start with Binance price as primary
+    let totalWeight = 0;
+    let weightedSum = 0;
+    
+    // Collect prices from all exchanges
+    const exchanges = ['binance', 'bybit', 'okx'];
+    for (const ex of exchanges) {
+      let price: number | undefined;
+      if (ex === 'binance') {
+        price = this.currentPrices.get(symbol);
+      } else {
+        const exPrices = this.exchangePrices.get(ex);
+        price = exPrices?.get(symbol);
+      }
+      if (price && price > 0) {
+        // Compute weight - use inverse of spread if available, else equal weight
+        let weight = 1.0;
+        const bid = this.exchangeBids.get(ex)?.get(symbol);
+        const ask = this.exchangeAsks.get(ex)?.get(symbol);
+        if (bid && ask && ask > bid) {
+          const spread = (ask - bid) / price;
+          if (spread > 0) {
+            weight = 1 / spread;
+          }
+        }
+        weightedSum += price * weight;
+        totalWeight += weight;
+      }
+    }
+    
+    if (totalWeight === 0) {
+      // Fallback to Binance/local price
+      return this.getPrice(symbol);
+    }
+    
+    return weightedSum / totalWeight;
+  }
+
+  public getExchangeArbitrage(symbol: AssetSymbol): {
+    arbitrageOpportunity: boolean;
+    maxSpread: number;
+    spreadPercent: number;
+    exchanges: Array<{ name: string; price: number }>;
+  } {
+    const prices: Array<{ name: string; price: number }> = [];
+    
+    // Binance
+    const binancePrice = this.currentPrices.get(symbol);
+    if (binancePrice) prices.push({ name: 'binance', price: binancePrice });
+    
+    // Bybit
+    const bybitPrice = this.exchangePrices.get('bybit')?.get(symbol);
+    if (bybitPrice) prices.push({ name: 'bybit', price: bybitPrice });
+    
+    // OKX
+    const okxPrice = this.exchangePrices.get('okx')?.get(symbol);
+    if (okxPrice) prices.push({ name: 'okx', price: okxPrice });
+    
+    if (prices.length < 2) {
+      return {
+        arbitrageOpportunity: false,
+        maxSpread: 0,
+        spreadPercent: 0,
+        exchanges: prices,
+      };
+    }
+    
+    const minPrice = Math.min(...prices.map(p => p.price));
+    const maxPrice = Math.max(...prices.map(p => p.price));
+    const maxSpread = maxPrice - minPrice;
+    const avgPrice = (minPrice + maxPrice) / 2;
+    const spreadPercent = avgPrice > 0 ? (maxSpread / avgPrice) * 100 : 0;
+    
+    return {
+      arbitrageOpportunity: spreadPercent > 0.1,
+      maxSpread,
+      spreadPercent,
+      exchanges: prices,
+    };
+  }
 }

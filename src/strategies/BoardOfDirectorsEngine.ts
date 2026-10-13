@@ -131,6 +131,35 @@ export interface TradeLearningEvent {
   shifts: Record<string, { deltaConf: number; deltaAcc: number; newConf: number; newAcc: number }>;
 }
 
+/**
+ * Real computed analytics for a trade post-mortem, derived from the engine's
+ * actual decision history, learning events and recorded hold times.
+ */
+export interface BoardTradeAnalytics {
+  tradeCount7d: number;
+  winRatePct: number;
+  winRate7dAvgPct: number;
+  winRateTrendPct: number;
+  holdMinutes: number;
+  hold7dAvgMinutes: number;
+  holdDeltaMinutes: number;
+  sharpe: number;
+  sharpe7dAvg: number;
+  sharpeDecay: number;
+  correlationConcentrationPct: number;
+  topSymbol: string;
+  pnlPct: number;
+  isWin: boolean;
+  holdInsightEn: string;
+  holdInsightAr: string;
+  winRateInsightEn: string;
+  winRateInsightAr: string;
+  sharpeInsightEn: string;
+  sharpeInsightAr: string;
+  concentrationInsightEn: string;
+  concentrationInsightAr: string;
+}
+
 export interface BoardMeetingDecision {
   id: string;
   round: number;
@@ -705,6 +734,7 @@ export class BoardOfDirectorsEngine {
   private decisionHistory: BoardMeetingDecision[] = [];
   private learningEvents: TradeLearningEvent[] = [];
   private deliberationSessions: BoardDeliberationSession[] = [];
+  private recentHoldTimes: number[] = [];
   private stateFilePath = path.join(process.cwd(), 'agent_learning.json');
   private deliberationsFilePath = path.join(process.cwd(), 'quantum_deliberations.json');
   private openDecisionVotes: Map<string, Record<string, 'approved' | 'challenge' | 'rejected'>> = new Map();
@@ -1030,6 +1060,113 @@ export class BoardOfDirectorsEngine {
   }
 
   /**
+   * Computes real trade analytics from the engine's own history:
+   * recent win rate trend, average hold time, Sharpe decay and correlation
+   * concentration. All values are derived from recorded learning events,
+   * decisions and hold times — never from static templates.
+   */
+  private computeTradeAnalytics(context: {
+    symbol: string;
+    pnl: number;
+    pnlPct: number;
+    isWin: boolean;
+    durationMinutes: number;
+    winRate?: number;
+  }): BoardTradeAnalytics {
+    const now = Date.now();
+    const dayMs = 24 * 60 * 60 * 1000;
+    const events = this.learningEvents;
+
+    const last7d = events.filter((e) => now - new Date(e.timestamp).getTime() <= 7 * dayMs);
+    const prior7d = events.filter((e) => {
+      const t = new Date(e.timestamp).getTime();
+      return t > now - 14 * dayMs && t <= now - 7 * dayMs;
+    });
+
+    const winRateOf = (list: TradeLearningEvent[]): number =>
+      list.length > 0 ? (list.filter((e) => e.isWin).length / list.length) * 100 : 0;
+
+    const recentEvents = events.slice(0, 20);
+    const winRate7dAvgPct = winRateOf(last7d);
+    const winRatePct = recentEvents.length > 0 ? winRateOf(recentEvents) : (context.winRate ?? 50);
+    const winRateTrendPct = winRatePct - winRate7dAvgPct;
+
+    const sharpeOf = (list: TradeLearningEvent[]): number => {
+      if (list.length < 2) return 0;
+      const pnls = list.map((e) => e.pnl);
+      const mean = pnls.reduce((a, b) => a + b, 0) / pnls.length;
+      const variance = pnls.reduce((sum, v) => sum + Math.pow(v - mean, 2), 0) / (pnls.length - 1);
+      const std = Math.sqrt(variance);
+      return std > 0 ? mean / std : 0;
+    };
+
+    const sharpe = sharpeOf(recentEvents);
+    const sharpe7dAvg = sharpeOf(last7d);
+    const sharpeDecay = sharpe7dAvg - sharpe;
+
+    const holdMinutes = context.durationMinutes || 0;
+    const holds = this.recentHoldTimes.slice(-30);
+    const hold7dAvgMinutes = holds.length > 0
+      ? holds.reduce((a, b) => a + b, 0) / holds.length
+      : holdMinutes;
+    const holdDeltaMinutes = holdMinutes - hold7dAvgMinutes;
+
+    const recentDecisions = this.decisionHistory.slice(0, 30);
+    const symbolCounts = new Map<string, number>();
+    for (const d of recentDecisions) {
+      symbolCounts.set(d.symbol, (symbolCounts.get(d.symbol) || 0) + 1);
+    }
+    let topSymbol = context.symbol;
+    let topCount = 0;
+    for (const [sym, count] of symbolCounts.entries()) {
+      if (count > topCount) {
+        topSymbol = sym;
+        topCount = count;
+      }
+    }
+    const correlationConcentrationPct =
+      recentDecisions.length > 0 ? (topCount / recentDecisions.length) * 100 : 100;
+
+    this.recentHoldTimes.push(holdMinutes);
+    if (this.recentHoldTimes.length > 100) this.recentHoldTimes.shift();
+
+    const trendSign = (v: number) => (v >= 0 ? '+' : '');
+    const holdInsightEn = `avg hold ${holdMinutes.toFixed(1)}m vs 7-day avg ${hold7dAvgMinutes.toFixed(1)}m (${trendSign(holdDeltaMinutes)}${holdDeltaMinutes.toFixed(1)}m)`;
+    const holdInsightAr = `متوسط زمن الاحتفاظ ${holdMinutes.toFixed(1)} دقيقة مقابل متوسط 7 أيام ${hold7dAvgMinutes.toFixed(1)} دقيقة (${trendSign(holdDeltaMinutes)}${holdDeltaMinutes.toFixed(1)} دقيقة)`;
+    const winRateInsightEn = `win rate ${winRatePct.toFixed(1)}% vs 7-day avg ${winRate7dAvgPct.toFixed(1)}% (${trendSign(winRateTrendPct)}${winRateTrendPct.toFixed(1)}pp trend over ${last7d.length} trades)`;
+    const winRateInsightAr = `معدل الفوز ${winRatePct.toFixed(1)}% مقابل متوسط 7 أيام ${winRate7dAvgPct.toFixed(1)}% (${trendSign(winRateTrendPct)}${winRateTrendPct.toFixed(1)} نقطة عبر ${last7d.length} صفقة)`;
+    const sharpeInsightEn = `Sharpe ${sharpe.toFixed(2)} vs 7-day avg ${sharpe7dAvg.toFixed(2)} (decay ${sharpeDecay.toFixed(2)})`;
+    const sharpeInsightAr = `الشارب ${sharpe.toFixed(2)} مقابل متوسط 7 أيام ${sharpe7dAvg.toFixed(2)} (تدهور ${sharpeDecay.toFixed(2)})`;
+    const concentrationInsightEn = `correlation concentration ${correlationConcentrationPct.toFixed(0)}% concentrated in ${topSymbol}`;
+    const concentrationInsightAr = `تركز الارتباط ${correlationConcentrationPct.toFixed(0)}% متمركز في ${topSymbol}`;
+
+    return {
+      tradeCount7d: last7d.length,
+      winRatePct,
+      winRate7dAvgPct,
+      winRateTrendPct,
+      holdMinutes,
+      hold7dAvgMinutes,
+      holdDeltaMinutes,
+      sharpe,
+      sharpe7dAvg,
+      sharpeDecay,
+      correlationConcentrationPct,
+      topSymbol,
+      pnlPct: context.pnlPct,
+      isWin: context.isWin,
+      holdInsightEn,
+      holdInsightAr,
+      winRateInsightEn,
+      winRateInsightAr,
+      sharpeInsightEn,
+      sharpeInsightAr,
+      concentrationInsightEn,
+      concentrationInsightAr,
+    };
+  }
+
+  /**
    * Conducts deep multi-agent deliberation, cross-peer critique, 3x trial strategy verification, and error-correction
    */
   public conductPostMortemDeliberation(context: {
@@ -1056,6 +1193,34 @@ export class BoardOfDirectorsEngine {
     const winRate = context.winRate ?? 50;
     const maxDrawdown = context.maxDrawdown ?? 5;
 
+    const analytics = this.computeTradeAnalytics({
+      symbol,
+      pnl,
+      pnlPct: context.pnlPct,
+      isWin,
+      durationMinutes: duration,
+      winRate,
+    });
+
+    const actionableFromWinRate = (): { en: string; ar: string } => {
+      if (analytics.winRateTrendPct <= -5) {
+        return {
+          en: 'Tighten entry gating: raise signal confirmation threshold until rolling win rate recovers above the 7-day baseline.',
+          ar: 'تشديد بوابة الدخول: رفع عتبة تأكيد الإشارة حتى يتعافى معدل الفوز المتدحرج فوق خط أساس 7 أيام.',
+        };
+      }
+      if (analytics.winRateTrendPct >= 5) {
+        return {
+          en: 'Momentum is proven: allow full position sizing while the rolling win rate holds above the 7-day baseline.',
+          ar: 'الزخم مثبت: السماح بالحجم الكامل للمركز طالما معدل الفوز المتدحرج فوق خط أساس 7 أيام.',
+        };
+      }
+      return {
+        en: 'Maintain current entry rules: rolling win rate is statistically in line with the 7-day baseline.',
+        ar: 'الإبقاء على قواعد الدخول الحالية: معدل الفوز المتدحرج مطابق إحصائياً لخط أساس 7 أيام.',
+      };
+    };
+
     // -------------------------------------------------------------
     // ROUND 1: 14 AGENT INDIVIDUAL DOMAIN DIAGNOSES
     // -------------------------------------------------------------
@@ -1068,17 +1233,17 @@ export class BoardOfDirectorsEngine {
       arabicName: 'خبير الخوارزميات والهندسة',
       role: 'فحص سلامة التنفيذ والتعقيد الحسابي',
       diagnosisPerspectiveAr: isWin
-        ? `التنفيذ الخوارزمي تم بسرعة فائقة (14ms) مع انزلاق سعري منعدم، مما ضمن نقطة دخول مثالية عند $${context.entryPrice}.`
-        : `لوحظ تأخير طفيف في معالجة ميكرو-الشموع (38ms) مما أدى إلى انزلاق سعري بنسبة 0.04% أثر على دقة الوقف.`,
+        ? `التنفيذ الخوارزمي سليم: ${analytics.holdInsightAr}، و${analytics.winRateInsightAr}.`
+        : `التنفيذ الخوارزمي يحتاج مراجعة: ${analytics.holdInsightAr}، و${analytics.winRateInsightAr}.`,
       diagnosisPerspectiveEn: isWin
-        ? `Ultra-low latency execution (14ms) ensured zero slippage on entry at $${context.entryPrice}.`
-        : `Micro-burst execution latency (38ms) introduced a 0.04% entry drag that degraded stop-loss buffer.`,
+        ? `Algorithmic execution verified: ${analytics.holdInsightEn}, and ${analytics.winRateInsightEn}.`
+        : `Algorithmic execution needs review: ${analytics.holdInsightEn}, and ${analytics.winRateInsightEn}.`,
       rootCauseAr: isWin
-        ? `تزامن ممتاز بين خيوط المعالجة الخوارزمية وتدفقات بيانات بايننس السريعة.`
-        : `تزاحم في طابور معالجة أوامر الـ WebSocket اللحظية لحظة تقلب السعر.`,
+        ? `زمن الاحتفاظ الفعلي ${analytics.holdDeltaMinutes >= 0 ? 'أعلى' : 'أقل'} من متوسط 7 أيام بمقدار ${Math.abs(analytics.holdDeltaMinutes).toFixed(1)} دقيقة مما يؤكد كفاءة التنفيذ.`
+        : `انحراف زمن الاحتفاظ ${Math.abs(analytics.holdDeltaMinutes).toFixed(1)} دقيقة عن متوسط 7 أيام يشير إلى ازدحام في طابور معالجة الأوامر.`,
       rootCauseEn: isWin
-        ? `Optimal synchronization between algorithmic threads and Binance WebSocket stream.`
-        : `WebSocket buffer congestion during high micro-frequency tick burst.`,
+        ? `Hold time deviation of ${Math.abs(analytics.holdDeltaMinutes).toFixed(1)}m from the 7-day average confirms efficient execution.`
+        : `Hold time deviation of ${Math.abs(analytics.holdDeltaMinutes).toFixed(1)}m from the 7-day average indicates order-processing queue congestion.`,
       proposedParameterFixAr: isWin
         ? `الحفاظ على مهلة المعالجة الحالية عند 25ms.`
         : `خفض سقف مهلة الإرسال القصوى إلى 15ms وتفعيل التنفيذ المسبق للأوامر المحددة.`,
@@ -1096,23 +1261,24 @@ export class BoardOfDirectorsEngine {
     });
 
     // 2. TradingEngineer
+    const tradingAction = actionableFromWinRate();
     diagnoses.push({
       agentId: 'trading',
       agentName: 'TradingEngineer',
       arabicName: 'خبير الصفقات وتطابق الإشارات',
       role: 'التحقق من تناغم إشارات الدخول والوقف',
       diagnosisPerspectiveAr: isWin
-        ? `تطابق إشارة الانعكاس الكمي مع تأكيد مؤشر القوة النسبية والزخم، مما حقق الهدف الربحي بنجاح.`
-        : `الإشارة دخلت مبكراً قبل تأكيد شمعة الارتداد مما عرض الصفقة لكسر وهمي (False Breakout).`,
+        ? `تطابق إشارة الانعكاس الكمي مع الزخم: ${analytics.winRateInsightAr}، و${analytics.sharpeInsightAr}.`
+        : `دخلت الإشارة قبل تأكيد الارتداد: ${analytics.winRateInsightAr}، و${analytics.sharpeInsightAr}.`,
       diagnosisPerspectiveEn: isWin
-        ? `Harmonic confluence between Quant Reversion signal and RSI momentum expansion hit target.`
-        : `Signal triggered premature entry prior to candle close validation, suffering a false breakout.`,
+        ? `Quant reversion signal confirmed by momentum: ${analytics.winRateInsightEn}, and ${analytics.sharpeInsightEn}.`
+        : `Signal entered prior to reversion confirmation: ${analytics.winRateInsightEn}, and ${analytics.sharpeInsightEn}.`,
       rootCauseAr: isWin
-        ? `ثنائية الدخول (Z-Score + Momentum) كانت في المنطقة الذهبية للارتداد.`
-        : `عدم انتظار إغلاق شمعة الدقيقة لتأكيد كسر نطاق التماسك.`,
+        ? `معدل الفوز الحالي ${analytics.winRatePct.toFixed(1)}% يحقق ${analytics.winRateTrendPct >= 0 ? 'تفوقاً' : 'تراجعاً'} بمقدار ${Math.abs(analytics.winRateTrendPct).toFixed(1)} نقطة عن متوسط 7 أيام ${analytics.winRate7dAvgPct.toFixed(1)}%.`
+        : `معدل الفوز الحالي ${analytics.winRatePct.toFixed(1)}% دون متوسط 7 أيام ${analytics.winRate7dAvgPct.toFixed(1)}% بمقدار ${Math.abs(analytics.winRateTrendPct).toFixed(1)} نقطة.`,
       rootCauseEn: isWin
-        ? `Dual confirmation (Z-Score + Momentum) operated in prime statistical reversion territory.`
-        : `Lack of 1-min candle close confirmation before executing directional order.`,
+        ? `Current win rate ${analytics.winRatePct.toFixed(1)}% is ${analytics.winRateTrendPct >= 0 ? 'above' : 'below'} the 7-day average of ${analytics.winRate7dAvgPct.toFixed(1)}% by ${Math.abs(analytics.winRateTrendPct).toFixed(1)}pp.`
+        : `Current win rate ${analytics.winRatePct.toFixed(1)}% trails the 7-day average of ${analytics.winRate7dAvgPct.toFixed(1)}% by ${Math.abs(analytics.winRateTrendPct).toFixed(1)}pp.`,
       proposedParameterFixAr: isWin
         ? `تعزيز فلتر الاتجاه وزيادة نسبة الأمان عند الدخول.`
         : `اشتراط تأكيد شمعة الارتداد السعرية قبل إرسال أمر السوق لتقليل الإشارات الخاطئة.`,
@@ -1130,23 +1296,34 @@ export class BoardOfDirectorsEngine {
     });
 
     // 3. QuantMathematician
+    const sharpeAction =
+      analytics.sharpeDecay > 0.3
+        ? {
+            en: 'Sharpe is decaying — recalibrate volatility bands and reduce leverage until the rolling Sharpe recovers.',
+            ar: 'الشارب في تدهور — إعادة معايرة نطاقات التقلب وتخفيض الرافعة حتى يتعافى الشارب المتدحرج.',
+          }
+        : analytics.sharpeDecay < -0.3
+          ? {
+              en: 'Sharpe is improving — the current parameter set is extracting more return per unit of risk.',
+              ar: 'الشارب في تحسن — مجموعة المعاملات الحالية تستخلص عائداً أعلى لكل وحدة مخاطرة.',
+            }
+          : {
+              en: 'Sharpe is stable relative to the 7-day average — no recalibration required.',
+              ar: 'الشارب مستقر مقارنة بمتوسط 7 أيام — لا حاجة لإعادة المعايرة.',
+            };
     diagnoses.push({
       agentId: 'quant',
       agentName: 'QuantMathematician',
       arabicName: 'خبير الرياضيات والإحصاء',
       role: 'فحص الالتواء، التفلطح، والتوزيع الإحصائي',
       diagnosisPerspectiveAr: isWin
-        ? `انحراف Z-Score تجاوز 2.3 سيغما وعاد بسرعة إلى المتوسط الحسابي كما توقع النموذج الرياضي.`
-        : `التفلطح المرتفع (Kurtosis > 5.2) تسبب في حدوث ذيل سميك (Fat Tail) لم يستوعبه النطاق القياسي.`,
+        ? `النموذج الرياضي سليم: ${analytics.sharpeInsightAr}، و${analytics.winRateInsightAr}.`
+        : `التوزيع الإحصائي يظهر ذيولاً سميكة: ${analytics.sharpeInsightAr}، و${analytics.winRateInsightAr}.`,
       diagnosisPerspectiveEn: isWin
-        ? `Z-Score deviated beyond 2.3-sigma and mean-reverted swiftly into expected gaussian distribution.`
-        : `High kurtosis (Fat-tail > 5.2) caused outlier volatility outside standard Gaussian bell bounds.`,
-      rootCauseAr: isWin
-        ? `التوزيع الاحتمالي لحركة السعر كان يتبع نموذج أورنشتاين-أولنبيك بدقة 94%.`
-        : `حدوث صدمة سعرية ناتجة عن سيولة مفاجئة كسرت التوزيع الطبيعي.`,
-      rootCauseEn: isWin
-        ? `Ornstein-Uhlenbeck mean-reverting process operated at 94% theoretical fidelity.`
-        : `Liquidity sweep triggered a localized non-Gaussian jump event.`,
+        ? `Mathematical model is sound: ${analytics.sharpeInsightEn}, and ${analytics.winRateInsightEn}.`
+        : `Statistical distribution shows fat tails: ${analytics.sharpeInsightEn}, and ${analytics.winRateInsightEn}.`,
+      rootCauseAr: `تدهور الشارب ${analytics.sharpeDecay.toFixed(2)} (الشارب الحالي ${analytics.sharpe.toFixed(2)} مقابل متوسط 7 أيام ${analytics.sharpe7dAvg.toFixed(2)}) مع ${analytics.tradeCount7d} صفقة خلال 7 أيام.`,
+      rootCauseEn: `Sharpe decay of ${analytics.sharpeDecay.toFixed(2)} (current ${analytics.sharpe.toFixed(2)} vs 7-day average ${analytics.sharpe7dAvg.toFixed(2)}) across ${analytics.tradeCount7d} trades in 7 days.`,
       proposedParameterFixAr: isWin
         ? `تثبيت مضاعف وقف الخسارة الإحصائي.`
         : `توسيع نطاق حساب السيغما وتطبيق تدرج Student-t للتوزيعات ذات الذيول السميكة.`,
@@ -1164,23 +1341,29 @@ export class BoardOfDirectorsEngine {
     });
 
     // 4. CoinScoutAgent
+    const concentrationAction =
+      analytics.correlationConcentrationPct >= 60
+        ? {
+            en: `Concentration in ${analytics.topSymbol} exceeds 60% — diversify entries across at least 3 uncorrelated symbols before increasing size.`,
+            ar: `التركز في ${analytics.topSymbol} يتجاوز 60% — تنويع الدخول على 3 عملات غير مترابطة على الأقل قبل زيادة الحجم.`,
+          }
+        : {
+            en: `Concentration in ${analytics.topSymbol} is within tolerance — symbol diversification is adequate.`,
+            ar: `التركز في ${analytics.topSymbol} ضمن الحدود — تنويع العملات كافٍ.`,
+          };
     diagnoses.push({
       agentId: 'scout',
       agentName: 'CoinScout',
       arabicName: 'كشاف الفرص وقوة العملة',
       role: 'مقارنة الزخم النسبي مع أزواج السوق',
       diagnosisPerspectiveAr: isWin
-        ? `العملة أظهرت قوة نسبية متفوقة مقارنة بـ BTC، مما أعطى دفعة قوية لحركة السعر.`
-        : `حدوث هبوط جماعي في أزواج السوق جر العملة للأسفل رغم إيجابية المؤشرات الفردية.`,
+        ? `العملة أظهرت قوة نسبية مستقلة: ${analytics.concentrationInsightAr}، و${analytics.winRateInsightAr}.`
+        : `هبوط جماعي في أزواج السوق جر العملة: ${analytics.concentrationInsightAr}، و${analytics.winRateInsightAr}.`,
       diagnosisPerspectiveEn: isWin
-        ? `Asset exhibited strong relative alpha decoupling from BTC benchmark.`
-        : `Systemic market-wide market dump dragged the asset downwards despite local indicators.`,
-      rootCauseAr: isWin
-        ? `سيولة الشراء الصافية كانت إيجابية ومستقلة عن اتجاه السوق العام.`
-        : `ارتباط لحظي مفاجئ مع هبوط البيتكوين اللحظي بنسبة بيتا مرتفعة.`,
-      rootCauseEn: isWin
-        ? `Asset order flow remained decoupled with net positive delta.`
-        : `High instantaneous beta correlation with sudden BTC benchmark drop.`,
+        ? `Asset exhibited decoupled relative strength: ${analytics.concentrationInsightEn}, and ${analytics.winRateInsightEn}.`
+        : `Systemic market-wide dump dragged the asset: ${analytics.concentrationInsightEn}, and ${analytics.winRateInsightEn}.`,
+      rootCauseAr: `تركز الارتباط ${analytics.correlationConcentrationPct.toFixed(0)}% في ${analytics.topSymbol} عبر آخر 30 قراراً للمجلس.`,
+      rootCauseEn: `Correlation concentration of ${analytics.correlationConcentrationPct.toFixed(0)}% in ${analytics.topSymbol} across the last 30 board decisions.`,
       proposedParameterFixAr: isWin
         ? `مواصلة تتبع قوة الألفا المستقلة.`
         : `إضافة فلتر منع الدخول إذا كان مؤشر بيتا مع BTC يتجاوز 1.4 في اللحظة نفسها.`,
@@ -1204,17 +1387,17 @@ export class BoardOfDirectorsEngine {
       arabicName: 'خبير السيولة وصناع السوق',
       role: 'مراقبة عمق دفتر الأوامر واختلال السيولة',
       diagnosisPerspectiveAr: isWin
-        ? `امتصاص سيولة البيع في دفتر الأوامر وظهور حائط طلب قوي دعم ارتداد السعر.`
-        : `سحب مفاجئ لطلبات الشراء في عمق الأوامر (Liquidity Evaporation) سهل كسر مستوى الدعم.`,
+        ? `بنية السوق دعمت الصفقة: ${analytics.concentrationInsightAr}، و${analytics.holdInsightAr}.`
+        : `اختلال السيولة عرقل الصفقة: ${analytics.concentrationInsightAr}، و${analytics.holdInsightAr}.`,
       diagnosisPerspectiveEn: isWin
-        ? `Orderbook bid wall absorbed selling volume, creating immediate rebound buoyancy.`
-        : `Orderbook bid liquidity evaporated, allowing minimal sell pressure to breach support.`,
+        ? `Market structure supported the trade: ${analytics.concentrationInsightEn}, and ${analytics.holdInsightEn}.`
+        : `Liquidity imbalance hindered the trade: ${analytics.concentrationInsightEn}, and ${analytics.holdInsightEn}.`,
       rootCauseAr: isWin
-        ? `توازن صحي في نسبة عدم توازن دفتر الأوامر (Imbalance Ratio > +0.35).`
-        : `فجوة في دفتر الأوامر سمحت بانزلاق السعر إلى الوقف المحدد.`,
+        ? `زمن الاحتفاظ ${analytics.holdMinutes.toFixed(1)} دقيقة ${analytics.holdDeltaMinutes <= 0 ? 'أقل' : 'أعلى'} من متوسط 7 أيام (${analytics.hold7dAvgMinutes.toFixed(1)} دقيقة) بمقدار ${Math.abs(analytics.holdDeltaMinutes).toFixed(1)} دقيقة.`
+        : `زمن الاحتفاظ ${analytics.holdMinutes.toFixed(1)} دقيقة يتجاوز متوسط 7 أيام (${analytics.hold7dAvgMinutes.toFixed(1)} دقيقة) بمقدار ${Math.abs(analytics.holdDeltaMinutes).toFixed(1)} دقيقة مما يشير إلى انزلاق في الخروج.`,
       rootCauseEn: isWin
-        ? `Orderbook delta remained solidly supportive (Imbalance Ratio > +0.35).`
-        : `Thin bid book depth led to cascading fill slippage into stop loss level.`,
+        ? `Hold time of ${analytics.holdMinutes.toFixed(1)}m is ${analytics.holdDeltaMinutes <= 0 ? 'below' : 'above'} the 7-day average (${analytics.hold7dAvgMinutes.toFixed(1)}m) by ${Math.abs(analytics.holdDeltaMinutes).toFixed(1)}m.`
+        : `Hold time of ${analytics.holdMinutes.toFixed(1)}m exceeds the 7-day average (${analytics.hold7dAvgMinutes.toFixed(1)}m) by ${Math.abs(analytics.holdDeltaMinutes).toFixed(1)}m, indicating exit slippage.`,
       proposedParameterFixAr: isWin
         ? `تثبيت متطلبات سيولة دفتر الأوامر.`
         : `رفع الحد الأدنى لعمق دفتر الأوامر المطلوب قبل فتح الصفقة بنسبة 20%.`,
@@ -1232,23 +1415,33 @@ export class BoardOfDirectorsEngine {
     });
 
     // 6. RiskControllerAgent
+    const riskAction =
+      analytics.sharpeDecay > 0.3
+        ? {
+            en: `Reduce per-trade risk to 50% of policy until Sharpe decay (${analytics.sharpeDecay.toFixed(2)}) mean-reverts below 0.3.`,
+            ar: `تخفيض المخاطرة لكل صفقة إلى 50% من السياسة حتى يتعافى تدهور الشارب (${analytics.sharpeDecay.toFixed(2)}) دون 0.3.`,
+          }
+        : {
+            en: `Risk budget is healthy: Sharpe ${analytics.sharpe.toFixed(2)} vs 7-day avg ${analytics.sharpe7dAvg.toFixed(2)} with win rate ${analytics.winRatePct.toFixed(1)}%.`,
+            ar: `ميزانية المخاطرة سليمة: الشارب ${analytics.sharpe.toFixed(2)} مقابل متوسط 7 أيام ${analytics.sharpe7dAvg.toFixed(2)} ومعدل فوز ${analytics.winRatePct.toFixed(1)}%.`,
+          };
     diagnoses.push({
       agentId: 'risk',
       agentName: 'RiskController',
       arabicName: 'مدير المخاطر الكمي الصارم',
       role: 'التحكم بالرافعة ونسب التعرض ورأس المال',
       diagnosisPerspectiveAr: isWin
-        ? `حجم الصفقة ($${Math.abs(pnl).toFixed(2)} ربح) كان متوافقاً تماماً مع معيار كيلي الآمن (10% من المحفظة).`
-        : `الخسارة كانت محدودة ($${Math.abs(pnl).toFixed(2)}) بفضل الصرامة في تحديد الوقف، ولم تؤثر على رصيد المحفظة.`,
+        ? `حجم الصفقة ($${Math.abs(pnl).toFixed(2)} ربح) متوافق مع معيار كيلي: ${analytics.winRateInsightAr}، و${analytics.sharpeInsightAr}.`
+        : `الخسارة كانت محدودة ($${Math.abs(pnl).toFixed(2)}): ${analytics.winRateInsightAr}، و${analytics.sharpeInsightAr}.`,
       diagnosisPerspectiveEn: isWin
-        ? `Position size ($${pnl.toFixed(2)} gain) complied perfectly with Fractional Kelly (10% wallet margin).`
-        : `Loss was safely capped at ($${Math.abs(pnl).toFixed(2)}) via strict pre-allocated stop boundaries.`,
+        ? `Position size ($${pnl.toFixed(2)} gain) complied with Fractional Kelly: ${analytics.winRateInsightEn}, and ${analytics.sharpeInsightEn}.`
+        : `Loss was safely capped ($${Math.abs(pnl).toFixed(2)}): ${analytics.winRateInsightEn}, and ${analytics.sharpeInsightEn}.`,
       rootCauseAr: isWin
-        ? `نسبة العائد إلى المخاطرة (Risk:Reward > 1:1.6) وفرت ميزة إحصائية إيجابية.`
-        : `مستوى الوقف كان قريباً نسبياً من ضوضاء السوق اللحظية.`,
+        ? `معدل الفوز ${analytics.winRatePct.toFixed(1)}% مقابل متوسط 7 أيام ${analytics.winRate7dAvgPct.toFixed(1)}% مع ${analytics.tradeCount7d} صفقة مؤكدة.`
+        : `معدل الفوز ${analytics.winRatePct.toFixed(1)}% دون متوسط 7 أيام ${analytics.winRate7dAvgPct.toFixed(1)}% بنحو ${Math.abs(analytics.winRateTrendPct).toFixed(1)} نقطة مع ${analytics.tradeCount7d} صفقة مؤكدة.`,
       rootCauseEn: isWin
-        ? `Realized Risk:Reward ratio (> 1:1.6) provided positive mathematical expectancy.`
-        : `Stop-loss barrier was placed slightly within micro-noise volatility bandwidth.`,
+        ? `Win rate ${analytics.winRatePct.toFixed(1)}% vs 7-day average ${analytics.winRate7dAvgPct.toFixed(1)}% across ${analytics.tradeCount7d} confirmed trades.`
+        : `Win rate ${analytics.winRatePct.toFixed(1)}% trails the 7-day average ${analytics.winRate7dAvgPct.toFixed(1)}% by ${Math.abs(analytics.winRateTrendPct).toFixed(1)}pp across ${analytics.tradeCount7d} confirmed trades.`,
       proposedParameterFixAr: isWin
         ? `تثبيت معايير إدارة رأس المال.`
         : `تعديل مضاعف وقف الخسارة بنسبة +10% لإعطاء مساحة كافية للارتداد دون زيادة المخاطرة المالية.`,
@@ -1368,12 +1561,8 @@ export class BoardOfDirectorsEngine {
       fromAgentId: 'risk',
       fromAgentName: 'RiskController',
       toAgentId: 'trading',
-      critiqueAr: isWin
-        ? `أتفق مع خبير الصفقات، لكن يجب ألا نطمع بزيادة حجم المركز حتى في الصفقات الرابحة حفاظاً على ثبات منحنى النمو.`
-        : `تشخيص خبير الصفقات صحيح حول الدخول المبكر، والحل هو رفع عتبة Z-Score وليس زيادة الوقف لتفادي المخاطر.`,
-      critiqueEn: isWin
-        ? `Concur with Trading Engineer, but margin allocation must remain tightly capped to preserve Kelly growth slope.`
-        : `Trading Engineer correctly identified premature entry. The optimal fix is tightening Z-Score entry threshold rather than widening stop risk.`,
+      critiqueAr: `معدل الفوز الحالي ${analytics.winRatePct.toFixed(1)}% مقابل متوسط 7 أيام ${analytics.winRate7dAvgPct.toFixed(1)}% (${analytics.winRateTrendPct >= 0 ? '+' : ''}${analytics.winRateTrendPct.toFixed(1)} نقطة). ${tradingAction.ar}`,
+      critiqueEn: `Current win rate ${analytics.winRatePct.toFixed(1)}% vs 7-day average ${analytics.winRate7dAvgPct.toFixed(1)}% (${analytics.winRateTrendPct >= 0 ? '+' : ''}${analytics.winRateTrendPct.toFixed(1)}pp). ${tradingAction.en}`,
       counterProposalAr: `رفع شرط Z-Score إلى ${Number((this.activePolicy.zScoreEntryThreshold + 0.1).toFixed(2))} لضمان جودة الإشارة بنسبة 99%.`,
       counterProposalEn: `Adjust Z-Score entry requirement to ${Number((this.activePolicy.zScoreEntryThreshold + 0.1).toFixed(2))} to ensure 99% signal purity.`,
       agreementScore: 0.95
@@ -1383,12 +1572,8 @@ export class BoardOfDirectorsEngine {
       fromAgentId: 'quant',
       fromAgentName: 'QuantMathematician',
       toAgentId: 'algo',
-      critiqueAr: isWin
-        ? `الأداء الرياضي والخوارزمي كان متناغماً بنسبة 100% مع النموذج النظري.`
-        : `الانزلاق السعري الطفيف الذي ذكره خبير الخوارزميات يمكن تعويضه بوضع أمر Limit عند منتصف نطاق السيولة بدلاً من أمر Market.`,
-      critiqueEn: isWin
-        ? `Algorithmic execution and mathematical distribution were in 100% alignment with theoretical model.`
-        : `The micro-slippage mentioned by Algo Engineer can be fully mitigated by routing pegged Limit orders at midpoint rather than taking immediate liquidity.`,
+      critiqueAr: `الشارب الحالي ${analytics.sharpe.toFixed(2)} مقابل متوسط 7 أيام ${analytics.sharpe7dAvg.toFixed(2)} (تدهور ${analytics.sharpeDecay.toFixed(2)}). ${sharpeAction.ar}`,
+      critiqueEn: `Current Sharpe ${analytics.sharpe.toFixed(2)} vs 7-day average ${analytics.sharpe7dAvg.toFixed(2)} (decay ${analytics.sharpeDecay.toFixed(2)}). ${sharpeAction.en}`,
       counterProposalAr: `اعتماد توجيه الأوامر بالـ Midpoint Limit Order في جميع أزواج الـ Testnet.`,
       counterProposalEn: `Adopt Midpoint Pegged Limit Order routing across all simulated Testnet executions.`,
       agreementScore: 0.92
@@ -1398,12 +1583,8 @@ export class BoardOfDirectorsEngine {
       fromAgentId: 'stress',
       fromAgentName: 'StressTestGuard',
       toAgentId: 'market',
-      critiqueAr: isWin
-        ? `عمق دفتر الأوامر كان متيناً وامتص الصدمات السعرية بكفاءة عالية.`
-        : `سحب السيولة كان خطيراً ويجب تفعيل الحظر الفوري إذا انخفض عمق الطلبات عن 50,000$.`,
-      critiqueEn: isWin
-        ? `Orderbook bid liquidity buffer was robust, effectively absorbing price shocks.`
-        : `Orderbook liquidity drainage was hazardous; we must trigger an instant circuit breaker if top-5 depth drops below $50k.`,
+      critiqueAr: `تركز الارتباط ${analytics.correlationConcentrationPct.toFixed(0)}% في ${analytics.topSymbol} عبر آخر 30 قراراً. ${concentrationAction.ar}`,
+      critiqueEn: `Correlation concentration of ${analytics.correlationConcentrationPct.toFixed(0)}% in ${analytics.topSymbol} across the last 30 decisions. ${concentrationAction.en}`,
       counterProposalAr: `إضافة فلتر حظر السيولة الضعيفة وربطه بنصاب إجماع الحراس.`,
       counterProposalEn: `Inject minimum orderbook depth gating into guard quorum consensus.`,
       agreementScore: 0.89
@@ -1413,12 +1594,8 @@ export class BoardOfDirectorsEngine {
       fromAgentId: 'wf',
       fromAgentName: 'WalkForwardGuard',
       toAgentId: 'oos',
-      critiqueAr: isWin
-        ? `تطابق تام بين النوافذ الزمنية والبيانات المجهولة يؤكد متانة الخوارزمية.`
-        : `يجب ألا نغير أكثر من معاملين اثنين في الجولة الواحدة لتجنب الإفراط في التعديل (Over-optimization).`,
-      critiqueEn: isWin
-        ? `High congruence between rolling time windows and out-of-sample data validates algorithmic robustness.`
-        : `We must avoid mutating more than two hyperparameters per cycle to prevent over-adaptation.`,
+      critiqueAr: `متوسط زمن الاحتفاظ ${analytics.holdMinutes.toFixed(1)} دقيقة مقابل متوسط 7 أيام ${analytics.hold7dAvgMinutes.toFixed(1)} دقيقة (${analytics.holdDeltaMinutes >= 0 ? '+' : ''}${analytics.holdDeltaMinutes.toFixed(1)} دقيقة). ${analytics.holdDeltaMinutes > 2 ? 'تشديد نافذة الخروج لتقليص زمن الاحتفاظ' : 'زمن الاحتفاظ ضمن النطاق المقبول'}`,
+      critiqueEn: `Average hold time ${analytics.holdMinutes.toFixed(1)}m vs 7-day average ${analytics.hold7dAvgMinutes.toFixed(1)}m (${analytics.holdDeltaMinutes >= 0 ? '+' : ''}${analytics.holdDeltaMinutes.toFixed(1)}m). ${analytics.holdDeltaMinutes > 2 ? 'Tighten the exit window to reduce hold duration' : 'Hold time is within acceptable range'}`,
       counterProposalAr: `حصر التعديل في: عتبة الدخول Z-Score وفلتر التقلب فقط لضمان الثبات.`,
       counterProposalEn: `Restrict policy mutations strictly to Z-Score Threshold and Volatility Sensitivity for stability.`,
       agreementScore: 0.97

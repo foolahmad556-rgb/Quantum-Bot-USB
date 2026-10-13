@@ -36,8 +36,10 @@ export class DynamicRiskManager extends EventEmitter {
     winRateExcellent: 0.60,
     winRateGood: 0.55,
     winRatePoor: 0.45,
-    maxDrawdownVelocity: 0.05, // 5% per day
-    maxParameterDrift: 0.5, // 50% drift (قفل صيد مؤقتاً؛ المستوى 30% كان يوقف كل التداول)
+    maxDrawdownVelocity: 0.05,
+    maxParameterDrift: 0.20,
+    parameterDriftWarningThreshold: 0.20,
+    parameterDriftHaltThreshold: 0.35,
   };
 
   public updateThresholds(newThresholds: Partial<typeof this.thresholds>) {
@@ -141,11 +143,17 @@ export class DynamicRiskManager extends EventEmitter {
       action = 'PAUSE';
     }
 
-    if (this.metrics.parameterDrift > this.thresholds.maxParameterDrift) {
-      reasons.push(`Critical: Parameter Drift ${(this.metrics.parameterDrift * 100).toFixed(1)}% > ${(this.thresholds.maxParameterDrift * 100).toFixed(0)}%`);
+    if (this.metrics.parameterDrift > this.thresholds.parameterDriftHaltThreshold) {
+      reasons.push(`Critical: Parameter Drift ${(this.metrics.parameterDrift * 100).toFixed(1)}% > ${(this.thresholds.parameterDriftHaltThreshold * 100).toFixed(0)}% - SOFT_HALT triggered`);
       leverageMultiplier *= 0.0;
       positionSizeMultiplier *= 0.0;
       action = 'STOP';
+    } else if (this.metrics.parameterDrift > this.thresholds.parameterDriftWarningThreshold) {
+      reasons.push(`Warning: Parameter Drift ${(this.metrics.parameterDrift * 100).toFixed(1)}% > ${(this.thresholds.parameterDriftWarningThreshold * 100).toFixed(0)}% - resetting parameters from config`);
+      this.resetParametersFromWFO();
+      leverageMultiplier *= 0.5;
+      positionSizeMultiplier *= 0.5;
+      if (action === 'NORMAL') action = 'REDUCE_SIZE';
     }
 
     leverageMultiplier = Math.max(0.0, Math.min(1.0, leverageMultiplier));
@@ -191,5 +199,11 @@ export class DynamicRiskManager extends EventEmitter {
       }
     }
     return paramCount > 0 ? totalDrift / paramCount : 0;
+  }
+
+  private resetParametersFromWFO(): void {
+    this.currentParameters = { ...this.wfoParameters };
+    this.metrics.parameterDrift = this.calculateParameterDrift();
+    console.log('[DynamicRiskManager] Parameters reset to WFO baseline due to drift warning');
   }
 }

@@ -83,6 +83,7 @@ export class PortfolioSizer {
   private assetScreener?: AssetScreener;
   private allowedSymbols: AssetSymbol[] = [];
   private riskEngine?: RiskEngine;
+  private targetWeights: Record<string, number> = {};
 
   private tierConfigs: Record<PortfolioTier, TierConfig> = {
     MICRO: {
@@ -161,6 +162,21 @@ export class PortfolioSizer {
     };
 
     this.refreshAllowedSymbols();
+  }
+
+  /**
+   * Sets QUBO-derived target portfolio weights for position sizing adjustments
+   */
+  public setTargetWeights(weights: Record<string, number>): void {
+    this.targetWeights = { ...weights };
+    console.log(`🎯 QUBO target weights updated:`, Object.entries(this.targetWeights).map(([k, v]) => `${k}: ${(v * 100).toFixed(1)}%`).join(', '));
+  }
+
+  /**
+   * Retrieves current QUBO target weights
+   */
+  public getTargetWeights(): Record<string, number> {
+    return { ...this.targetWeights };
   }
 
   /**
@@ -401,10 +417,12 @@ export class PortfolioSizer {
   }
 
   /**
-   * تحديد حجم الصفقة بناءً على إدارة المخاطر الصارمة (1% من رأس المال لكل صفقة)
+   * Determines position size based on strict risk management (1% of capital per trade)
    * Quantity = RiskAmount / StopLossDistance
+   * Also adjusts based on QUBO target portfolio weights
    */
   public calculatePositionSize(
+    symbol: AssetSymbol,
     entryOrStrength: number,
     stopOrPrice: number,
     equity: number,
@@ -420,11 +438,11 @@ export class PortfolioSizer {
     }
     const safeEquity = equity;
 
-    // التحقق مما إذا كانت المعاملات ممررة بنمط (entry, stop, equity, riskPct) أو (strength, price, balance)
+    // Check if arguments are passed as (entry, stop, equity, riskPct) or (strength, price, balance)
     let entry = entryOrStrength;
     let stopDistance = Math.abs(entryOrStrength - stopOrPrice);
 
-    // إذا كان المعامل الثاني هو السعر والأول هو القوة (نمط قديم)
+    // If second arg is price and first is strength (legacy pattern)
     if (entryOrStrength <= 1.0 && stopOrPrice > 1.0) {
       entry = stopOrPrice;
       // Use actual stop distance if provided, otherwise calculate from risk metrics
@@ -440,12 +458,12 @@ export class PortfolioSizer {
       throw new Error('Invalid stop distance: must be a finite positive number');
     }
 
-    // المخاطرة المحددة (1% من إجمالي رأس المال)
+    // Defined risk (1% of total capital)
     const riskAmount = safeEquity * Math.min(MAX_RISK_PCT, Math.max(MIN_RISK_PCT, riskPct));
     let rawQty = riskAmount / stopDistance;
     let notional = rawQty * entry;
 
-    // سقف التعرض الأقصى لكل صفقة بناءً على فئة المحفظة
+    // Max exposure cap per trade based on portfolio tier
     const maxExposurePct = config.maxTradePercentage || DEFAULT_MAX_TRADE_PERCENTAGE;
     const maxNotional = safeEquity * maxExposurePct;
     if (notional > maxNotional) {
@@ -469,7 +487,7 @@ export class PortfolioSizer {
       }
     }
 
-    // تخصيص هامش متناسب مع المحفظة - use actual equity, no hardcoded minimums
+    // Proportional margin allocation - use actual equity, no hardcoded minimums
     const proportionalTargetMargin = safeEquity * PROPORTIONAL_MARGIN_PCT;
     const targetNotional = Math.max(config.minTradeValue || 0, proportionalTargetMargin * (config.minLeverage || 10));
     if (notional < targetNotional && entry > 0) {
@@ -477,7 +495,23 @@ export class PortfolioSizer {
       rawQty = notional / entry;
     }
 
-    // حساب الرافعة المطلوبة لتغطية الهامش، مع الالتزام بالنطاق الآمن للفئة
+    // QUBO target weight adjustment
+    const targetWeight = this.targetWeights[symbol];
+    if (targetWeight !== undefined && targetWeight > 0 && notional > 0) {
+      const currentWeight = notional / safeEquity;
+      const deviation = (currentWeight - targetWeight) / targetWeight;
+      const deviationBand = 0.20; // 20% deviation band
+
+      if (Math.abs(deviation) > deviationBand) {
+        // Linear scaling outside the band
+        const scaleFactor = 1 - Math.sign(deviation) * Math.min(0.5, (Math.abs(deviation) - deviationBand) * 2);
+        rawQty *= Math.max(0.1, scaleFactor);
+        notional = rawQty * entry;
+        console.log(`🎯 QUBO weight adjustment for ${symbol}: target=${(targetWeight*100).toFixed(1)}%, current=${(currentWeight*100).toFixed(1)}%, deviation=${(deviation*100).toFixed(1)}%, scale=${scaleFactor.toFixed(2)}`);
+      }
+    }
+
+    // Calculate required leverage to cover margin, respecting tier safe range
     const calculatedLev = Math.max(config.minLeverage || 10, Math.ceil(notional / safeEquity));
     const leverage = Math.min(config.maxLeverage || 20, Math.max(config.minLeverage || 10, calculatedLev));
 

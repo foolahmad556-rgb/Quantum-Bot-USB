@@ -245,6 +245,82 @@ export class QuboPortfolio {
   }
 
   /**
+   * Scales covariance matrix based on market regime
+   * VOLATILE → 1.5x, TRENDING → 0.9x, RANGING → 1.0x
+   */
+  public static buildRegimeConditionedCovariance(covMatrix: number[][], regime: string): number[][] {
+    const regimeMultipliers: Record<string, number> = {
+      'VOLATILE': 1.5,
+      'TRENDING': 0.9,
+      'RANGING': 1.0,
+      'HIGH_VOLATILITY': 1.5,
+      'LOW_VOLATILITY': 0.9,
+    };
+    const multiplier = regimeMultipliers[regime?.toUpperCase()] || 1.0;
+    const n = covMatrix.length;
+    const scaled: number[][] = Array(n).fill(0).map(() => Array(n).fill(0));
+    for (let i = 0; i < n; i++) {
+      for (let j = 0; j < n; j++) {
+        scaled[i][j] = covMatrix[i][j] * multiplier;
+      }
+    }
+    return scaled;
+  }
+
+  /**
+   * Applies Ledoit-Wolf shrinkage to covariance matrix
+   * Target shrinkage = 0.7 (70% toward diagonal/constant-correlation model)
+   */
+  public static shrinkCovariance(matrix: number[][], shrinkage: number = 0.7): number[][] {
+    const n = matrix.length;
+    if (n === 0) return matrix;
+
+    // Compute the constant correlation target (diagonal + constant off-diagonal)
+    const variances: number[] = [];
+    for (let i = 0; i < n; i++) {
+      variances.push(Math.max(1e-8, matrix[i][i]));
+    }
+
+    // Average correlation
+    let sumCorr = 0;
+    let count = 0;
+    for (let i = 0; i < n; i++) {
+      for (let j = i + 1; j < n; j++) {
+        const stdI = Math.sqrt(variances[i]);
+        const stdJ = Math.sqrt(variances[j]);
+        if (stdI > 0 && stdJ > 0) {
+          sumCorr += matrix[i][j] / (stdI * stdJ);
+          count++;
+        }
+      }
+    }
+    const avgCorr = count > 0 ? sumCorr / count : 0;
+
+    // Build target matrix (constant correlation model)
+    const target: number[][] = Array(n).fill(0).map(() => Array(n).fill(0));
+    for (let i = 0; i < n; i++) {
+      for (let j = 0; j < n; j++) {
+        if (i === j) {
+          target[i][j] = variances[i];
+        } else {
+          target[i][j] = avgCorr * Math.sqrt(variances[i] * variances[j]);
+        }
+      }
+    }
+
+    // Shrink: (1 - shrinkage) * sample + shrinkage * target
+    const shrunk: number[][] = Array(n).fill(0).map(() => Array(n).fill(0));
+    const oneMinusShrink = 1 - shrinkage;
+    for (let i = 0; i < n; i++) {
+      for (let j = 0; j < n; j++) {
+        shrunk[i][j] = oneMinusShrink * matrix[i][j] + shrinkage * target[i][j];
+      }
+    }
+
+    return shrunk;
+  }
+
+  /**
    * Calculates dynamic expected annualized returns from historical returns
    */
   public static calculateDynamicReturns(assets: AssetSymbol[], returnsMap: Map<AssetSymbol, number[]>): Record<AssetSymbol, number> {
