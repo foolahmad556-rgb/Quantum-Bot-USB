@@ -17,6 +17,30 @@ import { AssetSymbol, BacktestConfig, BacktestResult, Candle, EquityPoint, Fill,
 import { FeatureEngine } from '../features/FeatureEngine';
 import { decide, StrategyParams, DEFAULT_STRATEGY_PARAMS } from '../strategies/DecisionEngine';
 
+// --- Named constants for backtest calculations ---
+/** Number of days in a year, used for annualization of returns and volatility. */
+const DAYS_PER_YEAR = 365;
+/** Number of hours in a day — used with hourly-resolution data for annualization. */
+const HOURS_PER_DAY = 24;
+/** Seconds in one hour. */
+const SECONDS_PER_HOUR = 3600;
+/** Milliseconds in one second. */
+const MS_PER_SECOND = 1000;
+/** Minimum available cash (in USDT) required before entering a trade. */
+const MIN_AVAILABLE_CAPITAL_FOR_TRADE = 500;
+/** Default fraction of capital risked per trade in the backtest simulation. */
+const DEFAULT_RISK_FRACTION = 0.015;
+/** Fallback risk sizing as a fraction of capital when stop distance is zero. */
+const FALLBACK_RISK_FRACTION = 0.08;
+/** Default book depth (in notional USD) for slippage-impact calculations. */
+const DEFAULT_BOOK_DEPTH = 100000;
+/** Number of most-recent candles passed to the feature engine per symbol. */
+const FEATURE_CANDLE_HISTORY_LENGTH = 60;
+/** Minimum candle history length required before generating a signal. */
+const MIN_FEATURE_CANDLE_HISTORY = 20;
+/** Default starting balance used when no real equity is available (USDT). */
+const FALLBACK_BALANCE = 1000;
+
 export interface BacktestEngineConfig {
   symbols: (AssetSymbol | string)[];
   startDate?: string;
@@ -305,7 +329,7 @@ export class BacktestEngine {
      * - LINEAR_DEPTH: linear in order size relative to book depth
      * - SQUARE_ROOT_IMPACT: square-root market impact model
      */
-    const computeSlippage = (isBuy: boolean, quantity: number, price: number, bookDepth: number = 100000): number => {
+    const computeSlippage = (isBuy: boolean, quantity: number, price: number, bookDepth: number = DEFAULT_BOOK_DEPTH): number => {
       if (slippageModel === 'ZERO') return 1.0;
       const notional = quantity * price;
       const relativeImpact = notional / Math.max(bookDepth, 1);
@@ -400,9 +424,9 @@ export class BacktestEngine {
         // Extract historical slice
         const candleHistory = candles
           .filter((c) => c.timestamp < timestamp)
-          .slice(-60);
+          .slice(-FEATURE_CANDLE_HISTORY_LENGTH);
 
-        if (candleHistory.length < 20) continue;
+        if (candleHistory.length < MIN_FEATURE_CANDLE_HISTORY) continue;
 
         // Compute features
         const features = featureEngine.extractFeatures(
@@ -429,13 +453,13 @@ export class BacktestEngine {
         const alreadyOpen = openPositions.some((p) => p.symbol === symbol);
         // Use available cash (not realizedCapital which includes unrealized PnL) for sizing
         const availableForSizing = Math.max(0, cash);
-        if (signal && !alreadyOpen && availableForSizing > 500) {
-          const riskFraction = 0.015; // 1.5% capital risk per trade
+        if (signal && !alreadyOpen && availableForSizing > MIN_AVAILABLE_CAPITAL_FOR_TRADE) {
+          const riskFraction = DEFAULT_RISK_FRACTION; // 1.5% capital risk per trade
           const stopDistance = Math.abs(currentCandle.close - signal.stopLoss);
           const rawQuantity =
             stopDistance > 0
               ? (availableForSizing * riskFraction) / stopDistance
-              : (availableForSizing * 0.08) / currentCandle.close;
+              : (availableForSizing * FALLBACK_RISK_FRACTION) / currentCandle.close;
 
           // Leverage cap (max 2x leverage)
           const maxNotional = availableForSizing * (this.config.maxLeverage || 2);
@@ -547,11 +571,11 @@ export class BacktestEngine {
     const totalReturnPct = ((finalEquity - this.config.initialCapital) / this.config.initialCapital) * 100;
     const benchmarkReturnPct = ((benchmarkCapital - this.config.initialCapital) / this.config.initialCapital) * 100;
 
-    const totalDays = Math.max(1, (sortedTimestamps[sortedTimestamps.length - 1] - sortedTimestamps[0]) / (24 * 3600 * 1000));
+    const totalDays = Math.max(1, (sortedTimestamps[sortedTimestamps.length - 1] - sortedTimestamps[0]) / (HOURS_PER_DAY * SECONDS_PER_HOUR * MS_PER_SECOND));
     // Use proper compound annual growth rate (CAGR) instead of linear scaling
     const totalReturnDecimal = totalReturnPct / 100;
     const annualizedReturnPct = totalDays > 0
-      ? (((1 + totalReturnDecimal) ** (365 / totalDays) - 1) * 100)
+      ? (((1 + totalReturnDecimal) ** (DAYS_PER_YEAR / totalDays) - 1) * 100)
       : totalReturnPct;
 
     // Returns time series — computed from unrounded equity to avoid quantization error
@@ -569,7 +593,7 @@ export class BacktestEngine {
 
     const meanReturn = returns.length > 0 ? returns.reduce((a, b) => a + b, 0) / returns.length : 0;
     const stdDev = this.calculateStdDev(returns);
-    const annualFactor = Math.sqrt(365 * 24); // Hourly resolution
+    const annualFactor = Math.sqrt(DAYS_PER_YEAR * HOURS_PER_DAY); // Hourly resolution
 
     const sharpeRatio = stdDev > 0 ? (meanReturn / stdDev) * annualFactor : 0;
 

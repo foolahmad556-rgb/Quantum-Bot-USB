@@ -442,6 +442,15 @@ export class UserDataStream {
       }
       this.ws = null;
     }
+
+    // Clean up listener Sets to prevent unbounded growth / memory leaks
+    // when the stream is stopped and restarted. Without this, subscribers
+    // that never explicitly unsubscribe accumulate references across lifecycle restarts.
+    this.fillListeners.clear();
+    this.balanceListeners.clear();
+    this.closedListeners.clear();
+    this.orderTradeListeners.clear();
+
     console.log('🛑 UserDataStream: Stopped cleanly.');
   }
 

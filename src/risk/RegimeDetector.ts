@@ -2,8 +2,8 @@ import { Candle } from '../domain/types';
 import { calculateHurstDFA, sigmoid, clamp } from '../utils/stats';
 
 export interface RegimeAnalysis {
-  volatilityRegime: 'LOW' | 'NORMAL' | 'HIGH' | 'EXTREME';
-  marketRegime: 'TRENDING' | 'RANGING' | 'VOLATILE';
+  volatilityRegime: 'LOW' | 'NORMAL' | 'HIGH' | 'EXTREME' | 'UNKNOWN';
+  marketRegime: 'TRENDING' | 'RANGING' | 'VOLATILE' | 'UNKNOWN';
   hurstExponent: number;
   adx: number;
   volatility: number;
@@ -33,6 +33,22 @@ export class RegimeDetector {
   }
 
   public analyze(): RegimeAnalysis {
+    // Minimum data points guard: if fewer than 10 data points, return 'UNKNOWN' regime with confidence 0
+    if (this.returnsHistory.length < 10 || this.priceHistory.length < 10) {
+      return {
+        volatilityRegime: 'UNKNOWN',
+        marketRegime: 'UNKNOWN',
+        hurstExponent: 0.5,
+        adx: 0,
+        volatility: 0,
+        trendStrength: 0,
+        trendScore: 0.5,
+        tradingAllowed: false,
+        confidence: 0,
+        sizeMultiplier: 0.25,
+      };
+    }
+
     const volatility = this.calculateVolatility();
     const hurstExponent = this.calculateHurstExponent();
     const adx = this.calculateADX(14);
@@ -74,7 +90,7 @@ export class RegimeDetector {
   }
 
   private calculateADX(period: number = 14): number {
-    if (this.highHistory.length < period + 1) return 20;
+    if (this.highHistory.length < period + 1) return 0;
 
     const n = this.highHistory.length;
     const plusDM: number[] = [];
@@ -108,7 +124,7 @@ export class RegimeDetector {
     });
 
     const adxValues = this.smooth(dx, period);
-    return adxValues[adxValues.length - 1] || 20;
+    return adxValues[adxValues.length - 1] || 0;
   }
 
   private smooth(data: number[], period: number): number[] {
@@ -131,7 +147,7 @@ export class RegimeDetector {
   }
 
   private calculateVolatility(candleIntervalMs: number = 60000): number {
-    if (this.returnsHistory.length < 20) return 0.50;
+    if (this.returnsHistory.length < 2) return 0;
     const returns = this.returnsHistory.slice(-1440);
     const mean = returns.reduce((a, b) => a + b, 0) / returns.length;
     const variance = returns.reduce((sum, r) => sum + Math.pow(r - mean, 2), 0) / returns.length;
@@ -145,7 +161,7 @@ export class RegimeDetector {
   }
 
   private calculateTrendStrength(): number {
-    if (this.priceHistory.length < 50) return 0.5;
+    if (this.priceHistory.length < 50) return 0;
     const prices = this.priceHistory.slice(-100);
     const n = prices.length;
     const x = Array.from({ length: n }, (_, i) => i);
@@ -159,6 +175,6 @@ export class RegimeDetector {
     const ssRes = prices.reduce((sum, yi, i) => sum + Math.pow(yi - predicted[i], 2), 0);
     const meanY = sumY / n;
     const ssTot = prices.reduce((sum, yi) => sum + Math.pow(yi - meanY, 2), 0);
-    return 1 - (ssRes / ssTot);
+    return ssTot > 0 ? 1 - (ssRes / ssTot) : 0;
   }
 }

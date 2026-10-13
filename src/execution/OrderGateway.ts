@@ -10,6 +10,7 @@ import { UserDataStream } from './UserDataStream';
 import { RateLimiter } from '../utils/RateLimiter';
 import { formatPriceToTick, formatQuantityToStep } from '../market-data/AssetScreener';
 import { EXECUTION } from '../config/execution';
+import { redactSecrets } from '../config/env';
 import crypto from 'crypto';
 
 export interface GatewayConfig {
@@ -58,7 +59,7 @@ export class OrderGateway {
   private orderCounter: number = 0;
   private listeners: Set<(order: Order) => void> = new Set();
   private rateLimiter: RateLimiter;
-  private symbolFilters: Map<string, { stepSize: number; tickSize: number; minQty: number; minNotional: number }> = new Map();
+  private symbolFilters: Map<string, { stepSize: number; tickSize: number; minQty: number; minNotional: number; lastFetched: number }> = new Map();
   private currentLeverage: Map<string, number> = new Map();
   private timeOffset: number = 0;
   private preTradeValidator?: PreTradeValidator;
@@ -91,13 +92,14 @@ export class OrderGateway {
     this.executionMode = (this.config.executionMode as ExecutionMode) || EXECUTION.mode;
     this.apiBaseUrl = this.config.apiBaseUrl || EXECUTION.restUrl;
 
+    const now = Date.now();
     // Default filters for liquid perpetuals with minNotional
-    this.symbolFilters.set('BTCUSDT', { stepSize: 0.001, tickSize: 0.1, minQty: 0.001, minNotional: 5.0 });
-    this.symbolFilters.set('ETHUSDT', { stepSize: 0.001, tickSize: 0.01, minQty: 0.001, minNotional: 5.0 });
-    this.symbolFilters.set('SOLUSDT', { stepSize: 0.01, tickSize: 0.01, minQty: 0.01, minNotional: 5.0 });
-    this.symbolFilters.set('BNBUSDT', { stepSize: 0.01, tickSize: 0.01, minQty: 0.01, minNotional: 5.0 });
-    this.symbolFilters.set('XRPUSDT', { stepSize: 0.1, tickSize: 0.0001, minQty: 0.1, minNotional: 5.0 });
-    this.symbolFilters.set('DOGEUSDT', { stepSize: 1, tickSize: 0.00001, minQty: 1, minNotional: 5.0 });
+    this.symbolFilters.set('BTCUSDT', { stepSize: 0.001, tickSize: 0.1, minQty: 0.001, minNotional: 5.0, lastFetched: now });
+    this.symbolFilters.set('ETHUSDT', { stepSize: 0.001, tickSize: 0.01, minQty: 0.001, minNotional: 5.0, lastFetched: now });
+    this.symbolFilters.set('SOLUSDT', { stepSize: 0.01, tickSize: 0.01, minQty: 0.01, minNotional: 5.0, lastFetched: now });
+    this.symbolFilters.set('BNBUSDT', { stepSize: 0.01, tickSize: 0.01, minQty: 0.01, minNotional: 5.0, lastFetched: now });
+    this.symbolFilters.set('XRPUSDT', { stepSize: 0.1, tickSize: 0.0001, minQty: 0.1, minNotional: 5.0, lastFetched: now });
+    this.symbolFilters.set('DOGEUSDT', { stepSize: 1, tickSize: 0.00001, minQty: 1, minNotional: 5.0, lastFetched: now });
 
     if (this.executionMode !== 'PAPER' && this.apiKey && this.apiSecret) {
       void this.syncTime();
@@ -132,7 +134,7 @@ export class OrderGateway {
     method: 'GET' | 'POST' | 'DELETE',
     path: string,
     params: Record<string, string | number | boolean> = {},
-    timeoutMs: number = 8000,
+    timeoutMs: number = 10000,
     isRetry: boolean = false
   ): Promise<{ ok: boolean; status: number; data: any }> {
     if (!this.apiKey || !this.apiSecret) {
@@ -142,13 +144,12 @@ export class OrderGateway {
       .map(([k, v]) => `${k}=${encodeURIComponent(String(v))}`)
       .join('&');
     const signature = crypto.createHmac('sha256', this.apiSecret).update(qs).digest('hex');
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    const signal = AbortSignal.timeout(timeoutMs);
     try {
       const res = await fetch(`${this.apiBaseUrl}${path}?${qs}&signature=${signature}`, {
         method,
         headers: { 'X-MBX-APIKEY': this.apiKey },
-        signal: controller.signal,
+        signal,
       });
       let data: any = null;
       try { data = await res.json(); } catch { data = null; }
@@ -160,9 +161,10 @@ export class OrderGateway {
       }
       return { ok: res.ok, status: res.status, data };
     } catch (e) {
+      if (e instanceof DOMException && e.name === 'TimeoutError') {
+        return { ok: false, status: 0, data: { msg: `Request timeout after ${timeoutMs}ms` } };
+      }
       return { ok: false, status: 0, data: { msg: String(e) } };
-    } finally {
-      clearTimeout(timer);
     }
   }
 
@@ -208,19 +210,70 @@ export class OrderGateway {
       }
       return await res.json();
     } catch (e) {
-      console.error(`❌ signedGet failed for ${endpoint}:`, e);
+      console.error(`❌ signedGet failed for ${endpoint}:`, redactSecrets(String(e)));
       return [];
     }
   }
 
   public setSymbolFilter(symbol: string, stepSize: number, tickSize: number, minQty: number = 0.001, minNotional: number = 5.0) {
     const clean = symbol.replace('/', '');
-    this.symbolFilters.set(clean, { stepSize, tickSize, minQty, minNotional });
+    this.symbolFilters.set(clean, { stepSize, tickSize, minQty, minNotional, lastFetched: Date.now() });
   }
 
   public getSymbolFilter(symbol: string) {
     const clean = symbol.replace('/', '');
-    return this.symbolFilters.get(clean) || { stepSize: 0.001, tickSize: 0.01, minQty: 0.001, minNotional: 5.0 };
+    const cached = this.symbolFilters.get(clean);
+    const now = Date.now();
+    const ONE_HOUR = 60 * 60 * 1000;
+    
+    // Return cached if fresh (less than 1 hour old)
+    if (cached && now - cached.lastFetched < ONE_HOUR) {
+      return { stepSize: cached.stepSize, tickSize: cached.tickSize, minQty: cached.minQty, minNotional: cached.minNotional };
+    }
+    
+    // Fetch from exchange if stale or missing
+    void this.fetchSymbolFilters(clean);
+    
+    // Return cached (possibly stale) or defaults
+    if (cached) {
+      return { stepSize: cached.stepSize, tickSize: cached.tickSize, minQty: cached.minQty, minNotional: cached.minNotional };
+    }
+    return { stepSize: 0.001, tickSize: 0.01, minQty: 0.001, minNotional: 5.0 };
+  }
+
+  private async fetchSymbolFilters(symbol: string): Promise<void> {
+    if (this.executionMode === 'PAPER' || !this.apiKey || !this.apiSecret) return;
+    
+    try {
+      const res = await fetch(`${this.apiBaseUrl}/fapi/v1/exchangeInfo`);
+      if (!res.ok) return;
+      const data = await res.json();
+      if (!data || !data.symbols) return;
+      
+      const symInfo = data.symbols.find((s: any) => s.symbol === symbol);
+      if (!symInfo) return;
+      
+      let stepSize = 0.001;
+      let tickSize = 0.01;
+      let minQty = 0.001;
+      let minNotional = 5.0;
+      
+      for (const filter of symInfo.filters || []) {
+        if (filter.filterType === 'LOT_SIZE') {
+          stepSize = parseFloat(filter.stepSize);
+          minQty = parseFloat(filter.minQty);
+        } else if (filter.filterType === 'PRICE_FILTER') {
+          tickSize = parseFloat(filter.tickSize);
+        } else if (filter.filterType === 'MIN_NOTIONAL') {
+          minNotional = parseFloat(filter.notional);
+        }
+      }
+      
+      this.symbolFilters.set(symbol, { stepSize, tickSize, minQty, minNotional, lastFetched: Date.now() });
+      console.log(`📊 Updated symbol filters for ${symbol}: stepSize=${stepSize}, tickSize=${tickSize}, minQty=${minQty}, minNotional=${minNotional}`);
+    } catch (e) {
+      console.warn(`⚠️ Failed to fetch symbol filters for ${symbol}:`, e);
+    }
   }
 
   public getRateLimiter(): RateLimiter {
@@ -275,7 +328,7 @@ export class OrderGateway {
         console.log(`⚡ Binance Futures Leverage set for ${cleanSymbol}: ${data.leverage}x (ISOLATED)`);
         return true;
       } else {
-        console.warn(`⚠️ Failed to set Binance leverage for ${cleanSymbol}:`, data);
+        console.warn(`⚠️ Failed to set Binance leverage for ${cleanSymbol}:`, redactSecrets(String(data)));
         return false;
       }
     } catch (err) {
@@ -349,7 +402,7 @@ export class OrderGateway {
         result.slId = String(sl.data.algoId || sl.data.orderId);
         result.slOk = true;
       } else {
-        console.error('❌ SL order rejected on Binance:', sl.data);
+        console.error('❌ SL order rejected on Binance:', redactSecrets(String(sl.data)));
       }
     }
 
@@ -376,7 +429,7 @@ export class OrderGateway {
       if (tp.ok && (tp.data?.algoId || tp.data?.orderId)) {
         result.tpId = String(tp.data.algoId || tp.data.orderId);
       } else {
-        console.warn('⚠️ TP order rejected on Binance:', tp.data);
+        console.warn('⚠️ TP order rejected on Binance:', redactSecrets(String(tp.data)));
       }
     }
 
@@ -490,7 +543,7 @@ export class OrderGateway {
       // كبديل موثوق: إلغاء كافة الأوامر المفتوحة للرمز
       await this.cancelAllProtectiveForSymbol(clean);
     } catch (err) {
-      console.error(`❌ Error cancelling protective orders for ${symbolOrOrderId}:`, err);
+      console.error(`❌ Error cancelling protective orders for ${symbolOrOrderId}:`, redactSecrets(String(err)));
     }
   }
 
@@ -613,7 +666,7 @@ export class OrderGateway {
 
       const data = await res.json();
       if (!res.ok) {
-        console.error('❌ Binance Futures REST Order Rejected:', data);
+        console.error('❌ Binance Futures REST Order Rejected:', redactSecrets(String(data)));
         const code = Number(data.code || 0);
         const policy = ERROR_POLICY[code] || 'HALT';
         console.warn(`⚠️ Applied Error Policy for Binance code ${code}: ${policy}`);
@@ -653,7 +706,7 @@ export class OrderGateway {
         this.notifyOrder(order);
       }
     } catch (err) {
-      console.error('❌ Error sending order to Binance Futures:', err);
+      console.error('❌ Error sending order to Binance Futures:', redactSecrets(String(err)));
       if (this.fsm.canTransition(order.status, 'REJECTED')) {
         this.fsm.transition(order, 'REJECTED', String(err));
       } else {
@@ -932,8 +985,8 @@ export class OrderGateway {
       if (book) {
         const canFill = (order.side === 'BUY' && order.price >= book.asks[0]?.price) || (order.side === 'SELL' && order.price <= book.bids[0]?.price);
         if (canFill) {
-          // Fill immediately
-          this.executeFill(order, order.quantity, false);
+          // Marketable limit order executes as TAKER (crosses spread)
+          this.executeFill(order, order.quantity, true);
         }
       }
     }
@@ -941,6 +994,13 @@ export class OrderGateway {
 
   public executeFill(order: Order, fillQty: number, isTaker: boolean) {
     const book = this.orderBookBuilder.getBook(order.symbol);
+    
+    // Stale book guard: skip fill if book data is older than 30 seconds
+    if (book && book.timestamp && Date.now() - book.timestamp > 30000) {
+      console.warn(`⚠️ Stale order book for ${order.symbol} (last update ${Date.now() - book.timestamp}ms ago); skipping paper fill`);
+      return;
+    }
+    
     const vwapResult = this.orderBookBuilder.getVwapExecutionPrice(order.symbol, order.side, fillQty);
     const fillPrice = vwapResult.avgPrice || order.price;
 
@@ -1014,6 +1074,15 @@ export class OrderGateway {
     const order = this.orders.get(orderId);
     if (!order) return false;
 
+    // Guard against race condition: do not attempt cancellation on orders already
+    // in a terminal state (FILLED, CANCELLED, REJECTED, EXPIRED). An exchange-side
+    // cancel on these would either error or silently do nothing, wasting a
+    // round-trip and potentially interfering with post-fill cleanup logic.
+    const TERMINAL_STATUSES: OrderStatus[] = ['FILLED', 'CANCELLED', 'REJECTED', 'EXPIRED'];
+    if (TERMINAL_STATUSES.includes(order.status)) {
+      return false;
+    }
+
     if (this.fsm.canTransition(order.status, 'CANCELLED')) {
       this.fsm.transition(order, 'CANCELLED', reason);
       this.notifyOrder(order);
@@ -1026,7 +1095,7 @@ export class OrderGateway {
   public async cancelAllOpenOrdersForSymbol(symbol: string): Promise<boolean> {
     if (this.executionMode === 'PAPER' || !this.apiKey || !this.apiSecret) return true;
     const r = await this.signedRequest('DELETE', '/fapi/v1/allOpenOrders', { symbol: symbol.replace('/', '') });
-    if (!r.ok) console.error(`❌ Failed to cancel open orders on Binance for ${symbol}`, r.data);
+    if (!r.ok) console.error(`❌ Failed to cancel open orders on Binance for ${symbol}`, redactSecrets(String(r.data)));
     return r.ok;
   }
 
@@ -1067,7 +1136,7 @@ export class OrderGateway {
         reduceOnly: true, newOrderRespType: 'RESULT',
       });
       if (!order.ok) {
-        console.warn(`⚠️ [EXCHANGE CLOSE REJECTED] ${symbol}`, order.data);
+         console.warn(`⚠️ [EXCHANGE CLOSE REJECTED] ${symbol}`, redactSecrets(String(order.data)));
         return { success: false, qty: 0, error: order.data?.msg || 'Close rejected' };
       }
 
@@ -1087,7 +1156,7 @@ export class OrderGateway {
       console.log(`✅ [EXCHANGE CLOSE SUCCESS] Closed ${symbol} on Binance (${closeSide} ${qtyStr})`);
       return { success: true, qty: Math.abs(currentAmt) };
     } catch (e) {
-      console.error(`❌ [EXCHANGE CLOSE ERROR] ${symbol}`, e);
+      console.error(`❌ [EXCHANGE CLOSE ERROR] ${symbol}`, redactSecrets(String(e)));
       return { success: false, qty: 0, error: String(e) };
     }
   }
@@ -1099,7 +1168,7 @@ export class OrderGateway {
     }
     const pr = await this.signedRequest('GET', '/fapi/v2/positionRisk');
     if (!pr.ok || !Array.isArray(pr.data)) {
-      console.error('❌ Full liquidation aborted: could not read positions from exchange', pr.data);
+      console.error('❌ Full liquidation aborted: could not read positions from exchange', redactSecrets(String(pr.data)));
       return { closed: 0, failed: ['ACCOUNT_READ_FAILED'] };
     }
     const open = pr.data.filter((p: any) => Math.abs(parseFloat(p.positionAmt)) > 1e-9);

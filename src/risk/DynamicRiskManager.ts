@@ -6,8 +6,8 @@ export interface RiskMetrics {
   rollingDrawdown: number;
   drawdownVelocity: number; // % loss per day
   parameterDrift: number; // 0-1 (0 = aligned with WFO, 1 = complete drift)
-  volatilityRegime: 'LOW' | 'NORMAL' | 'HIGH' | 'EXTREME';
-  marketRegime: 'TRENDING' | 'RANGING' | 'VOLATILE';
+  volatilityRegime: 'LOW' | 'NORMAL' | 'HIGH' | 'EXTREME' | 'UNKNOWN';
+  marketRegime: 'TRENDING' | 'RANGING' | 'VOLATILE' | 'UNKNOWN';
   tradingAllowed: boolean;
   regimeConfidence: number;
   hurstExponent?: number;
@@ -70,10 +70,10 @@ export class DynamicRiskManager extends EventEmitter {
       rollingDrawdown: 0.0,
       drawdownVelocity: 0.0,
       parameterDrift: 0.0,
-      volatilityRegime: 'NORMAL',
-      marketRegime: 'RANGING',
-      tradingAllowed: true,
-      regimeConfidence: 1.0,
+      volatilityRegime: 'UNKNOWN',
+      marketRegime: 'UNKNOWN',
+      tradingAllowed: false,
+      regimeConfidence: 0,
     };
   }
 

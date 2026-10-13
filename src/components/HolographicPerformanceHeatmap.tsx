@@ -9,7 +9,7 @@
  * ====================================================================
  */
 
-import React, { useState, useMemo, useEffect } from 'react';
+import React, { useState, useMemo, useEffect, useCallback } from 'react';
 import {
   Flame,
   TrendingUp,
@@ -89,7 +89,7 @@ export const HolographicPerformanceHeatmap: React.FC<HolographicPerformanceHeatm
   }, [propPositions]);
 
   // Fetch fresh order history & live positions if not provided via props
-  const fetchOrderHistory = async () => {
+  const fetchOrderHistory = useCallback(async () => {
     setIsLoading(true);
     try {
       const [orderRes, statusRes] = await Promise.all([
@@ -117,13 +117,13 @@ export const HolographicPerformanceHeatmap: React.FC<HolographicPerformanceHeatm
     } finally {
       setIsLoading(false);
     }
-  };
+  }, []);
 
   useEffect(() => {
     fetchOrderHistory();
     const interval = setInterval(fetchOrderHistory, 10000); // 10s refresh
     return () => clearInterval(interval);
-  }, []);
+  }, [fetchOrderHistory]);
 
   // Compute Performance Heatmap Metrics
   const { metricsList, overallStats } = useMemo(() => {

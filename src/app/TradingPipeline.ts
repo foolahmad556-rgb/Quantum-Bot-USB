@@ -54,6 +54,13 @@ import { StrategyManager } from '../strategies/StrategyManager';
 import { SystemWatchdog, WatchdogStatus } from '../monitoring/SystemWatchdog';
 import { BotStrategy, StrategyScreenerItem } from '../domain/types';
 import fs from 'fs';
+import { redactSecrets, validateRequiredEnv } from '../config/env';
+
+/** Detects exchange/gateway rejections caused by an insufficient order notional. */
+function isMinNotionalRejection(errorMessage?: string): boolean {
+  const msg = (errorMessage || '').toLowerCase();
+  return msg.includes('notional') || msg.includes('-4164');
+}
 
 export class TradingPipeline {
   private assetScreener: AssetScreener;
@@ -84,6 +91,7 @@ export class TradingPipeline {
   private scaleInManager: ScaleInManager;
   private lastSnapshotTime: number = 0;
   private inFlightSymbols: Set<string> = new Set();
+  private inFlightLocks: Set<string> = new Set();
   private peakEquityObserved: number = 0;
   private lastRiskDay: string = '';
   private pendingProtection: Map<string, { ouSigma: number; ouMu: number; side: 'BUY' | 'SELL'; symbol: AssetSymbol }> = new Map();
@@ -130,6 +138,16 @@ export class TradingPipeline {
     
     // Read environment configuration
     const rawMode = process.env.EXECUTION_MODE;
+
+    // Startup environment validation: fail fast with a descriptive error when a
+    // variable required by the selected execution mode is missing or empty.
+    // Exchange credentials are mandatory for real-exchange modes (TESTNET/LIVE);
+    // PAPER mode intentionally runs without them against a simulated exchange.
+    const requestedMode = (rawMode || '').trim().toUpperCase();
+    if (requestedMode === 'LIVE' || requestedMode === 'PRODUCTION' || requestedMode === 'TESTNET') {
+      validateRequiredEnv(['EXCHANGE_API_KEY', 'EXCHANGE_API_SECRET']);
+    }
+
     const hasKey = !!process.env.EXCHANGE_API_KEY;
     const executionMode: ExecutionMode = normalizeExecutionMode(rawMode, hasKey);
     const apiBaseUrl = getBinanceBaseUrl(executionMode);
@@ -343,7 +361,7 @@ export class TradingPipeline {
       }
     } catch (error: any) {
       this.isRunning = false;
-      console.error('❌ Failed to start autonomous trading:', error);
+      console.error('❌ Failed to start autonomous trading:', redactSecrets(String(error)));
       if (this.telegramService) {
         await this.telegramService.sendMessage(`🚨 <b>خطأ أثناء بدء التشغيل</b>\n\n${error.message}`).catch(() => {});
       }
@@ -358,7 +376,7 @@ export class TradingPipeline {
           await this.updateRiskMetrics();
         }
       } catch (error) {
-        console.error('Error in risk evaluation loop:', error);
+        console.error('Error in risk evaluation loop:', redactSecrets(String(error)));
       }
     }, 60 * 1000);
 
@@ -554,9 +572,9 @@ export class TradingPipeline {
 ━━━━━━━━━━━━━━━━
 ✅ تم تحرير الهامش وإعادة ضبط مصفوفة الأوزان بنجاح.
         `).catch(() => {});
-      } catch (err) {
-        console.warn('Failed to update closed trade in DB:', err);
-      }
+        } catch (err) {
+          console.warn('Failed to update closed trade in DB:', redactSecrets(String(err)));
+        }
     });
 
     // Forward KillSwitch events to journal & persist to DB
@@ -758,7 +776,7 @@ export class TradingPipeline {
 
     if (this.config.autoTradingEnabled && this.killSwitch.isEntryAllowed()) {
       void this.evaluateSignalAndExecute(tick.symbol, features, book, regime).catch((err) => {
-        console.error(`❌ evaluateSignalAndExecute failed for ${tick.symbol}:`, err);
+        console.error(`❌ evaluateSignalAndExecute failed for ${tick.symbol}:`, redactSecrets(String(err)));
       });
     }
 
@@ -828,6 +846,22 @@ export class TradingPipeline {
     const sig = decision.signal;
     const signalType = sig.type as 'BUY' | 'SELL';
     const strength = sig.strength;
+
+    // Validate that signal prices are positive finite numbers before using them in calculations.
+    // Reject NaN / Infinity / negative prices.
+    const currentPrice = features.currentPrice;
+    if (!Number.isFinite(currentPrice) || currentPrice <= 0) {
+      console.warn(`⚠️ [${symbol}] Signal rejected: currentPrice is ${currentPrice} (not a positive finite number).`);
+      return;
+    }
+    if (sig.stopLoss !== undefined && sig.stopLoss !== null && (!Number.isFinite(sig.stopLoss) || sig.stopLoss < 0)) {
+      console.warn(`⚠️ [${symbol}] Signal rejected: stopLoss is ${sig.stopLoss} (not a finite non-negative number).`);
+      return;
+    }
+    if (sig.takeProfit !== undefined && sig.takeProfit !== null && (!Number.isFinite(sig.takeProfit) || sig.takeProfit < 0)) {
+      console.warn(`⚠️ [${symbol}] Signal rejected: takeProfit is ${sig.takeProfit} (not a finite non-negative number).`);
+      return;
+    }
 
     // 🏛️ Board of Directors v6.0 Evaluation (6 Decision Makers + 8 Anti-Overfitting Guards)
     const candlesMap: Record<string, any> = {};
@@ -947,69 +981,101 @@ export class TradingPipeline {
           // Set leverage and isolated margin on Binance Futures
           await this.orderGateway.ensureLeverage(symbol, this.config.maxLeverage || 10, 'ISOLATED');
 
-          // Register pending protection to be sent upon actual order fill (البند 23)
-          const ord = this.orderGateway.submitOrder({
-            symbol,
-            side: signalType,
-            type: 'MARKET',
-            quantity: qty,
-            price: features.currentPrice,
-            strategyId: 'OU-DECISION-ENGINE',
-          });
-
-          if (ord.status === 'REJECTED') {
-            console.warn(`⛔ Entry rejected by centralized risk validation for ${symbol}: ${ord.errorMessage}`);
+          // In-flight submission lock: prevent concurrent order submission for the same symbol
+          if (this.inFlightLocks.has(symbol)) {
             return;
           }
+          this.inFlightLocks.add(symbol);
+          try {
+            // Register pending protection to be sent upon actual order fill (البند 23)
+            let ord = this.orderGateway.submitOrder({
+              symbol,
+              side: signalType,
+              type: 'MARKET',
+              quantity: qty,
+              price: features.currentPrice,
+              strategyId: 'OU-DECISION-ENGINE',
+            });
 
-          this.pendingProtection.set(ord.id, {
-            ouSigma: features.ouSigma || (features.currentPrice * 0.005),
-            ouMu: sig.takeProfit,
-            side: signalType,
-            symbol,
-          });
+            // Min-notional bump: when the order fails with a "less than min notional"
+            // error, bump the quantity up to meet the minimum notional requirement
+            // and retry instead of giving up.
+            if (ord.status === 'REJECTED' && isMinNotionalRejection(ord.errorMessage)) {
+              const filter = this.orderGateway.getSymbolFilter(symbol);
+              const minNotionalUsd = filter?.minNotional || 5;
+              const stepSize = filter?.stepSize || 0.001;
+              // Round UP to a whole step multiple so the quantity still meets
+              // the minimum notional after gateway step formatting (which floors).
+              const rawBumpedQty = (minNotionalUsd * 1.05) / (features.currentPrice || 1);
+              const bumpedQty = stepSize > 0 ? Math.ceil(rawBumpedQty / stepSize) * stepSize : rawBumpedQty;
+              console.log(`📈 ${symbol}: order rejected for insufficient notional — bumping quantity ${qty} -> ${bumpedQty} to meet $${minNotionalUsd} minimum and retrying`);
+              qty = Number(bumpedQty.toFixed(6));
+              ord = this.orderGateway.submitOrder({
+                symbol,
+                side: signalType,
+                type: 'MARKET',
+                quantity: qty,
+                price: features.currentPrice,
+                strategyId: 'OU-DECISION-ENGINE',
+              });
+            }
 
-          // 💾 Save Trade to database
-          await this.db.saveTrade({
-            id: ord.id,
-            timestamp: Date.now(),
-            symbol,
-            side: signalType,
-            quantity: qty,
-            price: features.currentPrice,
-            strategy: 'OU-DECISION-ENGINE',
-            status: 'OPEN',
-          });
+            if (ord.status === 'REJECTED') {
+              console.warn(`⛔ Entry rejected by centralized risk validation for ${symbol}: ${ord.errorMessage}`);
+              return;
+            }
 
-          // 📝 Register with Partial Profit Manager (including maxHoldMs for Point 11 time exit)
-          this.partialProfitManager.registerPosition(
-            ord.id,
-            symbol,
-            signalType,
-            features.currentPrice,
-            qty,
-            sig.maxHoldMs
-          );
+            this.pendingProtection.set(ord.id, {
+              ouSigma: features.ouSigma || (features.currentPrice * 0.005),
+              ouMu: sig.takeProfit,
+              side: signalType,
+              symbol,
+            });
 
-          // 📈 Register with Scale-In Manager
-          this.scaleInManager.registerOriginalPosition(
-            ord.id,
-            symbol,
-            signalType,
-            features.currentPrice,
-            qty
-          );
+            // 💾 Save Trade to database
+            await this.db.saveTrade({
+              id: ord.id,
+              timestamp: Date.now(),
+              symbol,
+              side: signalType,
+              quantity: qty,
+              price: features.currentPrice,
+              strategy: 'OU-DECISION-ENGINE',
+              status: 'OPEN',
+            });
 
-          this.eventJournal.record(
-            'ORDER',
-            'STRATEGY',
-            `Auto Strategy Triggered ${signalType} ${qty} ${symbol}: ${sig.reason}`,
-            { signal: sig }
-          );
+            // 📝 Register with Partial Profit Manager (including maxHoldMs for Point 11 time exit)
+            this.partialProfitManager.registerPosition(
+              ord.id,
+              symbol,
+              signalType,
+              features.currentPrice,
+              qty,
+              sig.maxHoldMs
+            );
+
+            // 📈 Register with Scale-In Manager
+            this.scaleInManager.registerOriginalPosition(
+              ord.id,
+              symbol,
+              signalType,
+              features.currentPrice,
+              qty
+            );
+
+            this.eventJournal.record(
+              'ORDER',
+              'STRATEGY',
+              `Auto Strategy Triggered ${signalType} ${qty} ${symbol}: ${sig.reason}`,
+              { signal: sig }
+            );
+          } finally {
+            this.inFlightLocks.delete(symbol);
+          }
         }
       }
     } catch (err) {
-      console.error(`❌ Error in evaluateSignalAndExecute for ${symbol}:`, err);
+      console.error(`❌ Error in evaluateSignalAndExecute for ${symbol}:`, redactSecrets(String(err)));
     } finally {
       this.inFlightSymbols.delete(symbol);
     }
@@ -1185,8 +1251,8 @@ export class TradingPipeline {
       ]);
 
       if (!accountRes.ok || !positionsRes.ok) {
-        const accErr = !accountRes.ok ? await accountRes.text().catch(() => '') : 'OK';
-        const posErr = !positionsRes.ok ? await positionsRes.text().catch(() => '') : 'OK';
+        const accErr = redactSecrets(!accountRes.ok ? await accountRes.text().catch(() => '') : 'OK');
+        const posErr = redactSecrets(!positionsRes.ok ? await positionsRes.text().catch(() => '') : 'OK');
         console.warn(`⚠️ Reconciliation skipped: Exchange API returned error (Account HTTP ${accountRes.status}: ${accErr} | Positions HTTP ${positionsRes.status}: ${posErr})`);
         return;
       }
@@ -1301,7 +1367,7 @@ export class TradingPipeline {
         console.log(`✅ State Reconciliation complete. In sync with Binance Futures (${executionMode}). Equity: $${realEquity.toFixed(2)}, Open positions: ${realOpenPositions.length}`);
       }
     } catch (error) {
-      console.error('❌ Reconciliation failed:', error);
+      console.error('❌ Reconciliation failed:', redactSecrets(String(error)));
     }
   }
 
@@ -1676,7 +1742,7 @@ export class TradingPipeline {
         learningEvent: learnEvent
       };
     } catch (e: any) {
-      console.error(`❌ Failed to close position for ${symbol}:`, e);
+      console.error(`❌ Failed to close position for ${symbol}:`, redactSecrets(String(e)));
       return { success: false, message: e.message || "Close failed" };
     } finally {
       this.inFlightSymbols.delete(symbol);

@@ -6,6 +6,20 @@
 
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2'
 
+// Startup validation: required environment variables must be present and
+// non-empty. Fail fast with a descriptive error at boot instead of failing
+// per-request with cryptic errors.
+const REQUIRED_ENV_VARS = ['SUPABASE_URL', 'SUPABASE_ANON_KEY', 'WEBHOOK_SECRET']
+for (const name of REQUIRED_ENV_VARS) {
+  const value = Deno.env.get(name)
+  if (!value || !value.trim()) {
+    throw new Error(
+      `Missing or empty required environment variable: ${name}. ` +
+      `Set ${name} to a non-empty value before deploying the webhook function.`
+    )
+  }
+}
+
 const supabase = createClient(
   Deno.env.get('SUPABASE_URL')!,
   Deno.env.get('SUPABASE_ANON_KEY')!

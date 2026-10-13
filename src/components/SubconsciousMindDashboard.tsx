@@ -853,7 +853,7 @@ export const SubconsciousMindDashboard: React.FC<SubconsciousMindDashboardProps>
       if (rafId) cancelAnimationFrame(rafId);
       window.removeEventListener('resize', resize);
     };
-  }, [settings, triggerDecision, haptic, playTone]);
+  }, [settings, triggerDecision, haptic, playTone, setGeneration, setMindMode]);
 
   const lerp = (a: number, b: number, t: number) => a + (b - a) * t;
 
@@ -905,7 +905,7 @@ export const SubconsciousMindDashboard: React.FC<SubconsciousMindDashboardProps>
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [onToggleBot, triggerDecision, onTriggerKillSwitch, haptic, playTone]);
+  }, [onToggleBot, triggerDecision, onTriggerKillSwitch, haptic, playTone, setMindMode, setSettingsOpen, setPositionsDrawerOpen]);
 
   // Handle Manual Order Submission from Quick Order Pad
   const handleQuickSubmitOrder = async () => {

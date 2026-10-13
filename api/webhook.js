@@ -125,6 +125,19 @@ export default {
     }
 
     if (url.pathname === '/webhook' && request.method === 'POST') {
+      // Startup configuration validation: required secrets must be present and
+      // non-empty. Fail fast with a descriptive error instead of silently
+      // rejecting every request with a generic 401.
+      const missingSecrets = ['WEBHOOK_SECRET'].filter((name) => !(env[name] || '').trim());
+      if (missingSecrets.length > 0) {
+        return new Response(
+          JSON.stringify({
+            error: `Missing or empty required secret(s): ${missingSecrets.join(', ')}. Configure them with: wrangler secret put <name> --name quantum-bot-webhook`
+          }),
+          { status: 500, headers: { 'Content-Type': 'application/json', ...CORS_HEADERS } }
+        );
+      }
+
       try {
         const auth = request.headers.get('Authorization');
         const expected = `Bearer ${env.WEBHOOK_SECRET}`;

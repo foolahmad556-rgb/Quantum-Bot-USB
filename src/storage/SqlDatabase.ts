@@ -34,6 +34,9 @@ export class SqlDatabaseStore {
     trades: Record<string, StoredTrade>;
     audit_logs: StoredLog[];
   };
+  // Indexes for O(1) lookups by userId and status (avoid full Object.values scans)
+  private tradesByUserId: Map<string, Set<string>> = new Map();
+  private tradesByStatus: Map<string, Set<string>> = new Map();
 
   constructor(dbPath: string = "./data/baselbot_db.json") {
     this.filePath = dbPath;
@@ -62,10 +65,20 @@ export class SqlDatabaseStore {
           }
         }
         this.data.trades = sanitized;
+        // Rebuild indexes after load
+        this.rebuildIndexes();
       }
     } catch (err) {
       console.error("Error loading persistent database:", err);
       this.data = { trades: {}, audit_logs: [] };
+    }
+  }
+
+  private rebuildIndexes() {
+    this.tradesByUserId.clear();
+    this.tradesByStatus.clear();
+    for (const [id, trade] of Object.entries(this.data.trades)) {
+      this.updateIndexes(trade);
     }
   }
 
@@ -83,7 +96,29 @@ export class SqlDatabaseStore {
 
   public saveTrade(trade: StoredTrade) {
     this.data.trades[trade.id] = trade;
+    this.updateIndexes(trade);
     this.save();
+  }
+
+  private updateIndexes(trade: StoredTrade) {
+    // Index by userId (assuming trade has userId, or use a default)
+    const userId = (trade as any).userId || 'default';
+    if (!this.tradesByUserId.has(userId)) {
+      this.tradesByUserId.set(userId, new Set());
+    }
+    this.tradesByUserId.get(userId)!.add(trade.id);
+
+    // Index by status
+    if (!this.tradesByStatus.has(trade.status)) {
+      this.tradesByStatus.set(trade.status, new Set());
+    }
+    this.tradesByStatus.get(trade.status)!.add(trade.id);
+  }
+
+  private removeFromIndexes(trade: StoredTrade) {
+    const userId = (trade as any).userId || 'default';
+    this.tradesByUserId.get(userId)?.delete(trade.id);
+    this.tradesByStatus.get(trade.status)?.delete(trade.id);
   }
 
   public getTrades(limit: number = 100): StoredTrade[] {
@@ -101,14 +136,23 @@ export class SqlDatabaseStore {
   }
 
   public getPerformanceMetrics() {
-    const trades = Object.values(this.data.trades);
-    const closedTrades = trades.filter(t => t.status === 'CLOSED' || t.status === 'FILLED');
+    // Use index for CLOSED/FILLED status lookups instead of full scan
+    const closedIds = this.tradesByStatus.get('CLOSED') || new Set();
+    const filledIds = this.tradesByStatus.get('FILLED') || new Set();
+    const allClosedIds = new Set([...closedIds, ...filledIds]);
+
+    const closedTrades: StoredTrade[] = [];
+    allClosedIds.forEach(id => {
+      const trade = this.data.trades[id];
+      if (trade) closedTrades.push(trade);
+    });
+
     const totalTrades = closedTrades.length;
     const winningTrades = closedTrades.filter(t => (t.pnl || 0) > 0).length;
     const totalPnl = closedTrades.reduce((sum, t) => sum + (t.pnl || 0), 0);
 
     return {
-      totalTrades: trades.length,
+      totalTrades: Object.keys(this.data.trades).length,
       closedTrades,
       winningTrades,
       winRate: totalTrades > 0 ? (winningTrades / totalTrades) * 100 : 0,
