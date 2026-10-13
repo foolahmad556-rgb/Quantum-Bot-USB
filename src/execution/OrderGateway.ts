@@ -10,6 +10,8 @@ import { UserDataStream } from './UserDataStream';
 import { RateLimiter } from '../utils/RateLimiter';
 import { formatPriceToTick, formatQuantityToStep } from '../market-data/AssetScreener';
 import { EXECUTION } from '../config/execution';
+import { redactSecrets } from '../config/env';
+import { TransactionCostAnalysis } from './TransactionCostAnalysis';
 import crypto from 'crypto';
 
 export interface GatewayConfig {
@@ -21,6 +23,57 @@ export interface GatewayConfig {
   apiSecret?: string;
   apiBaseUrl?: string;
   executionMode?: 'LIVE' | 'TESTNET' | 'PAPER' | string;
+  paperRealism?: PaperRealismConfig;
+}
+
+export interface PaperRealismConfig {
+  spreadBps: number;
+  slippageBps: number;
+  latencyMs: { min: number; max: number };
+  partialFillEnabled: boolean;
+  partialFillThresholdBps: number;
+}
+
+export interface ExecutionSlice {
+  sliceIndex: number;
+  totalSlices: number;
+  quantity: number;
+  price: number;
+  timestamp: number;
+  side: OrderSide;
+  symbol: AssetSymbol;
+  type: OrderType;
+  isFinal: boolean;
+}
+
+export interface TWAPConfig {
+  durationMinutes: number;
+  slicesCount: number;
+  symbol: AssetSymbol;
+  side: OrderSide;
+  totalQuantity: number;
+}
+
+export interface VWAPConfig {
+  durationMinutes: number;
+  symbol: AssetSymbol;
+  side: OrderSide;
+  totalQuantity: number;
+  volumeProfile?: number[];
+}
+
+export interface POVConfig {
+  durationMinutes: number;
+  symbol: AssetSymbol;
+  side: OrderSide;
+  totalQuantity: number;
+  targetParticipationRate: number;
+}
+
+export interface VolumeProfile {
+  symbol: AssetSymbol;
+  profile: number[];
+  lastUpdated: number;
 }
 
 export interface PreTradeValidationInput {
@@ -58,10 +111,14 @@ export class OrderGateway {
   private orderCounter: number = 0;
   private listeners: Set<(order: Order) => void> = new Set();
   private rateLimiter: RateLimiter;
-  private symbolFilters: Map<string, { stepSize: number; tickSize: number; minQty: number; minNotional: number }> = new Map();
+  private symbolFilters: Map<string, { stepSize: number; tickSize: number; minQty: number; minNotional: number; lastFetched: number }> = new Map();
   private currentLeverage: Map<string, number> = new Map();
   private timeOffset: number = 0;
   private preTradeValidator?: PreTradeValidator;
+  private volumeProfiles: Map<string, VolumeProfile> = new Map();
+  private activeExecutions: Map<string, { config: TWAPConfig | VWAPConfig | POVConfig; slices: ExecutionSlice[]; currentSlice: number; intervalId?: NodeJS.Timeout }> = new Map();
+  private executionCounter: number = 0;
+  private tca: TransactionCostAnalysis;
 
   private apiKey: string = '';
   private apiSecret: string = '';
@@ -83,6 +140,13 @@ export class OrderGateway {
       simulatedLatencyMs: 15,
       commissionAsset: 'USDT',
       executionMode: EXECUTION.mode,
+      paperRealism: {
+        spreadBps: 1,
+        slippageBps: 5,
+        latencyMs: { min: 10, max: 50 },
+        partialFillEnabled: true,
+        partialFillThresholdBps: 1000,
+      },
       ...config,
     };
 
@@ -91,18 +155,20 @@ export class OrderGateway {
     this.executionMode = (this.config.executionMode as ExecutionMode) || EXECUTION.mode;
     this.apiBaseUrl = this.config.apiBaseUrl || EXECUTION.restUrl;
 
+    const now = Date.now();
     // Default filters for liquid perpetuals with minNotional
-    this.symbolFilters.set('BTCUSDT', { stepSize: 0.001, tickSize: 0.1, minQty: 0.001, minNotional: 5.0 });
-    this.symbolFilters.set('ETHUSDT', { stepSize: 0.001, tickSize: 0.01, minQty: 0.001, minNotional: 5.0 });
-    this.symbolFilters.set('SOLUSDT', { stepSize: 0.01, tickSize: 0.01, minQty: 0.01, minNotional: 5.0 });
-    this.symbolFilters.set('BNBUSDT', { stepSize: 0.01, tickSize: 0.01, minQty: 0.01, minNotional: 5.0 });
-    this.symbolFilters.set('XRPUSDT', { stepSize: 0.1, tickSize: 0.0001, minQty: 0.1, minNotional: 5.0 });
-    this.symbolFilters.set('DOGEUSDT', { stepSize: 1, tickSize: 0.00001, minQty: 1, minNotional: 5.0 });
+    this.symbolFilters.set('BTCUSDT', { stepSize: 0.001, tickSize: 0.1, minQty: 0.001, minNotional: 5.0, lastFetched: now });
+    this.symbolFilters.set('ETHUSDT', { stepSize: 0.001, tickSize: 0.01, minQty: 0.001, minNotional: 5.0, lastFetched: now });
+    this.symbolFilters.set('SOLUSDT', { stepSize: 0.01, tickSize: 0.01, minQty: 0.01, minNotional: 5.0, lastFetched: now });
+    this.symbolFilters.set('BNBUSDT', { stepSize: 0.01, tickSize: 0.01, minQty: 0.01, minNotional: 5.0, lastFetched: now });
+    this.symbolFilters.set('XRPUSDT', { stepSize: 0.1, tickSize: 0.0001, minQty: 0.1, minNotional: 5.0, lastFetched: now });
+    this.symbolFilters.set('DOGEUSDT', { stepSize: 1, tickSize: 0.00001, minQty: 1, minNotional: 5.0, lastFetched: now });
 
     if (this.executionMode !== 'PAPER' && this.apiKey && this.apiSecret) {
       void this.syncTime();
       void this.checkDualSidePosition();
     }
+    this.tca = new TransactionCostAnalysis();
   }
 
   public async syncTime(): Promise<void> {
@@ -125,6 +191,334 @@ export class OrderGateway {
   }
 
   /**
+   * TWAP (Time-Weighted Average Price) Execution Algorithm
+   * Splits order into N slices executed at equal time intervals
+   * Each slice sized proportionally to expected volume at that time-of-day
+   */
+  public executeTWAP(config: TWAPConfig): { executionId: string; slices: ExecutionSlice[]; nextSlice: () => ExecutionSlice | null } {
+    const { durationMinutes, slicesCount, symbol, side, totalQuantity } = config;
+    const executionId = `TWAP-${Date.now().toString(36)}-${this.executionCounter++}`;
+    const startTime = Date.now();
+    const intervalMs = (durationMinutes * 60 * 1000) / slicesCount;
+    
+    // Get volume profile for the symbol (historical volume by time-of-day)
+    const volumeProfile = this.getVolumeProfile(symbol);
+    
+    const slices: ExecutionSlice[] = [];
+    let remainingQty = totalQuantity;
+    
+    for (let i = 0; i < slicesCount; i++) {
+      const sliceTime = startTime + i * intervalMs;
+      const volumeWeight = volumeProfile[i % volumeProfile.length] || 1;
+      const totalVolumeWeight = volumeProfile.reduce((a, b) => a + b, 0) || slicesCount;
+      const sliceQty = Number(((totalQuantity * volumeWeight) / totalVolumeWeight).toFixed(4));
+      
+      // Adjust last slice to account for rounding
+      if (i === slicesCount - 1) {
+        slices[i - 1] && (slices[i - 1].quantity = Number((slices[i - 1].quantity + remainingQty - sliceQty).toFixed(4)));
+        remainingQty = 0;
+      } else {
+        remainingQty -= sliceQty;
+      }
+      
+      const book = this.orderBookBuilder.getBook(symbol);
+      const midPrice = book?.midPrice || 0;
+      const tickSize = this.getSymbolFilter(symbol).tickSize;
+      const price = Number((midPrice * (side === 'BUY' ? 1.0005 : 0.9995)).toFixed(Math.max(0, Math.ceil(-Math.log10(tickSize)))));
+      
+      slices.push({
+        sliceIndex: i,
+        totalSlices: slicesCount,
+        quantity: sliceQty,
+        price,
+        timestamp: sliceTime,
+        side,
+        symbol,
+        type: 'TWAP' as OrderType,
+        isFinal: i === slicesCount - 1,
+      });
+    }
+
+    const executionState = { config, slices, currentSlice: 0, intervalId: undefined as NodeJS.Timeout | undefined };
+    this.activeExecutions.set(executionId, executionState);
+
+    const nextSlice = (): ExecutionSlice | null => {
+      const state = this.activeExecutions.get(executionId);
+      if (!state || state.currentSlice >= state.slices.length) {
+        this.activeExecutions.delete(executionId);
+        return null;
+      }
+      const slice = state.slices[state.currentSlice];
+      // Update price to current market before execution
+      const book = this.orderBookBuilder.getBook(symbol);
+      if (book) {
+        slice.price = Number((book.midPrice * (side === 'BUY' ? 1.0005 : 0.9995)).toFixed(Math.max(0, Math.ceil(-Math.log10(this.getSymbolFilter(symbol).tickSize)))));
+      }
+      state.currentSlice++;
+      return slice;
+    };
+
+    // Auto-schedule slices
+    executionState.intervalId = setInterval(() => {
+      const slice = nextSlice();
+      if (slice) {
+        this.submitOrder({
+          symbol: slice.symbol,
+          side: slice.side,
+          type: 'LIMIT',
+          quantity: slice.quantity,
+          price: slice.price,
+          timeInForce: 'IOC',
+          executionTag: `TWAP-${executionId}`,
+        });
+      } else {
+        if (executionState.intervalId) clearInterval(executionState.intervalId);
+      }
+    }, intervalMs);
+
+    return { executionId, slices, nextSlice };
+  }
+
+  /**
+   * VWAP (Volume-Weighted Average Price) Execution Algorithm
+   * Slices sized by actual/expected volume profile (learned from historical volume data per symbol)
+   */
+  public executeVWAP(config: VWAPConfig): { executionId: string; slices: ExecutionSlice[]; nextSlice: () => ExecutionSlice | null } {
+    const { durationMinutes, symbol, side, totalQuantity, volumeProfile } = config;
+    const executionId = `VWAP-${Date.now().toString(36)}-${this.executionCounter++}`;
+    const startTime = Date.now();
+    
+    // Use provided volume profile or learned profile
+    const profile = volumeProfile || this.getVolumeProfile(symbol);
+    const totalVolume = profile.reduce((a, b) => a + b, 0) || profile.length;
+    const slicesCount = Math.max(10, Math.min(60, durationMinutes)); // 1-60 slices
+    const intervalMs = (durationMinutes * 60 * 1000) / slicesCount;
+    
+    const slices: ExecutionSlice[] = [];
+    let remainingQty = totalQuantity;
+    
+    for (let i = 0; i < slicesCount; i++) {
+      const sliceTime = startTime + i * intervalMs;
+      const volumeWeight = profile[i % profile.length] || 1;
+      let sliceQty = Number(((totalQuantity * volumeWeight) / totalVolume).toFixed(4));
+      
+      if (i === slicesCount - 1) {
+        sliceQty = Number(remainingQty.toFixed(4));
+      } else {
+        remainingQty -= sliceQty;
+      }
+      
+      const book = this.orderBookBuilder.getBook(symbol);
+      const midPrice = book?.midPrice || 0;
+      const tickSize = this.getSymbolFilter(symbol).tickSize;
+      const price = Number((midPrice * (side === 'BUY' ? 1.0005 : 0.9995)).toFixed(Math.max(0, Math.ceil(-Math.log10(tickSize)))));
+      
+      slices.push({
+        sliceIndex: i,
+        totalSlices: slicesCount,
+        quantity: sliceQty,
+        price,
+        timestamp: sliceTime,
+        side,
+        symbol,
+        type: 'VWAP' as OrderType,
+        isFinal: i === slicesCount - 1,
+      });
+    }
+
+    const executionState = { config, slices, currentSlice: 0, intervalId: undefined as NodeJS.Timeout | undefined };
+    this.activeExecutions.set(executionId, executionState);
+
+    const nextSlice = (): ExecutionSlice | null => {
+      const state = this.activeExecutions.get(executionId);
+      if (!state || state.currentSlice >= state.slices.length) {
+        this.activeExecutions.delete(executionId);
+        return null;
+      }
+      const slice = state.slices[state.currentSlice];
+      const book = this.orderBookBuilder.getBook(symbol);
+      if (book) {
+        slice.price = Number((book.midPrice * (side === 'BUY' ? 1.0005 : 0.9995)).toFixed(Math.max(0, Math.ceil(-Math.log10(this.getSymbolFilter(symbol).tickSize)))));
+      }
+      state.currentSlice++;
+      return slice;
+    };
+
+    executionState.intervalId = setInterval(() => {
+      const slice = nextSlice();
+      if (slice) {
+        this.submitOrder({
+          symbol: slice.symbol,
+          side: slice.side,
+          type: 'LIMIT',
+          quantity: slice.quantity,
+          price: slice.price,
+          timeInForce: 'IOC',
+          executionTag: `VWAP-${executionId}`,
+        });
+      } else {
+        if (executionState.intervalId) clearInterval(executionState.intervalId);
+      }
+    }, intervalMs);
+
+    return { executionId, slices, nextSlice };
+  }
+
+  /**
+   * POV (Percentage of Volume) Execution Algorithm
+   * Participates in targetParticipationRate (e.g., 0.1 = 10%) of market volume
+   */
+  public executePOV(config: POVConfig): { executionId: string; slices: ExecutionSlice[]; nextSlice: () => ExecutionSlice | null } {
+    const { durationMinutes, symbol, side, totalQuantity, targetParticipationRate } = config;
+    const executionId = `POV-${Date.now().toString(36)}-${this.executionCounter++}`;
+    const startTime = Date.now();
+    
+    // Estimate market volume per minute from volume profile
+    const volumeProfile = this.getVolumeProfile(symbol);
+    const avgVolumePerMin = volumeProfile.reduce((a, b) => a + b, 0) / Math.max(1, volumeProfile.length) || 1000;
+    const targetVolumePerMin = avgVolumePerMin * targetParticipationRate;
+    const slicesCount = Math.max(1, Math.ceil(totalQuantity / targetVolumePerMin));
+    const intervalMs = (durationMinutes * 60 * 1000) / Math.min(slicesCount, durationMinutes);
+    
+    const slices: ExecutionSlice[] = [];
+    let remainingQty = totalQuantity;
+    const maxSlices = Math.min(slicesCount, durationMinutes * 2); // Cap at 2 slices per minute
+    
+    for (let i = 0; i < maxSlices; i++) {
+      const sliceTime = startTime + i * intervalMs;
+      const volumeWeight = volumeProfile[i % volumeProfile.length] || 1;
+      const totalVolumeWeight = volumeProfile.reduce((a, b) => a + b, 0) || maxSlices;
+      const targetSliceQty = (totalQuantity * volumeWeight) / totalVolumeWeight;
+      const sliceQty = Math.min(targetSliceQty, remainingQty);
+      
+      if (i === maxSlices - 1) {
+        remainingQty = 0;
+      } else {
+        remainingQty -= sliceQty;
+      }
+      
+      if (sliceQty < this.getSymbolFilter(symbol).minQty) continue;
+      
+      const book = this.orderBookBuilder.getBook(symbol);
+      const midPrice = book?.midPrice || 0;
+      const tickSize = this.getSymbolFilter(symbol).tickSize;
+      const price = Number((midPrice * (side === 'BUY' ? 1.0005 : 0.9995)).toFixed(Math.max(0, Math.ceil(-Math.log10(tickSize)))));
+      
+      slices.push({
+        sliceIndex: i,
+        totalSlices: maxSlices,
+        quantity: Number(sliceQty.toFixed(4)),
+        price,
+        timestamp: sliceTime,
+        side,
+        symbol,
+        type: 'VWAP' as OrderType, // Use VWAP type for POV slices
+        isFinal: i === maxSlices - 1,
+      });
+    }
+
+    const executionState = { config, slices, currentSlice: 0, intervalId: undefined as NodeJS.Timeout | undefined };
+    this.activeExecutions.set(executionId, executionState);
+
+    const nextSlice = (): ExecutionSlice | null => {
+      const state = this.activeExecutions.get(executionId);
+      if (!state || state.currentSlice >= state.slices.length) {
+        this.activeExecutions.delete(executionId);
+        return null;
+      }
+      const slice = state.slices[state.currentSlice];
+      const book = this.orderBookBuilder.getBook(symbol);
+      if (book) {
+        slice.price = Number((book.midPrice * (side === 'BUY' ? 1.0005 : 0.9995)).toFixed(Math.max(0, Math.ceil(-Math.log10(this.getSymbolFilter(symbol).tickSize)))));
+      }
+      state.currentSlice++;
+      return slice;
+    };
+
+    executionState.intervalId = setInterval(() => {
+      const slice = nextSlice();
+      if (slice) {
+        this.submitOrder({
+          symbol: slice.symbol,
+          side: slice.side,
+          type: 'LIMIT',
+          quantity: slice.quantity,
+          price: slice.price,
+          timeInForce: 'IOC',
+          executionTag: `POV-${executionId}`,
+        });
+      } else {
+        if (executionState.intervalId) clearInterval(executionState.intervalId);
+      }
+    }, intervalMs);
+
+    return { executionId, slices, nextSlice };
+  }
+
+  /**
+   * Get or compute volume profile for a symbol (24h profile by hour)
+   */
+  private getVolumeProfile(symbol: AssetSymbol): number[] {
+    const cached = this.volumeProfiles.get(symbol);
+    const now = Date.now();
+    const DAY_MS = 24 * 60 * 60 * 1000;
+    
+    // Return cached if fresh (less than 1 hour old)
+    if (cached && now - cached.lastUpdated < 60 * 60 * 1000) {
+      return cached.profile;
+    }
+    
+    // Default intraday volume profile (U-shaped: high at open/close, low mid-day)
+    // 24 hours x 60 minutes normalized to 24 buckets (1 per hour)
+    const defaultProfile = [
+      0.8, 0.6, 0.5, 0.4, 0.3, 0.4,  // 00-05 UTC (low)
+      0.6, 0.9, 1.2, 1.1, 1.0, 0.9,  // 06-11 UTC (ramp up)
+      0.9, 0.8, 0.8, 0.9, 1.0, 1.1,  // 12-17 UTC (steady)
+      1.3, 1.5, 1.4, 1.2, 1.0, 0.9   // 18-23 UTC (close high)
+    ];
+    
+    this.volumeProfiles.set(symbol, { symbol, profile: defaultProfile, lastUpdated: now });
+    return defaultProfile;
+  }
+
+  /**
+   * Update volume profile from actual market data (call periodically)
+   */
+  public updateVolumeProfile(symbol: AssetSymbol, hourlyVolumes: number[]): void {
+    if (hourlyVolumes.length !== 24) return;
+    const total = hourlyVolumes.reduce((a, b) => a + b, 0);
+    if (total === 0) return;
+    const normalized = hourlyVolumes.map(v => v / (total / 24));
+    this.volumeProfiles.set(symbol, { symbol, profile: normalized, lastUpdated: Date.now() });
+  }
+
+  /**
+   * Cancel an active algorithmic execution
+   */
+  public cancelExecution(executionId: string): boolean {
+    const state = this.activeExecutions.get(executionId);
+    if (!state) return false;
+    if (state.intervalId) clearInterval(state.intervalId);
+    this.activeExecutions.delete(executionId);
+    return true;
+  }
+
+  /**
+   * Get status of active executions
+   */
+  public getActiveExecutions(): Array<{ executionId: string; progress: number; remainingSlices: number }> {
+    const result: Array<{ executionId: string; progress: number; remainingSlices: number }> = [];
+    for (const [id, state] of this.activeExecutions) {
+      result.push({
+        executionId: id,
+        progress: state.currentSlice / state.slices.length,
+        remainingSlices: state.slices.length - state.currentSlice,
+      });
+    }
+    return result;
+  }
+
+  /**
    * Signed REST call: server-time offset, recvWindow, hard timeout and one automatic
    * retry after a clock re-sync when Binance answers -1021 (timestamp outside recvWindow).
    */
@@ -132,7 +526,7 @@ export class OrderGateway {
     method: 'GET' | 'POST' | 'DELETE',
     path: string,
     params: Record<string, string | number | boolean> = {},
-    timeoutMs: number = 8000,
+    timeoutMs: number = 10000,
     isRetry: boolean = false
   ): Promise<{ ok: boolean; status: number; data: any }> {
     if (!this.apiKey || !this.apiSecret) {
@@ -142,13 +536,12 @@ export class OrderGateway {
       .map(([k, v]) => `${k}=${encodeURIComponent(String(v))}`)
       .join('&');
     const signature = crypto.createHmac('sha256', this.apiSecret).update(qs).digest('hex');
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    const signal = AbortSignal.timeout(timeoutMs);
     try {
       const res = await fetch(`${this.apiBaseUrl}${path}?${qs}&signature=${signature}`, {
         method,
         headers: { 'X-MBX-APIKEY': this.apiKey },
-        signal: controller.signal,
+        signal,
       });
       let data: any = null;
       try { data = await res.json(); } catch { data = null; }
@@ -160,9 +553,10 @@ export class OrderGateway {
       }
       return { ok: res.ok, status: res.status, data };
     } catch (e) {
+      if (e instanceof DOMException && e.name === 'TimeoutError') {
+        return { ok: false, status: 0, data: { msg: `Request timeout after ${timeoutMs}ms` } };
+      }
       return { ok: false, status: 0, data: { msg: String(e) } };
-    } finally {
-      clearTimeout(timer);
     }
   }
 
@@ -208,19 +602,70 @@ export class OrderGateway {
       }
       return await res.json();
     } catch (e) {
-      console.error(`❌ signedGet failed for ${endpoint}:`, e);
+      console.error(`❌ signedGet failed for ${endpoint}:`, redactSecrets(String(e)));
       return [];
     }
   }
 
   public setSymbolFilter(symbol: string, stepSize: number, tickSize: number, minQty: number = 0.001, minNotional: number = 5.0) {
     const clean = symbol.replace('/', '');
-    this.symbolFilters.set(clean, { stepSize, tickSize, minQty, minNotional });
+    this.symbolFilters.set(clean, { stepSize, tickSize, minQty, minNotional, lastFetched: Date.now() });
   }
 
   public getSymbolFilter(symbol: string) {
     const clean = symbol.replace('/', '');
-    return this.symbolFilters.get(clean) || { stepSize: 0.001, tickSize: 0.01, minQty: 0.001, minNotional: 5.0 };
+    const cached = this.symbolFilters.get(clean);
+    const now = Date.now();
+    const ONE_HOUR = 60 * 60 * 1000;
+    
+    // Return cached if fresh (less than 1 hour old)
+    if (cached && now - cached.lastFetched < ONE_HOUR) {
+      return { stepSize: cached.stepSize, tickSize: cached.tickSize, minQty: cached.minQty, minNotional: cached.minNotional };
+    }
+    
+    // Fetch from exchange if stale or missing
+    void this.fetchSymbolFilters(clean);
+    
+    // Return cached (possibly stale) or defaults
+    if (cached) {
+      return { stepSize: cached.stepSize, tickSize: cached.tickSize, minQty: cached.minQty, minNotional: cached.minNotional };
+    }
+    return { stepSize: 0.001, tickSize: 0.01, minQty: 0.001, minNotional: 5.0 };
+  }
+
+  private async fetchSymbolFilters(symbol: string): Promise<void> {
+    if (this.executionMode === 'PAPER' || !this.apiKey || !this.apiSecret) return;
+    
+    try {
+      const res = await fetch(`${this.apiBaseUrl}/fapi/v1/exchangeInfo`);
+      if (!res.ok) return;
+      const data = await res.json();
+      if (!data || !data.symbols) return;
+      
+      const symInfo = data.symbols.find((s: any) => s.symbol === symbol);
+      if (!symInfo) return;
+      
+      let stepSize = 0.001;
+      let tickSize = 0.01;
+      let minQty = 0.001;
+      let minNotional = 5.0;
+      
+      for (const filter of symInfo.filters || []) {
+        if (filter.filterType === 'LOT_SIZE') {
+          stepSize = parseFloat(filter.stepSize);
+          minQty = parseFloat(filter.minQty);
+        } else if (filter.filterType === 'PRICE_FILTER') {
+          tickSize = parseFloat(filter.tickSize);
+        } else if (filter.filterType === 'MIN_NOTIONAL') {
+          minNotional = parseFloat(filter.notional);
+        }
+      }
+      
+      this.symbolFilters.set(symbol, { stepSize, tickSize, minQty, minNotional, lastFetched: Date.now() });
+      console.log(`📊 Updated symbol filters for ${symbol}: stepSize=${stepSize}, tickSize=${tickSize}, minQty=${minQty}, minNotional=${minNotional}`);
+    } catch (e) {
+      console.warn(`⚠️ Failed to fetch symbol filters for ${symbol}:`, e);
+    }
   }
 
   public getRateLimiter(): RateLimiter {
@@ -275,7 +720,7 @@ export class OrderGateway {
         console.log(`⚡ Binance Futures Leverage set for ${cleanSymbol}: ${data.leverage}x (ISOLATED)`);
         return true;
       } else {
-        console.warn(`⚠️ Failed to set Binance leverage for ${cleanSymbol}:`, data);
+        console.warn(`⚠️ Failed to set Binance leverage for ${cleanSymbol}:`, redactSecrets(String(data)));
         return false;
       }
     } catch (err) {
@@ -290,6 +735,7 @@ export class OrderGateway {
 
   /**
    * إرسال أوامر الحماية (Stop Loss & Take Profit) بدقة مع reduceOnly وتتبع معرفاتها
+   * Supports STOP_LIMIT for stop loss when limitOffsetBps is provided
    */
   public async sendProtectiveOrders(
     symbol: string,
@@ -298,7 +744,8 @@ export class OrderGateway {
     entryPrice: number,
     slPrice: number,
     tpPrice: number,
-    localOrderId?: string
+    localOrderId?: string,
+    slLimitOffsetBps?: number
   ): Promise<{ slId?: string; tpId?: string; slOk: boolean }> {
     if (this.executionMode === 'PAPER' || !this.apiKey || !this.apiSecret) return { slOk: true };
 
@@ -328,28 +775,47 @@ export class OrderGateway {
     if (!slValid) {
       console.error(`❌ Invalid stop-loss price ${formattedSl} for ${side} entry @ ${entryPrice} (${symbol}); stop NOT placed.`);
     } else {
+      const slLimitOffset = slLimitOffsetBps ?? 0;
+      const useStopLimit = Number.isFinite(slLimitOffset) && slLimitOffset > 0;
+      let slLimitPrice: number | undefined;
+      let slOrderType = 'STOP_MARKET';
+      
+      if (useStopLimit) {
+        const offset = slLimitOffset / 10000;
+        slLimitPrice = side === 'BUY' 
+          ? slPrice * (1 - offset)  // For long (BUY entry), SL is SELL, limit below stop
+          : slPrice * (1 + offset); // For short (SELL entry), SL is BUY, limit above stop
+        slLimitPrice = formatPriceToTick(slLimitPrice, filter.tickSize);
+        slOrderType = 'STOP_LIMIT';
+      }
+
       let sl = await this.signedRequest('POST', '/fapi/v1/algoOrder', {
         algoType: 'CONDITIONAL',
         symbol: cleanSymbol,
         side: exitSide,
-        type: 'STOP_MARKET',
+        type: slOrderType,
         triggerPrice: formattedSl,
+        ...(useStopLimit && slLimitPrice ? { price: slLimitPrice } : {}),
         quantity: formattedQty,
         reduceOnly: true,
         workingType: 'MARK_PRICE',
       });
       if (!sl.ok) {
-        sl = await this.signedRequest('POST', '/fapi/v1/order', {
-          symbol: cleanSymbol, side: exitSide, type: 'STOP_MARKET', stopPrice: formattedSl,
+        const fallbackParams: Record<string, any> = {
+          symbol: cleanSymbol, side: exitSide, type: slOrderType, stopPrice: formattedSl,
           quantity: formattedQty, reduceOnly: true, workingType: 'MARK_PRICE', priceProtect: true,
           newClientOrderId: `BASEL_SL_${idTail}`,
-        });
+        };
+        if (useStopLimit && slLimitPrice) {
+          fallbackParams.price = slLimitPrice;
+        }
+        sl = await this.signedRequest('POST', '/fapi/v1/order', fallbackParams);
       }
       if (sl.ok && (sl.data?.algoId || sl.data?.orderId)) {
         result.slId = String(sl.data.algoId || sl.data.orderId);
         result.slOk = true;
       } else {
-        console.error('❌ SL order rejected on Binance:', sl.data);
+        console.error('❌ SL order rejected on Binance:', redactSecrets(String(sl.data)));
       }
     }
 
@@ -376,7 +842,7 @@ export class OrderGateway {
       if (tp.ok && (tp.data?.algoId || tp.data?.orderId)) {
         result.tpId = String(tp.data.algoId || tp.data.orderId);
       } else {
-        console.warn('⚠️ TP order rejected on Binance:', tp.data);
+        console.warn('⚠️ TP order rejected on Binance:', redactSecrets(String(tp.data)));
       }
     }
 
@@ -387,13 +853,16 @@ export class OrderGateway {
 
   /**
    * إرسال أمر وقف خسارة منفرد (مثلاً لـ Trailing Stop أو Break-Even)
+   * Supports STOP_LIMIT when limitPrice is provided to prevent slippage
    */
   public async sendStopLoss(
     symbol: string,
     side: 'BUY' | 'SELL',
     quantity: number,
     stopPrice: number,
-    localOrderId?: string
+    localOrderId?: string,
+    limitPrice?: number,
+    limitOffsetBps?: number
   ): Promise<string | undefined> {
     if (this.executionMode === 'PAPER' || !this.apiKey || !this.apiSecret) return undefined;
     try {
@@ -404,27 +873,53 @@ export class OrderGateway {
 
       if (formattedQty < filter.minQty) return undefined;
 
+      const lp = limitPrice ?? 0;
+      const lo = limitOffsetBps ?? 0;
+      const useStopLimitInitially = Number.isFinite(lp) && lp > 0;
+      let effectiveLimitPrice = lp;
+      let useStopLimit = useStopLimitInitially;
+      
+      // If limitPrice not provided but offset is, calculate it
+      if (!useStopLimit && Number.isFinite(lo) && lo > 0) {
+        const offset = lo / 10000;
+        effectiveLimitPrice = side === 'BUY' 
+          ? stopPrice * (1 + offset)  // For BUY stop (short position), limit above stop
+          : stopPrice * (1 - offset); // For SELL stop (long position), limit below stop
+        if (effectiveLimitPrice > 0) {
+          effectiveLimitPrice = formatPriceToTick(effectiveLimitPrice, filter.tickSize);
+          useStopLimit = true;
+        }
+      }
+
+      const orderType = useStopLimit ? 'STOP_LIMIT' : 'STOP_MARKET';
+      const limitPriceFormatted = useStopLimit && effectiveLimitPrice ? formatPriceToTick(effectiveLimitPrice, filter.tickSize) : undefined;
+
       let sl = await this.signedRequest('POST', '/fapi/v1/algoOrder', {
         algoType: 'CONDITIONAL',
         symbol: cleanSymbol,
         side: side,
-        type: 'STOP_MARKET',
+        type: orderType,
         triggerPrice: formattedSl,
+        ...(useStopLimit && limitPriceFormatted ? { price: limitPriceFormatted } : {}),
         quantity: formattedQty,
         reduceOnly: true,
         workingType: 'MARK_PRICE',
       });
 
       if (!sl.ok) {
-        sl = await this.signedRequest('POST', '/fapi/v1/order', {
+        const fallbackParams: Record<string, any> = {
           symbol: cleanSymbol,
           side: side,
-          type: 'STOP_MARKET',
+          type: orderType,
           stopPrice: formattedSl,
           quantity: formattedQty,
           reduceOnly: true,
           workingType: 'MARK_PRICE',
-        });
+        };
+        if (useStopLimit && limitPriceFormatted) {
+          fallbackParams.price = limitPriceFormatted;
+        }
+        sl = await this.signedRequest('POST', '/fapi/v1/order', fallbackParams);
       }
 
       if (sl.ok && (sl.data?.algoId || sl.data?.orderId)) {
@@ -432,6 +927,7 @@ export class OrderGateway {
         const trackKey = localOrderId || cleanSymbol;
         const current = this.protectiveOrders.get(trackKey) || {};
         this.protectiveOrders.set(trackKey, { ...current, slId });
+        console.log(`🛡️ ${orderType} placed for ${cleanSymbol}: Stop=${formattedSl}${useStopLimit ? `, Limit=${limitPriceFormatted}` : ''} Qty=${formattedQty}`);
         return slId;
       }
     } catch (e) {
@@ -490,7 +986,7 @@ export class OrderGateway {
       // كبديل موثوق: إلغاء كافة الأوامر المفتوحة للرمز
       await this.cancelAllProtectiveForSymbol(clean);
     } catch (err) {
-      console.error(`❌ Error cancelling protective orders for ${symbolOrOrderId}:`, err);
+      console.error(`❌ Error cancelling protective orders for ${symbolOrOrderId}:`, redactSecrets(String(err)));
     }
   }
 
@@ -613,7 +1109,7 @@ export class OrderGateway {
 
       const data = await res.json();
       if (!res.ok) {
-        console.error('❌ Binance Futures REST Order Rejected:', data);
+        console.error('❌ Binance Futures REST Order Rejected:', redactSecrets(String(data)));
         const code = Number(data.code || 0);
         const policy = ERROR_POLICY[code] || 'HALT';
         console.warn(`⚠️ Applied Error Policy for Binance code ${code}: ${policy}`);
@@ -641,7 +1137,7 @@ export class OrderGateway {
         if (this.fsm.canTransition(order.status, targetStatus)) {
           this.fsm.transition(order, targetStatus);
         } else {
-          order.status = targetStatus;
+          this.fsm.forceTransition(order, targetStatus, 'Exchange REST response reported state outside FSM table');
         }
 
         // Real exchange fills are recorded from ORDER_TRADE_UPDATE (true price / commission).
@@ -653,12 +1149,11 @@ export class OrderGateway {
         this.notifyOrder(order);
       }
     } catch (err) {
-      console.error('❌ Error sending order to Binance Futures:', err);
+      console.error('❌ Error sending order to Binance Futures:', redactSecrets(String(err)));
       if (this.fsm.canTransition(order.status, 'REJECTED')) {
         this.fsm.transition(order, 'REJECTED', String(err));
       } else {
-        order.status = 'REJECTED';
-        order.errorMessage = String(err);
+        this.fsm.forceTransition(order, 'REJECTED', String(err));
       }
       this.notifyOrder(order);
     }
@@ -733,7 +1228,7 @@ export class OrderGateway {
     if (this.fsm.canTransition(order.status, targetStatus)) {
       this.fsm.transition(order, targetStatus);
     } else {
-      order.status = targetStatus;
+      this.fsm.forceTransition(order, targetStatus, 'Exchange WebSocket reported state outside FSM table');
     }
 
     this.notifyOrder(order);
@@ -909,9 +1404,12 @@ export class OrderGateway {
       this.sendOrderToBinance(order, { ...params, quantity: order.quantity, price: order.price });
     } else {
       // Simulate async network wire latency and exchange ACK in PAPER mode only
+      const latency = this.config.paperRealism?.latencyMs
+        ? this.config.paperRealism.latencyMs.min + Math.random() * (this.config.paperRealism.latencyMs.max - this.config.paperRealism.latencyMs.min)
+        : this.config.simulatedLatencyMs;
       setTimeout(() => {
         this.acknowledgeAndExecute(orderId);
-      }, this.config.simulatedLatencyMs);
+      }, latency);
     }
 
     return order;
@@ -933,8 +1431,8 @@ export class OrderGateway {
       if (book) {
         const canFill = (order.side === 'BUY' && order.price >= book.asks[0]?.price) || (order.side === 'SELL' && order.price <= book.bids[0]?.price);
         if (canFill) {
-          // Fill immediately
-          this.executeFill(order, order.quantity, false);
+          // Marketable limit order executes as TAKER (crosses spread)
+          this.executeFill(order, order.quantity, true);
         }
       }
     }
@@ -942,8 +1440,61 @@ export class OrderGateway {
 
   public executeFill(order: Order, fillQty: number, isTaker: boolean) {
     const book = this.orderBookBuilder.getBook(order.symbol);
+    
+    // Stale book guard: skip fill if book data is older than 30 seconds
+    if (book && book.timestamp && Date.now() - book.timestamp > 30000) {
+      console.warn(`⚠️ Stale order book for ${order.symbol} (last update ${Date.now() - book.timestamp}ms ago); skipping paper fill`);
+      return;
+    }
+
     const vwapResult = this.orderBookBuilder.getVwapExecutionPrice(order.symbol, order.side, fillQty);
-    const fillPrice = vwapResult.avgPrice || order.price;
+    let fillPrice = vwapResult.avgPrice || order.price;
+
+    // Paper mode realism: apply spread, slippage, and partial fills
+    if (this.executionMode === 'PAPER' && this.config.paperRealism) {
+      const realism = this.config.paperRealism;
+      const bidPrice = book?.bids[0]?.price || fillPrice;
+      const askPrice = book?.asks[0]?.price || fillPrice;
+      const midPrice = (bidPrice + askPrice) / 2;
+      const spread = askPrice - bidPrice;
+      const spreadBps = midPrice > 0 ? (spread / midPrice) * 10000 : realism.spreadBps;
+      
+      // Apply spread: buy at ask, sell at bid
+      if (order.side === 'BUY') {
+        fillPrice = askPrice || fillPrice * (1 + spreadBps / 10000);
+      } else {
+        fillPrice = bidPrice || fillPrice * (1 - spreadBps / 10000);
+      }
+
+      // Apply slippage based on order size relative to book depth
+      const bookDepth = order.side === 'BUY' 
+        ? book?.asks.slice(0, 5).reduce((sum, l) => sum + l.size, 0) || 1
+        : book?.bids.slice(0, 5).reduce((sum, l) => sum + l.size, 0) || 1;
+      const sizeRatio = fillQty / bookDepth;
+      const slippageFactor = Math.min(realism.slippageBps / 10000, sizeRatio * 0.001);
+      const slippage = (Math.random() * slippageFactor);
+      fillPrice = order.side === 'BUY' 
+        ? fillPrice * (1 + slippage)
+        : fillPrice * (1 - slippage);
+
+      // Partial fills for large orders
+      if (realism.partialFillEnabled && sizeRatio > realism.partialFillThresholdBps / 10000) {
+        const numSlices = 2 + Math.floor(Math.random() * 3); // 2-4 slices
+        const sliceQty = fillQty / numSlices;
+        const sliceDelay = 100 + Math.random() * 400; // 100-500ms
+        
+        for (let i = 0; i < numSlices; i++) {
+          const isLast = i === numSlices - 1;
+          const thisSliceQty = isLast ? fillQty - sliceQty * i : sliceQty;
+          const sliceFillPrice = fillPrice * (1 + (Math.random() - 0.5) * 0.0002); // Small variation per slice
+          
+          setTimeout(() => {
+            this.executePaperFillSlice(order, thisSliceQty, sliceFillPrice, isTaker, isLast);
+          }, i * sliceDelay);
+        }
+        return;
+      }
+    }
 
     const feeBps = isTaker ? this.config.takerFeeBps : this.config.makerFeeBps;
     const notional = fillQty * fillPrice;
@@ -962,12 +1513,59 @@ export class OrderGateway {
       isMaker: !isTaker,
     };
 
+    // Record TCA metrics
+    const bookForTCA = this.orderBookBuilder.getBook(order.symbol);
+    const bidPrice = bookForTCA?.bids[0]?.price || fillPrice;
+    const askPrice = bookForTCA?.asks[0]?.price || fillPrice;
+    const midPriceAtFill = (bidPrice + askPrice) / 2;
+    this.tca.recordFill(fill, order.price, midPriceAtFill, bidPrice, askPrice);
+
     // Update Order state
     order.filledQuantity = Number((order.filledQuantity + fillQty).toFixed(4));
     order.remainingQuantity = Number((order.quantity - order.filledQuantity).toFixed(4));
     order.avgFillPrice = fillPrice;
 
     if (order.remainingQuantity <= 0.0001) {
+      this.fsm.transition(order, 'FILLED');
+    } else {
+      this.fsm.transition(order, 'PARTIALLY_FILLED');
+    }
+
+    this.userDataStream.processFill(fill, fillPrice);
+    this.notifyOrder(order);
+  }
+
+  private executePaperFillSlice(order: Order, fillQty: number, fillPrice: number, isTaker: boolean, isFinal: boolean) {
+    const feeBps = isTaker ? this.config.takerFeeBps : this.config.makerFeeBps;
+    const notional = fillQty * fillPrice;
+    const commission = Number(((notional * feeBps) / 10000).toFixed(4));
+
+    const fill: Fill = {
+      fillId: `FILL-${Date.now().toString(36)}-${Math.random().toString(36).substring(2, 6).toUpperCase()}`,
+      orderId: order.id,
+      symbol: order.symbol,
+      side: order.side,
+      price: fillPrice,
+      quantity: fillQty,
+      commission,
+      commissionAsset: this.config.commissionAsset,
+      timestamp: Date.now(),
+      isMaker: !isTaker,
+    };
+
+    // Record TCA metrics for slice
+    const bookForTCA = this.orderBookBuilder.getBook(order.symbol);
+    const bidPrice = bookForTCA?.bids[0]?.price || fillPrice;
+    const askPrice = bookForTCA?.asks[0]?.price || fillPrice;
+    const midPriceAtFill = (bidPrice + askPrice) / 2;
+    this.tca.recordFill(fill, order.price, midPriceAtFill, bidPrice, askPrice);
+
+    // Update Order state
+    order.filledQuantity = Number((order.filledQuantity + fillQty).toFixed(4));
+    order.remainingQuantity = Number((order.quantity - order.filledQuantity).toFixed(4));
+    order.avgFillPrice = fillPrice;
+
+    if (order.remainingQuantity <= 0.0001 || isFinal) {
       this.fsm.transition(order, 'FILLED');
     } else {
       this.fsm.transition(order, 'PARTIALLY_FILLED');
@@ -1015,6 +1613,15 @@ export class OrderGateway {
     const order = this.orders.get(orderId);
     if (!order) return false;
 
+    // Guard against race condition: do not attempt cancellation on orders already
+    // in a terminal state (FILLED, CANCELLED, REJECTED, EXPIRED). An exchange-side
+    // cancel on these would either error or silently do nothing, wasting a
+    // round-trip and potentially interfering with post-fill cleanup logic.
+    const TERMINAL_STATUSES: OrderStatus[] = ['FILLED', 'CANCELLED', 'REJECTED', 'EXPIRED'];
+    if (TERMINAL_STATUSES.includes(order.status)) {
+      return false;
+    }
+
     if (this.fsm.canTransition(order.status, 'CANCELLED')) {
       this.fsm.transition(order, 'CANCELLED', reason);
       this.notifyOrder(order);
@@ -1027,7 +1634,7 @@ export class OrderGateway {
   public async cancelAllOpenOrdersForSymbol(symbol: string): Promise<boolean> {
     if (this.executionMode === 'PAPER' || !this.apiKey || !this.apiSecret) return true;
     const r = await this.signedRequest('DELETE', '/fapi/v1/allOpenOrders', { symbol: symbol.replace('/', '') });
-    if (!r.ok) console.error(`❌ Failed to cancel open orders on Binance for ${symbol}`, r.data);
+    if (!r.ok) console.error(`❌ Failed to cancel open orders on Binance for ${symbol}`, redactSecrets(String(r.data)));
     return r.ok;
   }
 
@@ -1068,7 +1675,7 @@ export class OrderGateway {
         reduceOnly: true, newOrderRespType: 'RESULT',
       });
       if (!order.ok) {
-        console.warn(`⚠️ [EXCHANGE CLOSE REJECTED] ${symbol}`, order.data);
+         console.warn(`⚠️ [EXCHANGE CLOSE REJECTED] ${symbol}`, redactSecrets(String(order.data)));
         return { success: false, qty: 0, error: order.data?.msg || 'Close rejected' };
       }
 
@@ -1088,7 +1695,7 @@ export class OrderGateway {
       console.log(`✅ [EXCHANGE CLOSE SUCCESS] Closed ${symbol} on Binance (${closeSide} ${qtyStr})`);
       return { success: true, qty: Math.abs(currentAmt) };
     } catch (e) {
-      console.error(`❌ [EXCHANGE CLOSE ERROR] ${symbol}`, e);
+      console.error(`❌ [EXCHANGE CLOSE ERROR] ${symbol}`, redactSecrets(String(e)));
       return { success: false, qty: 0, error: String(e) };
     }
   }
@@ -1100,7 +1707,7 @@ export class OrderGateway {
     }
     const pr = await this.signedRequest('GET', '/fapi/v2/positionRisk');
     if (!pr.ok || !Array.isArray(pr.data)) {
-      console.error('❌ Full liquidation aborted: could not read positions from exchange', pr.data);
+      console.error('❌ Full liquidation aborted: could not read positions from exchange', redactSecrets(String(pr.data)));
       return { closed: 0, failed: ['ACCOUNT_READ_FAILED'] };
     }
     const open = pr.data.filter((p: any) => Math.abs(parseFloat(p.positionAmt)) > 1e-9);
@@ -1124,6 +1731,27 @@ export class OrderGateway {
       }
     }
     return cancelled;
+  }
+
+  /**
+   * Get Transaction Cost Analysis report
+   */
+  public getTCAReport() {
+    return this.tca.getTCAReport();
+  }
+
+  /**
+   * Get TCA report by symbol
+   */
+  public getTCAReportBySymbol() {
+    return this.tca.getTCAReportBySymbol();
+  }
+
+  /**
+   * Get TCA fill records
+   */
+  public getTCAFillRecords(symbol?: AssetSymbol, limit?: number) {
+    return this.tca.getFillRecords(symbol, limit);
   }
 
   private notifyOrder(order: Order) {

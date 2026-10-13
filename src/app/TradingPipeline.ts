@@ -8,6 +8,7 @@ import {
   AccountBalance,
   AssetSymbol,
   CalculatedFeatures,
+  Candle,
   ExecutionMode,
   KillSwitchLevel,
   Order,
@@ -40,6 +41,7 @@ import { KillSwitch } from '../risk/KillSwitch';
 import { RiskEngine } from '../risk/RiskEngine';
 import { EventJournal } from '../storage/EventJournal';
 import { INITIAL_RUNTIME_CONFIG, RuntimeConfigState } from './RuntimeConfig';
+import { clamp } from '../utils/stats';
 import { DatabaseService } from '../storage/DatabaseService';
 import { CorrelationRiskManager } from '../risk/CorrelationRiskManager';
 import { TelegramService } from '../services/TelegramService';
@@ -47,18 +49,37 @@ import { DynamicRiskManager } from '../risk/DynamicRiskManager';
 import { RegimeDetector, RegimeAnalysis } from '../risk/RegimeDetector';
 import { PortfolioSizer } from '../risk/PortfolioSizer';
 import { SubWalletManager, SubWalletState } from '../risk/SubWalletManager';
+import { StressTestEngine, StressTestSummary } from '../risk/StressTestEngine';
+import { MarginHealthMonitor, MarginHealthReport } from '../risk/MarginHealthMonitor';
+import { FactorRiskModel, FactorRiskResult } from '../risk/FactorRiskModel';
 import { PartialProfitManager } from '../execution/PartialProfitManager';
 import { ScaleInManager } from '../execution/ScaleInManager';
 import { AssetScreener } from '../market-data/AssetScreener';
 import { StrategyManager } from '../strategies/StrategyManager';
+import {
+  DynamicEnsembleAllocator,
+  StrategyPerformanceMetrics,
+} from '../strategies/DynamicEnsembleAllocator';
+import { StatisticalPairsStrategy, Pair } from '../strategies/StatisticalPairsStrategy';
+import { AutoOptimizer } from '../strategies/AutoOptimizer';
 import { SystemWatchdog, WatchdogStatus } from '../monitoring/SystemWatchdog';
 import { BotStrategy, StrategyScreenerItem } from '../domain/types';
 import fs from 'fs';
+import { redactSecrets, validateRequiredEnv } from '../config/env';
+
+/** Detects exchange/gateway rejections caused by an insufficient order notional. */
+function isMinNotionalRejection(errorMessage?: string): boolean {
+  const msg = (errorMessage || '').toLowerCase();
+  return msg.includes('notional') || msg.includes('-4164');
+}
 
 export class TradingPipeline {
   private assetScreener: AssetScreener;
   private strategyManager: StrategyManager;
   private boardOfDirectors: BoardOfDirectorsEngine;
+  private ensembleAllocator: DynamicEnsembleAllocator;
+  private statisticalPairs: StatisticalPairsStrategy;
+  private autoOptimizer: AutoOptimizer;
 
   private marketData: ExchangeMarketData;
   private orderBookBuilder: OrderBookBuilder;
@@ -84,6 +105,7 @@ export class TradingPipeline {
   private scaleInManager: ScaleInManager;
   private lastSnapshotTime: number = 0;
   private inFlightSymbols: Set<string> = new Set();
+  private inFlightLocks: Set<string> = new Set();
   private peakEquityObserved: number = 0;
   private lastRiskDay: string = '';
   private pendingProtection: Map<string, { ouSigma: number; ouMu: number; side: 'BUY' | 'SELL'; symbol: AssetSymbol }> = new Map();
@@ -105,6 +127,22 @@ export class TradingPipeline {
   private lastFeatures: Map<AssetSymbol, any> = new Map();
   private rebalanceTimer: any = null;
   private lastOrderTime: Map<AssetSymbol, number> = new Map();
+
+  private stressTestEngine: StressTestEngine;
+  private marginHealthMonitor: MarginHealthMonitor;
+  private factorRiskModel: FactorRiskModel;
+  private stressTestInterval: NodeJS.Timeout | null = null;
+  private lastStressTestTime: number = 0;
+  private readonly STRESS_TEST_INTERVAL_MS = 15 * 60 * 1000;
+
+  private tickBuffer: Map<string, any[]> = new Map();
+  private lastTickFlush: number = 0;
+  private readonly TICK_FLUSH_INTERVAL_MS = 100;
+
+  private lastQuantumOptimizationTime: number = 0;
+  private lastQuantumRegime: string = '';
+  private readonly QUANTUM_REBALANCE_MIN_INTERVAL_MS = 30 * 60 * 1000;
+  private readonly QUANTUM_COVARIANCE_THRESHOLD = 0.15;
 
   // Covariance matrix for quantum portfolio optimization
   private covarianceMatrix: number[][] = [
@@ -130,6 +168,16 @@ export class TradingPipeline {
     
     // Read environment configuration
     const rawMode = process.env.EXECUTION_MODE;
+
+    // Startup environment validation: fail fast with a descriptive error when a
+    // variable required by the selected execution mode is missing or empty.
+    // Exchange credentials are mandatory for real-exchange modes (TESTNET/LIVE);
+    // PAPER mode intentionally runs without them against a simulated exchange.
+    const requestedMode = (rawMode || '').trim().toUpperCase();
+    if (requestedMode === 'LIVE' || requestedMode === 'PRODUCTION' || requestedMode === 'TESTNET') {
+      validateRequiredEnv(['EXCHANGE_API_KEY', 'EXCHANGE_API_SECRET']);
+    }
+
     const hasKey = !!process.env.EXCHANGE_API_KEY;
     const executionMode: ExecutionMode = normalizeExecutionMode(rawMode, hasKey);
     const apiBaseUrl = getBinanceBaseUrl(executionMode);
@@ -217,6 +265,14 @@ export class TradingPipeline {
     this.scaleInManager = new ScaleInManager(this.orderGateway);
     this.strategyManager = new StrategyManager();
     this.boardOfDirectors = BoardOfDirectorsEngine.getInstance();
+    this.ensembleAllocator = new DynamicEnsembleAllocator();
+    this.statisticalPairs = new StatisticalPairsStrategy(this.correlationRiskManager);
+    this.autoOptimizer = new AutoOptimizer();
+
+    // Initialize new risk management modules
+    this.stressTestEngine = new StressTestEngine();
+    this.marginHealthMonitor = new MarginHealthMonitor();
+    this.factorRiskModel = new FactorRiskModel();
 
 
     this.watchdog = new SystemWatchdog({
@@ -343,7 +399,7 @@ export class TradingPipeline {
       }
     } catch (error: any) {
       this.isRunning = false;
-      console.error('❌ Failed to start autonomous trading:', error);
+      console.error('❌ Failed to start autonomous trading:', redactSecrets(String(error)));
       if (this.telegramService) {
         await this.telegramService.sendMessage(`🚨 <b>خطأ أثناء بدء التشغيل</b>\n\n${error.message}`).catch(() => {});
       }
@@ -358,7 +414,7 @@ export class TradingPipeline {
           await this.updateRiskMetrics();
         }
       } catch (error) {
-        console.error('Error in risk evaluation loop:', error);
+        console.error('Error in risk evaluation loop:', redactSecrets(String(error)));
       }
     }, 60 * 1000);
 
@@ -409,10 +465,13 @@ export class TradingPipeline {
             totalUsedMargin += pos.marginUsed || 0;
           }
 
-          // Live Sub-Wallet Floating Equity update
-          this.subWalletManager.updateUnrealizedPnl(totalUnrealizedPnl, totalUsedMargin);
-        }
-      } catch (err) {
+// Live Sub-Wallet Floating Equity update
+           this.subWalletManager.updateUnrealizedPnl(totalUnrealizedPnl, totalUsedMargin);
+
+           // Margin Health Check
+           await this.checkMarginHealth();
+         }
+       } catch (err) {
         // Silent catch
       }
     }, 1000);
@@ -432,12 +491,20 @@ export class TradingPipeline {
       }
     }, 5 * 60 * 1000);
 
-    // Rebalance timer (Quantum Optimization)
-    this.rebalanceTimer = setInterval(() => {
-      if (this.isRunning && this.killSwitch.isEntryAllowed()) {
-        this.runQuantumOptimization();
+    // Stress Testing Engine (every 15 minutes)
+    this.stressTestInterval = setInterval(async () => {
+      try {
+        if (this.isRunning) {
+          await this.runStressTest();
+        }
+      } catch (error) {
+        console.error('Error in stress test loop:', redactSecrets(String(error)));
       }
-    }, this.config.rebalanceIntervalMs);
+    }, this.STRESS_TEST_INTERVAL_MS);
+
+    // Quantum rebalance is now event-driven (see checkQuantumRebalanceTriggers)
+    // Removed fixed-interval timer to reduce unnecessary optimizations
+    this.rebalanceTimer = null;
 
     // Zero-Halt Continuous Auto-Recovery Watchdog (every 10s)
     this.watchdogInterval = setInterval(async () => {
@@ -490,6 +557,10 @@ export class TradingPipeline {
     if (this.positionCheckInterval) {
       clearInterval(this.positionCheckInterval);
       this.positionCheckInterval = null;
+    }
+    if (this.stressTestInterval) {
+      clearInterval(this.stressTestInterval);
+      this.stressTestInterval = null;
     }
 
     this.marketData.stopStreaming();
@@ -544,6 +615,14 @@ export class TradingPipeline {
         this.recordTradeReturn(totalPnl);
         this.boardOfDirectors.learnFromOutcome(totalPnl, closedSymbol);
 
+        // Dynamic Ensemble Allocator: feed the settled outcome into rolling 30-day tracking
+        const closedSignal = this.lastSignals.get(closedSymbol);
+        const closedStrategyId = this.resolveSignalStrategyId(closedSignal);
+        if (closedStrategyId) {
+          this.ensembleAllocator.recordTrade(closedStrategyId, totalPnl, totalPnl > 0);
+          this.strategyManager.recordStrategyTrade(closedStrategyId, totalPnl, totalPnl > 0);
+        }
+
         await this.telegramService.sendMessage(`
 🏁 <b>تم إغلاق صفقة بالكامل (صافي بعد خصم العمولات)</b>
 ━━━━━━━━━━━━━━━━
@@ -554,9 +633,9 @@ export class TradingPipeline {
 ━━━━━━━━━━━━━━━━
 ✅ تم تحرير الهامش وإعادة ضبط مصفوفة الأوزان بنجاح.
         `).catch(() => {});
-      } catch (err) {
-        console.warn('Failed to update closed trade in DB:', err);
-      }
+        } catch (err) {
+          console.warn('Failed to update closed trade in DB:', redactSecrets(String(err)));
+        }
     });
 
     // Forward KillSwitch events to journal & persist to DB
@@ -703,6 +782,30 @@ export class TradingPipeline {
   }
 
   private handleIncomingTick(tick: Tick) {
+    const symbol = tick.symbol;
+    
+    // Micro-batching: buffer ticks per symbol
+    if (!this.tickBuffer.has(symbol)) {
+      this.tickBuffer.set(symbol, []);
+    }
+    this.tickBuffer.get(symbol)!.push(tick);
+
+    const now = Date.now();
+    if (now - this.lastTickFlush < this.TICK_FLUSH_INTERVAL_MS) {
+      return; // Wait for flush window
+    }
+    this.lastTickFlush = now;
+
+    // Flush all buffered ticks: process only the latest tick per symbol
+    for (const [sym, ticks] of this.tickBuffer.entries()) {
+      if (ticks.length === 0) continue;
+      const latestTick = ticks[ticks.length - 1];
+      this.processTickPipeline(latestTick);
+      ticks.length = 0; // Clear buffer
+    }
+  }
+
+  private processTickPipeline(tick: Tick) {
     const t0 = performance.now();
     this.healthMonitor.recordMessage();
 
@@ -756,9 +859,12 @@ export class TradingPipeline {
     // 3. Automated Strategy Evaluation & Partial Profit Management
     this.partialProfitManager.updatePosition(tick.symbol, tick.price);
 
+    // Check for event-driven quantum rebalance triggers
+    this.checkQuantumRebalanceTriggers(regime);
+
     if (this.config.autoTradingEnabled && this.killSwitch.isEntryAllowed()) {
       void this.evaluateSignalAndExecute(tick.symbol, features, book, regime).catch((err) => {
-        console.error(`❌ evaluateSignalAndExecute failed for ${tick.symbol}:`, err);
+        console.error(`❌ evaluateSignalAndExecute failed for ${tick.symbol}:`, redactSecrets(String(err)));
       });
     }
 
@@ -769,6 +875,52 @@ export class TradingPipeline {
       strategySignalUs: 45,
       riskValidationUs: 32,
     });
+  }
+
+  private checkQuantumRebalanceTriggers(currentRegime: any): void {
+    const now = Date.now();
+    const regimeKey = currentRegime ? `${currentRegime.marketRegime}-${currentRegime.volatilityRegime}` : 'UNKNOWN';
+    
+    // Condition (a): Regime changed since last optimization
+    const regimeChanged = this.lastQuantumRegime !== '' && regimeKey !== this.lastQuantumRegime;
+    
+    // Condition (b): Covariance matrix changed significantly
+    const covarianceChanged = this.hasCovarianceMatrixChangedSignificantly();
+    
+    // Condition (c): At least 30 minutes since last optimization
+    const timeElapsed = now - this.lastQuantumOptimizationTime >= this.QUANTUM_REBALANCE_MIN_INTERVAL_MS;
+    
+    if (regimeChanged || covarianceChanged || timeElapsed) {
+      this.runQuantumOptimization();
+      this.lastQuantumOptimizationTime = now;
+      this.lastQuantumRegime = regimeKey;
+    }
+  }
+
+  private hasCovarianceMatrixChangedSignificantly(): boolean {
+    const returnsMap = this.correlationRiskManager.getReturnsMap();
+    const assets = this.config.activeSymbols;
+    if (assets.length < 2) return false;
+    
+    const newCov = QuboPortfolio.calculateDynamicCovariance(assets, returnsMap);
+    if (!this.covarianceMatrix || this.covarianceMatrix.length !== newCov.length) {
+      return true;
+    }
+    
+    // Compute Frobenius norm of difference
+    let frobeniusNormSq = 0;
+    for (let i = 0; i < newCov.length; i++) {
+      for (let j = 0; j < newCov[i].length; j++) {
+        const diff = newCov[i][j] - this.covarianceMatrix[i][j];
+        frobeniusNormSq += diff * diff;
+      }
+    }
+    const frobeniusNorm = Math.sqrt(frobeniusNormSq);
+    
+    // Update stored covariance matrix
+    this.covarianceMatrix = newCov;
+    
+    return frobeniusNorm > this.QUANTUM_COVARIANCE_THRESHOLD;
   }
 
   private async evaluateSignalAndExecute(symbol: AssetSymbol, features: any, book?: OrderBook, regime?: any) {
@@ -810,6 +962,10 @@ export class TradingPipeline {
       return;
     }
 
+    // 0.5 Dynamic Ensemble Allocation: regime-adjusted weights are computed before
+    // signal evaluation so each strategy's position size can be scaled by its weight
+    const ensembleAllocations = this.computeEnsembleAllocations(regime);
+
     // 1. Unified Strategy Decision via DecisionEngine (البنود 15 و 16 و 39)
     const tier = this.portfolioSizer.getPortfolioTier();
     // 1. Evaluate Multi-Agent Quant Engine first if active
@@ -828,6 +984,22 @@ export class TradingPipeline {
     const sig = decision.signal;
     const signalType = sig.type as 'BUY' | 'SELL';
     const strength = sig.strength;
+
+    // Validate that signal prices are positive finite numbers before using them in calculations.
+    // Reject NaN / Infinity / negative prices.
+    const currentPrice = features.currentPrice;
+    if (!Number.isFinite(currentPrice) || currentPrice <= 0) {
+      console.warn(`⚠️ [${symbol}] Signal rejected: currentPrice is ${currentPrice} (not a positive finite number).`);
+      return;
+    }
+    if (sig.stopLoss !== undefined && sig.stopLoss !== null && (!Number.isFinite(sig.stopLoss) || sig.stopLoss < 0)) {
+      console.warn(`⚠️ [${symbol}] Signal rejected: stopLoss is ${sig.stopLoss} (not a finite non-negative number).`);
+      return;
+    }
+    if (sig.takeProfit !== undefined && sig.takeProfit !== null && (!Number.isFinite(sig.takeProfit) || sig.takeProfit < 0)) {
+      console.warn(`⚠️ [${symbol}] Signal rejected: takeProfit is ${sig.takeProfit} (not a finite non-negative number).`);
+      return;
+    }
 
     // 🏛️ Board of Directors v6.0 Evaluation (6 Decision Makers + 8 Anti-Overfitting Guards)
     const candlesMap: Record<string, any> = {};
@@ -849,6 +1021,20 @@ export class TradingPipeline {
       console.log('🏛️ [BOARD REJECTED] ' + symbol + ' signal blocked by Board of Directors: ' + boardDecision.action + ' (Guards: ' + boardDecision.guardsPassed + '/8)');
       this.eventJournal.record('WARN', 'STRATEGY', 'Signal blocked for ' + symbol + ': ' + boardDecision.action);
       return;
+    }
+
+    // QUBO-based signal filter: if QUBO weights available and symbol weight < 5%, reduce size by 50% (skip if 0)
+    let quboWeightMultiplier = 1.0;
+    const lastQuboSolution = this.getLastQuboSolution();
+    if (lastQuboSolution?.normalizedWeights) {
+      const quboWeight = lastQuboSolution.normalizedWeights[symbol] || 0;
+      if (quboWeight === 0) {
+        console.log(`⏭️ Skipping ${symbol}: QUBO target weight is 0%`);
+        return;
+      } else if (quboWeight < 0.05) {
+        quboWeightMultiplier = 0.5;
+        console.log(`⚠️ QUBO filter for ${symbol}: weight ${(quboWeight * 100).toFixed(1)}% < 5%, reducing position size by 50%`);
+      }
     }
 
     // ACQUIRE LOCK BEFORE ANY ASYNC OPERATIONS (البند 2)
@@ -875,6 +1061,7 @@ export class TradingPipeline {
       const balance = this.userDataStream.getBalance();
       const subEquity = this.subWalletManager.getCurrentEquity();
       const positionSizing = this.portfolioSizer.calculatePositionSize(
+        symbol,
         features.currentPrice,
         sig.stopLoss,
         subEquity,
@@ -895,7 +1082,12 @@ export class TradingPipeline {
       const multipliers = this.dynamicRiskManager.getCurrentMultipliers();
       const warmupMul = this.dynamicRiskManager.getWarmupMultiplier(this.eventJournal.getEvents().length);
       const regimeMul = regime?.sizeMultiplier ?? 1;
-      qty = Number((qty * multipliers.positionSize * warmupMul * regimeMul).toFixed(4));
+      qty = Number((qty * multipliers.positionSize * warmupMul * regimeMul * quboWeightMultiplier).toFixed(4));
+
+      // Ensemble allocation scaling: scale position size by the producing strategy's
+      // regime-adjusted ensemble weight (relative to the equal-weight baseline)
+      const ensembleScale = this.getEnsembleWeightScale(sig, ensembleAllocations);
+      qty = Number((qty * ensembleScale).toFixed(4));
 
       // Minimum-notional handling. The old code raised ANY undersized order to ~$5.5, which silently
       // cancelled every risk reduction applied above (dynamic risk, regime, warm-up, correlation).
@@ -947,72 +1139,165 @@ export class TradingPipeline {
           // Set leverage and isolated margin on Binance Futures
           await this.orderGateway.ensureLeverage(symbol, this.config.maxLeverage || 10, 'ISOLATED');
 
-          // Register pending protection to be sent upon actual order fill (البند 23)
-          const ord = this.orderGateway.submitOrder({
-            symbol,
-            side: signalType,
-            type: 'MARKET',
-            quantity: qty,
-            price: features.currentPrice,
-            strategyId: 'OU-DECISION-ENGINE',
-          });
-
-          if (ord.status === 'REJECTED') {
-            console.warn(`⛔ Entry rejected by centralized risk validation for ${symbol}: ${ord.errorMessage}`);
+          // In-flight submission lock: prevent concurrent order submission for the same symbol
+          if (this.inFlightLocks.has(symbol)) {
             return;
           }
+          this.inFlightLocks.add(symbol);
+          try {
+            // Register pending protection to be sent upon actual order fill (البند 23)
+            let ord = this.orderGateway.submitOrder({
+              symbol,
+              side: signalType,
+              type: 'MARKET',
+              quantity: qty,
+              price: features.currentPrice,
+              strategyId: 'OU-DECISION-ENGINE',
+            });
 
-          this.pendingProtection.set(ord.id, {
-            ouSigma: features.ouSigma || (features.currentPrice * 0.005),
-            ouMu: sig.takeProfit,
-            side: signalType,
-            symbol,
-          });
+            // Min-notional bump: when the order fails with a "less than min notional"
+            // error, bump the quantity up to meet the minimum notional requirement
+            // and retry instead of giving up.
+            if (ord.status === 'REJECTED' && isMinNotionalRejection(ord.errorMessage)) {
+              const filter = this.orderGateway.getSymbolFilter(symbol);
+              const minNotionalUsd = filter?.minNotional || 5;
+              const stepSize = filter?.stepSize || 0.001;
+              // Round UP to a whole step multiple so the quantity still meets
+              // the minimum notional after gateway step formatting (which floors).
+              const rawBumpedQty = (minNotionalUsd * 1.05) / (features.currentPrice || 1);
+              const bumpedQty = stepSize > 0 ? Math.ceil(rawBumpedQty / stepSize) * stepSize : rawBumpedQty;
+              console.log(`📈 ${symbol}: order rejected for insufficient notional — bumping quantity ${qty} -> ${bumpedQty} to meet $${minNotionalUsd} minimum and retrying`);
+              qty = Number(bumpedQty.toFixed(6));
+              ord = this.orderGateway.submitOrder({
+                symbol,
+                side: signalType,
+                type: 'MARKET',
+                quantity: qty,
+                price: features.currentPrice,
+                strategyId: 'OU-DECISION-ENGINE',
+              });
+            }
 
-          // 💾 Save Trade to database
-          await this.db.saveTrade({
-            id: ord.id,
-            timestamp: Date.now(),
-            symbol,
-            side: signalType,
-            quantity: qty,
-            price: features.currentPrice,
-            strategy: 'OU-DECISION-ENGINE',
-            status: 'OPEN',
-          });
+            if (ord.status === 'REJECTED') {
+              console.warn(`⛔ Entry rejected by centralized risk validation for ${symbol}: ${ord.errorMessage}`);
+              return;
+            }
 
-          // 📝 Register with Partial Profit Manager (including maxHoldMs for Point 11 time exit)
-          this.partialProfitManager.registerPosition(
-            ord.id,
-            symbol,
-            signalType,
-            features.currentPrice,
-            qty,
-            sig.maxHoldMs
-          );
+            this.pendingProtection.set(ord.id, {
+              ouSigma: features.ouSigma || (features.currentPrice * 0.005),
+              ouMu: sig.takeProfit,
+              side: signalType,
+              symbol,
+            });
 
-          // 📈 Register with Scale-In Manager
-          this.scaleInManager.registerOriginalPosition(
-            ord.id,
-            symbol,
-            signalType,
-            features.currentPrice,
-            qty
-          );
+            // 💾 Save Trade to database
+            await this.db.saveTrade({
+              id: ord.id,
+              timestamp: Date.now(),
+              symbol,
+              side: signalType,
+              quantity: qty,
+              price: features.currentPrice,
+              strategy: 'OU-DECISION-ENGINE',
+              status: 'OPEN',
+            });
 
-          this.eventJournal.record(
-            'ORDER',
-            'STRATEGY',
-            `Auto Strategy Triggered ${signalType} ${qty} ${symbol}: ${sig.reason}`,
-            { signal: sig }
-          );
+            // 📝 Register with Partial Profit Manager (including maxHoldMs for Point 11 time exit)
+            this.partialProfitManager.registerPosition(
+              ord.id,
+              symbol,
+              signalType,
+              features.currentPrice,
+              qty,
+              sig.maxHoldMs
+            );
+
+            // 📈 Register with Scale-In Manager
+            this.scaleInManager.registerOriginalPosition(
+              ord.id,
+              symbol,
+              signalType,
+              features.currentPrice,
+              qty
+            );
+
+            this.eventJournal.record(
+              'ORDER',
+              'STRATEGY',
+              `Auto Strategy Triggered ${signalType} ${qty} ${symbol}: ${sig.reason}`,
+              { signal: sig }
+            );
+          } finally {
+            this.inFlightLocks.delete(symbol);
+          }
         }
       }
     } catch (err) {
-      console.error(`❌ Error in evaluateSignalAndExecute for ${symbol}:`, err);
+      console.error(`❌ Error in evaluateSignalAndExecute for ${symbol}:`, redactSecrets(String(err)));
     } finally {
       this.inFlightSymbols.delete(symbol);
     }
+  }
+
+  /**
+   * Computes regime-adjusted ensemble allocations from rolling 30-day tracked
+   * performance (falls back to static strategy metrics until real trades accrue).
+   */
+  private computeEnsembleAllocations(regime?: any): Record<string, number> {
+    const metrics: StrategyPerformanceMetrics[] = this.strategyManager.getStrategies().map((s) => {
+      const tracked = this.ensembleAllocator.computeMetrics(s.id);
+      if (tracked) {
+        return tracked;
+      }
+      return {
+        strategyName: s.id,
+        sharpeRatio: Number(s.metrics.sharpeRatio) || 0,
+        winRate: (Number(s.metrics.winRatePct) || 0) / 100,
+        profitFactor: Number(s.metrics.profitFactor) || 0,
+        tradeCount: Number(s.metrics.totalTrades) || 0,
+      };
+    });
+    return this.ensembleAllocator.getAllocations(regime, metrics);
+  }
+
+  private resolveSignalStrategyId(signal?: TradingSignal | null): string | null {
+    if (!signal) return null;
+    const name = (signal.strategy || '').toLowerCase();
+    if (name.includes('multiagent') || name.includes('multi-agent') || name.includes('ml')) return 'multi-agent-quant-alpha';
+    if (name.includes('mean') || name.includes('reversion') || name.includes('ornstein') || name.includes('ou-') || name.includes('statistical')) return 'ou-mean-reversion';
+    if (name.includes('qubo') || name.includes('quantum')) return 'quantum-qubo-alpha';
+    if (name.includes('volat') || name.includes('breakout') || name.includes('regime')) return 'regime-volatility-breakout';
+    if (name.includes('ofi') || name.includes('orderbook') || name.includes('scalp')) return 'orderbook-imbalance-scalp';
+    if (name.includes('pair')) return 'statistical-pairs';
+    if (name.includes('funding')) return 'funding-rate-arb';
+    return null;
+  }
+
+  private getEnsembleWeightScale(signal: TradingSignal, allocations: Record<string, number>): number {
+    const strategyId = this.resolveSignalStrategyId(signal);
+    if (!strategyId) return 1;
+    const weight = allocations[strategyId];
+    if (weight === undefined || weight === null || !Number.isFinite(weight)) return 1;
+    const strategyCount = Math.max(1, Object.keys(allocations).length);
+    const equalWeightPct = 100 / strategyCount;
+    return clamp(weight / equalWeightPct, 0.25, 2.0);
+  }
+
+  /**
+   * Evaluates statistical pairs (cointegration-style) from live market data.
+   */
+  public getStatisticalPairs(capital?: number): { pairs: Pair[]; evaluation: ReturnType<StatisticalPairsStrategy['evaluate']> } {
+    const candlesMap = new Map<string, Candle[]>();
+    for (const sym of this.config.activeSymbols) {
+      candlesMap.set(sym, this.marketData.getCandles(sym) || []);
+    }
+    const pairs = this.statisticalPairs.findPairs(candlesMap, 0.85);
+    const currentPrices: Record<string, number> = {};
+    for (const [sym, candles] of candlesMap) {
+      currentPrices[sym] = candles.length > 0 ? candles[candles.length - 1].close : 0;
+    }
+    const evaluation = this.statisticalPairs.evaluate(pairs, currentPrices);
+    return { pairs, evaluation };
   }
 
   /**
@@ -1100,19 +1385,28 @@ export class TradingPipeline {
     const assets = this.config.activeSymbols;
 
     // Calculate dynamic covariance & expected returns from real market returns
-        const returnsMap = this.correlationRiskManager.getReturnsMap();
-        // Unified QUBO optimization via FeatureEngine (delegates to QuboPortfolio)
-        const qubo = this.featureEngine.optimizePortfolio(assets, returnsMap, {
-          assets,
-          riskAversion: this.config.riskAversionLambda,
-          budgetPenalty: this.config.budgetPenaltyGamma,
-          transactionCostPenalty: 0.15,
-          cardinalityLimit: Math.min(4, assets.length),
-          discretizationBits: 2,
-        });
-        // Re-export the same dynamic values for solver consumption (single source of truth)
-        const dynamicReturns = QuboPortfolio.calculateDynamicReturns(assets, returnsMap);
-        const dynamicCov = QuboPortfolio.calculateDynamicCovariance(assets, returnsMap);
+    const returnsMap = this.correlationRiskManager.getReturnsMap();
+    // Unified QUBO optimization via FeatureEngine (delegates to QuboPortfolio)
+    const qubo = this.featureEngine.optimizePortfolio(assets, returnsMap, {
+      assets,
+      riskAversion: this.config.riskAversionLambda,
+      budgetPenalty: this.config.budgetPenaltyGamma,
+      transactionCostPenalty: 0.15,
+      cardinalityLimit: Math.min(4, assets.length),
+      discretizationBits: 2,
+    });
+    // Re-export the same dynamic values for solver consumption (single source of truth)
+    const dynamicReturns = QuboPortfolio.calculateDynamicReturns(assets, returnsMap);
+    let dynamicCov = QuboPortfolio.calculateDynamicCovariance(assets, returnsMap);
+
+    // Apply Ledoit-Wolf shrinkage (70% toward constant-correlation target)
+    dynamicCov = QuboPortfolio.shrinkCovariance(dynamicCov, 0.7);
+
+    // Apply regime-conditioned scaling to covariance matrix
+    const regime = this.regimeDetector.analyze();
+    const regimeName = regime.volatilityRegime || regime.marketRegime || 'RANGING';
+    dynamicCov = QuboPortfolio.buildRegimeConditionedCovariance(dynamicCov, regimeName);
+    console.log(`📊 QUBO covariance adjusted for regime: ${regimeName} (scaling applied)`);
 
     let solution: QuboSolution;
 
@@ -1135,6 +1429,11 @@ export class TradingPipeline {
     const elapsed = performance.now() - t0;
     this.healthMonitor.updateLatency({ quboOptimizationMs: Number(elapsed.toFixed(2)) });
     this.lastQuboSolution = solution;
+
+    // Wire QUBO target weights into PortfolioSizer for position sizing
+    if (solution.normalizedWeights && Object.keys(solution.normalizedWeights).length > 0) {
+      this.portfolioSizer.setTargetWeights(solution.normalizedWeights);
+    }
 
     this.eventJournal.record(
       'QUANTUM',
@@ -1185,8 +1484,8 @@ export class TradingPipeline {
       ]);
 
       if (!accountRes.ok || !positionsRes.ok) {
-        const accErr = !accountRes.ok ? await accountRes.text().catch(() => '') : 'OK';
-        const posErr = !positionsRes.ok ? await positionsRes.text().catch(() => '') : 'OK';
+        const accErr = redactSecrets(!accountRes.ok ? await accountRes.text().catch(() => '') : 'OK');
+        const posErr = redactSecrets(!positionsRes.ok ? await positionsRes.text().catch(() => '') : 'OK');
         console.warn(`⚠️ Reconciliation skipped: Exchange API returned error (Account HTTP ${accountRes.status}: ${accErr} | Positions HTTP ${positionsRes.status}: ${posErr})`);
         return;
       }
@@ -1301,7 +1600,7 @@ export class TradingPipeline {
         console.log(`✅ State Reconciliation complete. In sync with Binance Futures (${executionMode}). Equity: $${realEquity.toFixed(2)}, Open positions: ${realOpenPositions.length}`);
       }
     } catch (error) {
-      console.error('❌ Reconciliation failed:', error);
+      console.error('❌ Reconciliation failed:', redactSecrets(String(error)));
     }
   }
 
@@ -1515,16 +1814,23 @@ export class TradingPipeline {
     const metrics = this.db.getPerformanceMetrics();
     const winRate = metrics && metrics.totalTrades > 0 ? (metrics.winningTrades / metrics.totalTrades) : 0.6;
     
-    // Calculate dynamic Sharpe from trade history if available, else standard baseline
+    // Calculate dynamic Sharpe from realized trade P&L history
     const fills = this.userDataStream.getFills();
-    let sharpe = 1.2;
+    const equityForReturns = this.subWalletManager.getCurrentEquity() > 0
+      ? this.subWalletManager.getCurrentEquity()
+      : (balance.totalEquity || 1000);
+    let sharpe: number | null = null;
     if (fills.length >= 5) {
-      const returns = fills.map(f => (f.side === 'BUY' ? -f.commission : -f.commission));
+      const returns = fills.map(f => {
+        const pnl = Number.isFinite(f.realizedPnl) ? (f.realizedPnl as number) : 0;
+        return equityForReturns > 0 ? pnl / equityForReturns : 0;
+      });
       const mean = returns.reduce((a, b) => a + b, 0) / returns.length;
-      const variance = returns.reduce((a, b) => a + Math.pow(b - mean, 2), 0) / returns.length;
+      const variance = returns.reduce((a, b) => a + Math.pow(b - mean, 2), 0) / Math.max(1, returns.length - 1);
       const std = Math.sqrt(variance);
       if (std > 0) {
-        sharpe = Number(((mean / std) * Math.sqrt(252)).toFixed(2));
+        const periodsPerDay = Math.max(1, Math.round(fills.length / 30));
+        sharpe = Number(((mean / std) * Math.sqrt(365 * periodsPerDay)).toFixed(2));
       }
     }
     
@@ -1565,6 +1871,109 @@ export class TradingPipeline {
           await this.telegramService.sendMessage(`✅ <b>استقرار نظام السوق: حركة عرضية (RANGING)</b>\n\nنظام السوق: <b>${regime.marketRegime === 'RANGING' ? 'عرضي متذبذب' : 'معتدل'}</b>\nمؤشر هيرست: <b>${regime.hurstExponent.toFixed(3)}</b>\nمؤشر ADX: <b>${regime.adx.toFixed(1)}</b>\n\nالإجراء: <b>تم التحول تلقائياً لاستراتيجية الارتداد للمتوسط (Ornstein-Uhlenbeck)</b>\nالمحرك: استهداف مراجحة الانحرافات الإحصائية مع مسار التعادل.`);
         }
       }
+    }
+  }
+
+  private async runStressTest(): Promise<void> {
+    const positions = this.userDataStream.getPositions();
+    const balance = this.userDataStream.getBalance();
+
+    if (positions.length === 0) {
+      return;
+    }
+
+    const summary: StressTestSummary = this.stressTestEngine.runStressTest(positions, balance);
+    this.lastStressTestTime = Date.now();
+
+    console.log(`🧪 [Stress Test] Overall: ${summary.overallPass ? 'PASSED' : 'FAILED'} | Worst Drawdown: ${summary.worstDrawdown.toFixed(2)}% | Total Max Loss: $${summary.totalMaxLoss.toFixed(2)}`);
+
+    for (const result of summary.results) {
+      const status = result.passed ? '✅' : '❌';
+      console.log(`  ${status} ${result.scenarioName}: Drawdown=${result.maxDrawdown.toFixed(2)}% | Loss=$${result.maxLoss.toFixed(2)} | AtRisk=${result.positionsAtRisk} | Recovery≈${result.recoveryTimeEstimate}d`);
+    }
+
+    this.eventJournal.record(
+      summary.overallPass ? 'INFO' : 'WARN',
+      'STRESS_TEST',
+      `Stress test ${summary.overallPass ? 'passed' : 'failed'}: worst drawdown ${summary.worstDrawdown.toFixed(2)}%`,
+      { summary }
+    );
+
+    if (!summary.overallPass || summary.worstDrawdown > 20) {
+      const failedScenarios = summary.results.filter((r) => !r.passed).map((r) => r.scenarioName).join(', ');
+      const reason = `Stress test failure: ${failedScenarios || 'max drawdown > 20%'} (worst: ${summary.worstDrawdown.toFixed(2)}%)`;
+      console.warn(`🚨 [Stress Test] Triggering SOFT_HALT: ${reason}`);
+      this.killSwitch.trigger('SOFT_HALT', reason);
+      
+      await this.telegramService.sendMessage(
+        `🚨 <b>تنبيه اختبار الضغط (Stress Test)</b>\n\n` +
+        `⚠️ تم تفعيل SOFT_HALT بسبب فشل اختبار الضغط\n\n` +
+        `📊 أسوأ تراجع: <b>${summary.worstDrawdown.toFixed(2)}%</b>\n` +
+        `💰 إجمالي الخسارة القصوى: <b>$${summary.totalMaxLoss.toFixed(2)}</b>\n` +
+        `❌ السيناريوهات الفاشلة: <b>${failedScenarios || 'لا شيء (تراجع > 20%)'}</b>\n\n` +
+        `🛑 تم إيقاف الأوامر الجديدة. المراكز الحالية تحت المراقبة.`
+      ).catch(() => {});
+    }
+  }
+
+  private async checkMarginHealth(): Promise<void> {
+    const positions = this.userDataStream.getPositions();
+    if (positions.length === 0) return;
+
+    const report: MarginHealthReport = this.marginHealthMonitor.checkMarginHealth(positions);
+
+    if (report.recommendation !== 'SAFE') {
+      console.warn(`⚠️ [Margin Health] ${report.recommendation}: Worst health score = ${(report.worstHealthScore * 100).toFixed(1)}%`);
+      
+      this.eventJournal.record('WARN', 'MARGIN_HEALTH', `Margin health ${report.recommendation}`, { report });
+
+      if (report.recommendation === 'CLOSE_NOW') {
+        this.killSwitch.trigger('SOFT_HALT', `Margin health critical: ${report.atRiskPositions.length} positions near liquidation`);
+        
+        await this.telegramService.sendMessage(
+          `🚨 <b>تنبيه هامش حرجة (Margin Health)</b>\n\n` +
+          `⚠️ ${report.atRiskPositions.length} مراكز قريبة من التصفية!\n` +
+          `📉 أسوأ درجة صحية: <b>${(report.worstHealthScore * 100).toFixed(1)}%</b>\n\n` +
+          `🛑 تم تفعيل SOFT_HALT. جارٍ تقليص المراكز المعرضة للخطر.`
+        ).catch(() => {});
+      }
+
+      for (const atRiskPos of report.atRiskPositions) {
+        if (atRiskPos.healthScore < this.marginHealthMonitor.getHealthWarningThreshold()) {
+          await this.reducePositionByHalf(atRiskPos.symbol, `Margin health ${atRiskPos.healthScore < this.marginHealthMonitor.getHealthCriticalThreshold() ? 'CRITICAL' : 'WARNING'}: ${(atRiskPos.healthScore * 100).toFixed(1)}%`);
+        }
+      }
+    }
+  }
+
+  private async reducePositionByHalf(symbol: AssetSymbol, reason: string): Promise<void> {
+    const positions = this.userDataStream.getPositions();
+    const pos = positions.find((p) => p.symbol === symbol);
+    if (!pos || pos.size === 0) return;
+
+    const reduceQty = Math.abs(pos.size) * 0.5;
+    const side = pos.size > 0 ? 'SELL' : 'BUY';
+
+    console.log(`📉 [Risk Reduction] Reducing ${symbol} by 50% (${reduceQty}) - ${reason}`);
+
+    const order = this.orderGateway.submitOrder({
+      symbol,
+      side,
+      type: 'MARKET',
+      quantity: reduceQty,
+      price: this.marketData.getPrice(symbol) || pos.currentPrice,
+      strategyId: 'MARGIN_HEALTH_REDUCTION',
+      reduceOnly: true,
+    });
+
+    if (order.status === 'FILLED' || order.status === 'PARTIALLY_FILLED') {
+      this.eventJournal.record('ORDER', 'RISK_REDUCTION', `Reduced ${symbol} by 50% due to margin health`, { symbol, reduceQty, reason });
+      await this.telegramService.sendMessage(
+        `📉 <b>تم تقليص المركز بنسبة 50%</b>\n\n` +
+        `🪙 الزوج: <b>${symbol}</b>\n` +
+        `📦 الكمية المقلصة: <b>${reduceQty.toFixed(4)}</b>\n` +
+        `📝 السبب: <b>${reason}</b>`
+      ).catch(() => {});
     }
   }
 
@@ -1669,7 +2078,7 @@ export class TradingPipeline {
         learningEvent: learnEvent
       };
     } catch (e: any) {
-      console.error(`❌ Failed to close position for ${symbol}:`, e);
+      console.error(`❌ Failed to close position for ${symbol}:`, redactSecrets(String(e)));
       return { success: false, message: e.message || "Close failed" };
     } finally {
       this.inFlightSymbols.delete(symbol);

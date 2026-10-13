@@ -69,7 +69,7 @@ export const AccountSummary: React.FC<AccountSummaryProps> = React.memo(({
   const isProfit = unrealizedPnl >= 0;
   const isDailyProfit = dailyPnl >= 0;
 
-  const latency = health?.pipelineLatency?.totalPipelineMs || 1.8;
+  const latency = Number.isFinite(health?.pipelineLatency?.totalPipelineMs) ? Number(health?.pipelineLatency?.totalPipelineMs) : 0;
   const throughput = health?.messagesPerSecond || 45;
 
   return (

@@ -48,8 +48,10 @@ export class QuantumInspiredSolver {
       const gamma = (1 - s) * (options.gammaInitial || 2.0);
       const beta = 0.5 + s * 10.0; // Inverse thermal temperature
 
-      // Quantum coupling J_perp between adjacent Trotter slices
-      const jPerp = -0.5 * Math.log(Math.tanh(Math.max(1e-4, gamma / trotterSlices)));
+      // Quantum coupling J_perp between adjacent Trotter slices.
+          // Standard PIMC formula: J_perp = -(1/2) * ln(tanh(Gamma / (2 * L)))
+          // The factor of 2 in the denominator is required for correct Trotter scaling.
+          const jPerp = -0.5 * Math.log(Math.tanh(Math.max(1e-4, gamma / (2 * trotterSlices))));
 
       for (let r = 0; r < trotterSlices; r++) {
         const nextR = (r + 1) % trotterSlices;

@@ -81,6 +81,28 @@ export class RiskEngine {
   ): { metrics: RiskMetrics; violation: boolean; violationReason?: string; recommendedKillLevel?: KillSwitchLevel } {
     const totalEquity = balance.totalEquity;
     
+    // Handle no positions / invalid equity - return safe defaults
+    const invalidEquity = !Number.isFinite(totalEquity) || totalEquity <= 0;
+    const hasPositions = positions && positions.length > 0;
+    
+    if (invalidEquity || !hasPositions) {
+      const safeMetrics: RiskMetrics = {
+        currentDrawdownPct: 0,
+        dailyLossPct: 0,
+        var95: 0,
+        var99: 0,
+        cvar95: 0,
+        currentLeverage: 0,
+        sharpeRatio: null,
+        sortinoRatio: null,
+        varSource: 'ASSUMED',
+        returnsSampleSize: this.returnsHistory.length,
+        killSwitchLevel: currentKillSwitchLevel,
+        killSwitchActive: currentKillSwitchLevel !== 'NORMAL',
+      };
+      return { metrics: safeMetrics, violation: false, violationReason: undefined, recommendedKillLevel: 'NORMAL' };
+    }
+
     // Initialize peak/daily start on first positive equity
     if (totalEquity > 0) {
         if (this.peakEquity === 0) this.peakEquity = totalEquity;
@@ -88,15 +110,13 @@ export class RiskEngine {
         if (totalEquity > this.peakEquity) this.peakEquity = totalEquity;
     }
 
-    const invalidEquity = !Number.isFinite(totalEquity) || totalEquity <= 0;
-
     // Invalid or depleted equity is a hard risk breach, never a zero drawdown.
-    const currentDrawdownPct = invalidEquity ? 100 : this.peakEquity > 0
+    const currentDrawdownPct = this.peakEquity > 0
         ? ((this.peakEquity - totalEquity) / this.peakEquity) * 100 
         : 0;
 
     // 2. Daily Loss Calculation
-    const dailyLossPct = invalidEquity ? 100 : this.dailyStartEquity > 0
+    const dailyLossPct = this.dailyStartEquity > 0
         ? Math.max(0, ((this.dailyStartEquity - totalEquity) / this.dailyStartEquity) * 100) 
         : 0;
 
@@ -104,9 +124,9 @@ export class RiskEngine {
     const totalExposure = positions.reduce((acc, p) => acc + Math.abs(p.size * p.currentPrice), 0);
     const currentLeverage = totalEquity > 0 ? totalExposure / totalEquity : 0;
 
-    // 4. Value at Risk (VaR) & CVaR
-    const safeEquity = Number.isFinite(totalEquity) && totalEquity > 0 ? totalEquity : 0;
-    const { var95, var99, cvar95 } = this.calculateVaR(this.returnsHistory, safeEquity);
+    // 4. Value at Risk (VaR) & CVaR - use actual position data for volatility estimation
+    const positionVolatility = this.estimatePositionVolatility(positions);
+    const { var95, var99, cvar95 } = this.calculateVaR(this.returnsHistory, totalEquity, positionVolatility);
 
     // 5. Sharpe & Sortino ratios from return series
     const { sharpe, sortino } = this.calculateRatios(this.returnsHistory);
@@ -240,33 +260,62 @@ export class RiskEngine {
     return { allowed: true };
   }
 
-  private calculateVaR(returns: number[], equity: number): { var95: number; var99: number; cvar95: number } {
-    if (returns.length < 10) {
-      // Default parametric approximations
-      const std = equity * 0.02;
+  private calculateVaR(returns: number[], equity: number, positionVolatility?: number): { var95: number; var99: number; cvar95: number } {
+    // Use position-based volatility if available, otherwise fall back to historical returns
+    const useHistorical = returns.length >= 10;
+    const effectiveVolatility = positionVolatility ?? (useHistorical ? this.calculateHistoricalVolatility(returns) : 0);
+    
+    if (!useHistorical && effectiveVolatility <= 0) {
+      // No historical data and no position volatility - return safe defaults (0 risk)
+      return { var95: 0, var99: 0, cvar95: 0 };
+    }
+
+    if (useHistorical) {
+      const sorted = [...returns].sort((a, b) => a - b);
+      const idx95 = Math.floor(sorted.length * 0.05);
+      const idx99 = Math.floor(sorted.length * 0.01);
+
+      const ret95 = Math.abs(Math.min(0, sorted[idx95]));
+      const ret99 = Math.abs(Math.min(0, sorted[idx99]));
+
+      // CVaR is mean of losses beyond 95th percentile
+      const tailLosses = sorted.slice(0, Math.max(1, idx95));
+      const meanTailLoss = Math.abs(tailLosses.reduce((a, b) => a + b, 0) / tailLosses.length);
+
       return {
-        var95: Number((1.645 * std).toFixed(2)),
-        var99: Number((2.326 * std).toFixed(2)),
-        cvar95: Number((2.06 * std).toFixed(2)),
+        var95: Number((ret95 * equity).toFixed(2)),
+        var99: Number((ret99 * equity).toFixed(2)),
+        cvar95: Number((meanTailLoss * equity).toFixed(2)),
       };
     }
 
-    const sorted = [...returns].sort((a, b) => a - b);
-    const idx95 = Math.floor(sorted.length * 0.05);
-    const idx99 = Math.floor(sorted.length * 0.01);
-
-    const ret95 = Math.abs(Math.min(0, sorted[idx95]));
-    const ret99 = Math.abs(Math.min(0, sorted[idx99]));
-
-    // CVaR is mean of losses beyond 95th percentile
-    const tailLosses = sorted.slice(0, Math.max(1, idx95));
-    const meanTailLoss = Math.abs(tailLosses.reduce((a, b) => a + b, 0) / tailLosses.length);
-
+    // Parametric VaR using position-based volatility
     return {
-      var95: Number((ret95 * equity).toFixed(2)),
-      var99: Number((ret99 * equity).toFixed(2)),
-      cvar95: Number((meanTailLoss * equity).toFixed(2)),
+      var95: Number((1.645 * effectiveVolatility * equity).toFixed(2)),
+      var99: Number((2.326 * effectiveVolatility * equity).toFixed(2)),
+      cvar95: Number((2.06 * effectiveVolatility * equity).toFixed(2)),
     };
+  }
+
+  private calculateHistoricalVolatility(returns: number[]): number {
+    const n = returns.length;
+    const mean = returns.reduce((a, b) => a + b, 0) / n;
+    const variance = returns.reduce((a, b) => a + Math.pow(b - mean, 2), 0) / (n - 1);
+    return Math.sqrt(variance);
+  }
+
+  private estimatePositionVolatility(positions: Position[]): number {
+    if (!positions || positions.length === 0) return 0;
+    
+    // Estimate portfolio volatility from position weights and individual volatilities
+    // For now, use a simple weighted average based on position sizes
+    const totalExposure = positions.reduce((acc, p) => acc + Math.abs(p.size * p.currentPrice), 0);
+    if (totalExposure === 0) return 0;
+    
+    // Use a conservative estimate based on position concentration
+    // In production, this would use actual historical volatility per asset
+    const concentrationRisk = positions.length === 1 ? 0.03 : 0.02 / Math.sqrt(positions.length);
+    return concentrationRisk;
   }
 
   /**

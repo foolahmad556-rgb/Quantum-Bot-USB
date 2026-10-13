@@ -47,15 +47,15 @@ export const NexusHUD: React.FC<NexusHUDProps> = React.memo(({
   killSwitchActive,
   onEmergencyKill,
   onResetKill,
-  drawdownPct = 0.88,
+  drawdownPct = 0,
 }) => {
   const isAr = lang === 'ar';
   const [showWalletModal, setShowWalletModal] = useState<boolean>(false);
   const [showPnlModal, setShowPnlModal] = useState<boolean>(false);
 
-  const walletVal = balance?.totalEquity || 114820.45;
-  const pnlPct = balance?.dailyPnlPct || 14.82;
-  const dailyPnl = balance?.dailyPnl || 1702.40;
+  const walletVal = Number.isFinite(balance?.totalEquity) ? balance.totalEquity : 0;
+  const pnlPct = Number.isFinite(balance?.dailyPnlPct) ? balance.dailyPnlPct : 0;
+  const dailyPnl = Number.isFinite(balance?.dailyPnl) ? balance.dailyPnl : 0;
   const isPnlPositive = dailyPnl >= 0;
 
   const tierInfo = getAccountTier(walletVal, isAr);

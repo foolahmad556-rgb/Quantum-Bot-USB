@@ -75,7 +75,7 @@ export const SignalsPanel: React.FC<SignalsPanelProps> = React.memo(({
     symbol: s.symbol,
     action: s.type.includes('BUY') ? 'BUY' : s.type.includes('SELL') ? 'SELL' : 'HOLD',
     price: 68000,
-    conf: Math.round(((s as any).confidence || 0.85) * 100),
+    conf: Math.round((Number.isFinite((s as any).confidence) ? (s as any).confidence : 0) * 100),
     digits: 2,
   })) : defaultSignals;
 

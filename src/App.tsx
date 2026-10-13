@@ -11,7 +11,7 @@
  * Bilingual Support: Arabic (RTL) & English (LTR)
  */
 
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useRef, useState, useCallback } from 'react';
 import {
   Activity,
   Terminal,
@@ -156,7 +156,7 @@ export default function CyberPulseNexusApp() {
   const wsRef = useRef<WebSocket | null>(null);
 
   // Audio tone generator for real action feedback
-  const playHoloTone = (frequency = 880, duration = 0.08) => {
+  const playHoloTone = useCallback((frequency = 880, duration = 0.08) => {
     if (!soundEnabled) return;
     try {
       const audioCtx = new (window.AudioContext || (window as any).webkitAudioContext)();
@@ -171,10 +171,10 @@ export default function CyberPulseNexusApp() {
       osc.start();
       osc.stop(audioCtx.currentTime + duration);
     } catch {}
-  };
+  }, [soundEnabled]);
 
   // 1. Fetch Real Server & Account Status (from live backend pipeline connected to exchange API)
-  const fetchLiveServerStatus = async () => {
+  const fetchLiveServerStatus = useCallback(async () => {
     try {
       const data = await fetchWithAuth('/api/live-status');
       if (data) {
@@ -215,7 +215,7 @@ export default function CyberPulseNexusApp() {
     } catch {
       // Backend status polling notice
     }
-  };
+  }, []);
 
   // 2. Fetch Real Historical Klines for Selected Asset via proxy with direct fallback
   const fetchRealKlines = async (binanceSym: string) => {

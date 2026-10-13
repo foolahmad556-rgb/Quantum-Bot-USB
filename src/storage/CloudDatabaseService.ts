@@ -198,13 +198,16 @@ export class CloudDatabaseService {
         eq(trades.status, 'CLOSED')
       )
     );
-    
+
     const totalTrades = tradesList.length;
-    // PnL calculation would require exit prices in the schema, for now simplified
+    const winningTrades = tradesList.filter(t => Number(t.pnl) > 0).length;
+    const totalPnl = tradesList.reduce((sum, t) => sum + Number(t.pnl), 0);
+    const winRate = totalTrades > 0 ? (winningTrades / totalTrades) * 100 : 0;
+
     return {
       totalTrades,
-      winRate: 0, 
-      totalPnl: 0
+      winRate: Number(winRate.toFixed(2)),
+      totalPnl: Number(totalPnl.toFixed(2))
     };
   }
 }

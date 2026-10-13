@@ -185,9 +185,11 @@ export interface QAOAResult {
   optimalBeta: number[];
   expectationValue: number;
   groundStateProbability: number;
+  groundStateBits: number[]; // Bit vector of the lowest-energy basis state
   stateProbabilities: { state: string; probability: number; energy: number; symbols: string[] }[];
   circuitDepth: number;
   qubitCount: number;
+  solveTimeMs: number;
   fidelityScore: number;
 }
 
@@ -338,7 +340,7 @@ export interface LogEvent {
   id: string;
   timestamp: number;
   severity: LogSeverity;
-  source: 'MARKET_DATA' | 'FEATURE_ENGINE' | 'STRATEGY' | 'QUANTUM_SOLVER' | 'RISK_ENGINE' | 'KILL_SWITCH' | 'ORDER_GATEWAY' | 'SYSTEM';
+  source: 'MARKET_DATA' | 'FEATURE_ENGINE' | 'STRATEGY' | 'QUANTUM_SOLVER' | 'RISK_ENGINE' | 'KILL_SWITCH' | 'ORDER_GATEWAY' | 'SYSTEM' | 'STRESS_TEST' | 'MARGIN_HEALTH' | 'RISK_REDUCTION';
   message: string;
   details?: Record<string, any>;
 }

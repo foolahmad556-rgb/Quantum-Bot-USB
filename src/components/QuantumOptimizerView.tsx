@@ -23,16 +23,15 @@ import {
   Flame,
   Layers,
   Play,
-  RotateCcw,
   Sliders,
   Sparkles,
   Zap,
 } from 'lucide-react';
-import { AssetSymbol, QAOAResult, QuboSolution, SolverType } from '../domain/types';
+import { AssetSymbol, QAOAResult, QuboMatrix, QuboSolution } from '../domain/types';
 import { QAOAAdapter } from '../quantum/QAOAAdapter';
-import { QuboPortfolio } from '../portfolio/QuboPortfolio';
 import { QuantumInspiredSolver } from '../quantum/QuantumInspiredSolver';
 import { ClassicalBaseline } from '../portfolio/ClassicalBaseline';
+import { QuboPortfolio } from '../portfolio/QuboPortfolio';
 
 interface QuantumViewProps {
   activeSymbols: AssetSymbol[];
@@ -95,7 +94,16 @@ export const QuantumOptimizerView: React.FC<QuantumViewProps> = ({
       const tabu = QuantumInspiredSolver.solveTabuSearch(activeSymbols, qubo, expectedReturns, covMatrix, { numSweeps: 300 });
       const markowitz = ClassicalBaseline.solveMarkowitz(activeSymbols, expectedReturns, covMatrix, riskLambda);
       const qaoa = QAOAAdapter.simulateQAOA(qubo, { pLayers: qaoaLayers });
-
+      const qaoaSolution = QuboPortfolio.decodeWeights(
+        activeSymbols,
+        qubo,
+        qaoa.groundStateBits || new Array(qubo.dimension).fill(0),
+        expectedReturns,
+        covMatrix,
+        'QAOA_CIRCUIT',
+        qaoa.solveTimeMs || 0,
+        qaoa.circuitDepth || 0
+      );
       setQaoaSimResult(qaoa);
 
       setBenchmarkData([
@@ -108,11 +116,11 @@ export const QuantumOptimizerView: React.FC<QuantumViewProps> = ({
           isQuantum: true,
         },
         {
-          name: isAr ? 'دائرة QAOA الكمومية' : 'QAOA Circuit',
-          sharpe: Number((qsa.sharpeRatio * 0.96).toFixed(2)),
-          energy: qaoa.expectationValue,
-          solveTimeMs: Number((qsa.solveTimeMs * 1.8).toFixed(1)),
-          returnPct: Number((qsa.expectedReturn * 96).toFixed(1)),
+          name: isAr ? '达رة QAOا الكمية' : 'QAOA Circuit',
+          sharpe: qaoaSolution.sharpeRatio,
+          energy: qaoaSolution.energy,
+          solveTimeMs: qaoaSolution.solveTimeMs,
+          returnPct: Number((qaoaSolution.expectedReturn * 100).toFixed(1)),
           isQuantum: true,
         },
         {
@@ -289,13 +297,13 @@ export const QuantumOptimizerView: React.FC<QuantumViewProps> = ({
                   <span>{isAr ? 'أوزان المحفظة الكمومية المثلى' : 'Optimal Quantum Portfolio Weights'}</span>
                 </h3>
                 <span className="text-xs text-slate-400 font-mono">
-                  {isAr ? 'الحالة الأرضية:' : 'Ground State:'} Energy {lastSolution?.energy.toFixed(4) || '-0.082'}, Sharpe {lastSolution?.sharpeRatio || '2.45'}
+                  {isAr ? 'الحالة الأرضية:' : 'Ground State:'} {lastSolution ? `Energy ${lastSolution.energy.toFixed(4)}` : '--'}, Sharpe {lastSolution ? lastSolution.sharpeRatio.toFixed(3) : '--'}
                 </span>
               </div>
 
               <div className="flex items-center gap-2 px-3 py-1 rounded-lg bg-slate-800 text-xs font-mono text-cyan-300 border border-slate-700">
                 <span>{isAr ? 'زمن الحل:' : 'Solve Time:'}</span>
-                <span className="font-bold">{lastSolution?.solveTimeMs || 3.4} ms</span>
+                <span className="font-bold">{lastSolution ? lastSolution.solveTimeMs.toFixed(1) : '--'} ms</span>
               </div>
             </div>
 
@@ -404,8 +412,8 @@ export const QuantumOptimizerView: React.FC<QuantumViewProps> = ({
               </h3>
               <p className="text-xs text-slate-400 mt-0.5">
                 {isAr
-                  ? `أعلى الحالات الكمومية طاقة صغرى (الدقة: ${((qaoaSimResult?.fidelityScore || 0.88) * 100).toFixed(1)}%)`
-                  : `Top computational basis states by measurement probability (Fidelity: ${((qaoaSimResult?.fidelityScore || 0.88) * 100).toFixed(1)}%)`}
+                  ? `أعلى الحالات الكمومية طاقة صغرى (الدقة: ${((qaoaSimResult ? Number(qaoaSimResult.fidelityScore) : 0) * 100).toFixed(1)}%)`
+                  : `Top computational basis states by measurement probability (Fidelity: ${((qaoaSimResult ? Number(qaoaSimResult.fidelityScore) : 0) * 100).toFixed(1)}%)`}
               </p>
             </div>
           </div>

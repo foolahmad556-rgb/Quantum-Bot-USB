@@ -116,16 +116,31 @@ export class QAOAAdapter {
 
     const groundState = probabilities.reduce((min, cur) => (cur.energy < min.energy ? cur : min), probabilities[0]);
     const groundProb = groundState.probability;
-    const fidelity = Math.min(1.0, Math.max(0.65, groundProb * 3.5 + 0.35));
+
+    // Fidelity: overlap probability of the measured state with the true
+    // classical ground state (the lowest-energy computational basis state).
+    // This is an honest measure — no fabricated boost.
+    let trueGroundIdx = 0;
+    let trueGround = probabilities[0];
+    for (let i = 0; i < probabilities.length; i++) {
+      if (probabilities[i].energy < trueGround.energy) {
+        trueGround = probabilities[i];
+        trueGroundIdx = i;
+      }
+    }
+    const fidelity = trueGround.probability;
+    const groundStateBits = this.indexToBitArray(trueGroundIdx, qubitCount);
 
     return {
       optimalGamma: gamma.map((g) => Number(g.toFixed(4))),
       optimalBeta: beta.map((b) => Number(b.toFixed(4))),
       expectationValue: Number(expectationValue.toFixed(4)),
       groundStateProbability: Number(groundProb.toFixed(4)),
+      groundStateBits,
       stateProbabilities: probabilities.slice(0, 16), // Top 16 states for visualization
       circuitDepth: pLayers * 2,
       qubitCount,
+      solveTimeMs: 0,
       fidelityScore: Number(fidelity.toFixed(3)),
     };
   }

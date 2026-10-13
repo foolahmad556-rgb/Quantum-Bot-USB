@@ -28,7 +28,12 @@ export class WalkForwardValidator {
     });
 
     const dataset = engine.generateDeterministicHighFidelityData();
-    const allCandlesCount = Array.from(dataset.values())[0]?.length || 200;
+    // Validate dataset is non-empty before slicing
+    const firstSymbolCandles = Array.from(dataset.values())[0];
+    if (!firstSymbolCandles || firstSymbolCandles.length === 0) {
+      throw new Error('WalkForward: dataset is empty — cannot slice windows');
+    }
+    const allCandlesCount = firstSymbolCandles.length;
     const windowSize = Math.floor(allCandlesCount / (numWindows + 1));
     const isSize = Math.floor(windowSize * 0.7);
 
@@ -41,14 +46,28 @@ export class WalkForwardValidator {
       const isEndIdx = Math.min(allCandlesCount, startIdx + isSize);
       const oosEndIdx = Math.min(allCandlesCount, isEndIdx + (windowSize - isSize));
 
+      // Bounds-check window indices before slicing
+      if (startIdx >= isEndIdx || isEndIdx >= oosEndIdx) {
+        console.warn(`WalkForward: skipping window ${i + 1} — invalid slice bounds [${startIdx}, ${isEndIdx}, ${oosEndIdx}]`);
+        continue;
+      }
+
       // Slice in-sample & out-of-sample datasets
       const isData = new Map<string, any[]>();
       const oosData = new Map<string, any[]>();
 
       dataset.forEach((candles, sym) => {
-        isData.set(sym, candles.slice(startIdx, isEndIdx));
-        oosData.set(sym, candles.slice(isEndIdx, oosEndIdx));
+        const isSlice = candles.slice(startIdx, isEndIdx);
+        const oosSlice = candles.slice(isEndIdx, oosEndIdx);
+        // Only include symbols with enough data in each segment
+        if (isSlice.length >= 20) isData.set(sym, isSlice);
+        if (oosSlice.length >= 20) oosData.set(sym, oosSlice);
       });
+
+      if (isData.size === 0 || oosData.size === 0) {
+        console.warn(`WalkForward: skipping window ${i + 1} — insufficient data in IS/OOS segments`);
+        continue;
+      }
 
       // Run verified BacktestEngine on In-Sample
       const isRes = engine.runSync(isData, {
@@ -62,12 +81,15 @@ export class WalkForwardValidator {
         maxHurst: 0.55,
       });
 
-      const isSharpe = Math.max(0.8, isRes.sharpeRatio);
-      const oosSharpe = Math.max(0.5, oosRes.sharpeRatio);
+      // Use RAW Sharpe values — do NOT clamp with Math.max floors.
+      // Clamping guaranteed efficiencyRatio >= 0.625 >= 0.60, making robustnessPass
+      // always true and the overfitting detector inert.
+      const isSharpe = isRes.sharpeRatio;
+      const oosSharpe = oosRes.sharpeRatio;
       const isReturn = Number(isRes.totalReturnPct.toFixed(1));
       const oosReturn = Number(oosRes.totalReturnPct.toFixed(1));
 
-      const efficiency = Number((oosSharpe / isSharpe).toFixed(2));
+      const efficiency = Number((oosSharpe / (isSharpe || 1)).toFixed(2));
       const pass = efficiency >= 0.60;
 
       totalISSharpe += isSharpe;
@@ -88,8 +110,9 @@ export class WalkForwardValidator {
       });
     }
 
-    const avgInSampleSharpe = Number((totalISSharpe / numWindows).toFixed(2));
-    const avgOutOfSampleSharpe = Number((totalOOSSharpe / numWindows).toFixed(2));
+    const validWindows = windows.length;
+    const avgInSampleSharpe = validWindows > 0 ? Number((totalISSharpe / validWindows).toFixed(2)) : 0;
+    const avgOutOfSampleSharpe = validWindows > 0 ? Number((totalOOSSharpe / validWindows).toFixed(2)) : 0;
     const overallEfficiency = Number((avgOutOfSampleSharpe / (avgInSampleSharpe || 1)).toFixed(2));
     const overfittingScore = Number(Math.max(0, 1 - overallEfficiency).toFixed(2));
 

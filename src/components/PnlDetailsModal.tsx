@@ -24,10 +24,10 @@ export const PnlDetailsModal: React.FC<PnlDetailsModalProps> = ({
   const isAr = lang === 'ar';
 
   const isPositive = (balance.dailyPnl || 0) >= 0;
-  const totalRealized = balance.realizedPnl || 8420.00;
-  const unrealized = balance.unrealizedPnl || 1482.50;
-  const dailyPnl = balance.dailyPnl || 1702.40;
-  const dailyPct = balance.dailyPnlPct || 14.82;
+  const totalRealized = Number.isFinite(balance.realizedPnl) ? balance.realizedPnl : 0;
+  const unrealized = Number.isFinite(balance.unrealizedPnl) ? balance.unrealizedPnl : 0;
+  const dailyPnl = Number.isFinite(balance.dailyPnl) ? balance.dailyPnl : 0;
+  const dailyPct = Number.isFinite(balance.dailyPnlPct) ? balance.dailyPnlPct : 0;
 
   return (
     <div 

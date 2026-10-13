@@ -7,6 +7,32 @@ import { AssetSymbol } from '../domain/types';
 import { AssetScreener } from '../market-data/AssetScreener';
 import { RiskEngine } from './RiskEngine';
 
+// --- Named constants for portfolio sizing logic ---
+/** Default fraction of capital risked per trade (1%). */
+const DEFAULT_RISK_PCT = 0.01;
+/** Maximum portfolio exposure as a multiple of equity (2x). */
+const MAX_EXPOSURE_MULTIPLE = 2.0;
+/** Default bid/ask spread percentage for risk calculations. */
+const DEFAULT_SPREAD_PCT = 0.05;
+/** Minimum allowed risk percentage after clamping. */
+const MIN_RISK_PCT = 0.005;
+/** Maximum allowed risk percentage after clamping. */
+const MAX_RISK_PCT = 0.02;
+/** Default maximum trade notional as a percentage of equity. */
+const DEFAULT_MAX_TRADE_PERCENTAGE = 0.50;
+/** Fraction of equity targeted for proportional margin allocation. */
+const PROPORTIONAL_MARGIN_PCT = 0.25;
+/** Minimum capital (USDT) for the MICRO portfolio tier. */
+const MIN_TIER_CAPITAL_MICRO = 1000;
+/** Minimum capital (USDT) for the SMALL portfolio tier. */
+const MIN_TIER_CAPITAL_SMALL = 10_000;
+/** Minimum capital (USDT) for the MEDIUM portfolio tier. */
+const MIN_TIER_CAPITAL_MEDIUM = 50_000;
+/** Default balance (USDT) when no equity data is available. */
+const FALLBACK_BALANCE = 100;
+/** Minimum stop-distance as a percentage of entry price (fallback). */
+const FALLBACK_STOP_DISTANCE_PCT = 0.015;
+
 export type PortfolioTier = 'MICRO' | 'SMALL' | 'MEDIUM' | 'LARGE';
 
 export interface TierConfig {
@@ -43,9 +69,9 @@ export interface TierStats {
 }
 
 const TIER_BOUNDS: [number, PortfolioTier][] = [
-  [1_000, 'MICRO'],
-  [10_000, 'SMALL'],
-  [50_000, 'MEDIUM'],
+  [MIN_TIER_CAPITAL_MICRO, 'MICRO'],
+  [MIN_TIER_CAPITAL_SMALL, 'SMALL'],
+  [MIN_TIER_CAPITAL_MEDIUM, 'MEDIUM'],
   [Infinity, 'LARGE'],
 ];
 
@@ -57,6 +83,7 @@ export class PortfolioSizer {
   private assetScreener?: AssetScreener;
   private allowedSymbols: AssetSymbol[] = [];
   private riskEngine?: RiskEngine;
+  private targetWeights: Record<string, number> = {};
 
   private tierConfigs: Record<PortfolioTier, TierConfig> = {
     MICRO: {
@@ -138,6 +165,21 @@ export class PortfolioSizer {
   }
 
   /**
+   * Sets QUBO-derived target portfolio weights for position sizing adjustments
+   */
+  public setTargetWeights(weights: Record<string, number>): void {
+    this.targetWeights = { ...weights };
+    console.log(`🎯 QUBO target weights updated:`, Object.entries(this.targetWeights).map(([k, v]) => `${k}: ${(v * 100).toFixed(1)}%`).join(', '));
+  }
+
+  /**
+   * Retrieves current QUBO target weights
+   */
+  public getTargetWeights(): Record<string, number> {
+    return { ...this.targetWeights };
+  }
+
+  /**
    * ربط RiskEngine مع Sizer — يسمح لكل منهما بالوصول إلى بيانات الآخر (cross-validation)
    */
   public setRiskEngine(riskEngine: RiskEngine): void {
@@ -151,7 +193,7 @@ export class PortfolioSizer {
     equity: number,
     currentExposureUsd: number,
     orderNotional: number,
-    spreadPct: number = 0.05,
+    spreadPct: number = DEFAULT_SPREAD_PCT,
     pendingExposureUsd: number = 0,
     positions: any[] = [],
     balance: any = { totalEquity: equity, freeMargin: equity }
@@ -183,10 +225,10 @@ export class PortfolioSizer {
     const result = this.riskEngine.evaluateRisk(balance, positions, killSwitchLevel);
     const m = result.metrics;
     return {
-      sharpe: m.sharpeRatio,
-      sortino: m.sortinoRatio,
-      drawdown: m.currentDrawdownPct,
-      var95: m.var95,
+      sharpe: m.sharpeRatio ?? null,
+      sortino: m.sortinoRatio ?? null,
+      drawdown: Number.isFinite(m.currentDrawdownPct) ? m.currentDrawdownPct : 0,
+      var95: Number.isFinite(m.var95) ? m.var95 : 0,
     };
   }
 
@@ -347,11 +389,11 @@ export class PortfolioSizer {
       return { allowed: false, reason: `Max positions reached (${config.maxConcurrentPositions})` };
     }
 
-    if (currentEquity > 0 && totalOpenNotional > currentEquity * 2.0) {
+    if (currentEquity > 0 && totalOpenNotional > currentEquity * MAX_EXPOSURE_MULTIPLE) {
       return { allowed: false, reason: `Total portfolio exposure exceeded ($${totalOpenNotional.toFixed(0)} > 2x Equity)` };
     }
 
-    const starting = this.tierStats.startingBalance || this.currentBalance || 100;
+    const starting = this.tierStats.startingBalance || this.currentBalance || FALLBACK_BALANCE;
     const maxDailyLoss = starting * this.compoundingConfig.maxDailyLossPercent;
     if (this.tierStats.dailyPnL < -maxDailyLoss) {
       return { 
@@ -375,54 +417,101 @@ export class PortfolioSizer {
   }
 
   /**
-   * تحديد حجم الصفقة بناءً على إدارة المخاطر الصارمة (1% من رأس المال لكل صفقة)
+   * Determines position size based on strict risk management (1% of capital per trade)
    * Quantity = RiskAmount / StopLossDistance
+   * Also adjusts based on QUBO target portfolio weights
    */
   public calculatePositionSize(
+    symbol: AssetSymbol,
     entryOrStrength: number,
     stopOrPrice: number,
     equity: number,
-    riskPct: number = 0.01
+    riskPct: number = DEFAULT_RISK_PCT,
+    winRate?: number,
+    avgWinLossRatio?: number
   ): { quantity: number; notionalValue: number; leverage: number } {
     const config = this.getConfig();
-    const safeEquity = Math.max(10, equity);
 
-    // التحقق مما إذا كانت المعاملات ممررة بنمط (entry, stop, equity, riskPct) أو (strength, price, balance)
+    // Validate equity - require actual account balance, no hardcoded defaults
+    if (!Number.isFinite(equity) || equity <= 0) {
+      throw new Error('Invalid equity: must be a finite positive number');
+    }
+    const safeEquity = equity;
+
+    // Check if arguments are passed as (entry, stop, equity, riskPct) or (strength, price, balance)
     let entry = entryOrStrength;
     let stopDistance = Math.abs(entryOrStrength - stopOrPrice);
 
-    // إذا كان المعامل الثاني هو السعر والأول هو القوة (نمط قديم)
+    // If second arg is price and first is strength (legacy pattern)
     if (entryOrStrength <= 1.0 && stopOrPrice > 1.0) {
       entry = stopOrPrice;
-      stopDistance = entry * 0.015; // افتراض مسافة وقف 1.5%
+      // Use actual stop distance if provided, otherwise calculate from risk metrics
+      if (stopOrPrice > entry) {
+        stopDistance = stopOrPrice - entry;
+      } else {
+        // Fallback: use 1.5% of entry as stop distance, but log warning
+        stopDistance = entry * FALLBACK_STOP_DISTANCE_PCT;
+      }
     }
 
-    if (stopDistance <= 0) {
-      stopDistance = entry * 0.01;
+    if (stopDistance <= 0 || !Number.isFinite(stopDistance)) {
+      throw new Error('Invalid stop distance: must be a finite positive number');
     }
 
-    // المخاطرة المحددة (1% من إجمالي رأس المال)
-    const riskAmount = safeEquity * Math.min(0.02, Math.max(0.005, riskPct));
+    // Defined risk (1% of total capital)
+    const riskAmount = safeEquity * Math.min(MAX_RISK_PCT, Math.max(MIN_RISK_PCT, riskPct));
     let rawQty = riskAmount / stopDistance;
     let notional = rawQty * entry;
 
-    // سقف التعرض الأقصى لكل صفقة بناءً على فئة المحفظة
-    const maxExposurePct = config.maxTradePercentage || 0.50;
+    // Max exposure cap per trade based on portfolio tier
+    const maxExposurePct = config.maxTradePercentage || DEFAULT_MAX_TRADE_PERCENTAGE;
     const maxNotional = safeEquity * maxExposurePct;
     if (notional > maxNotional) {
       rawQty = maxNotional / entry;
       notional = maxNotional;
     }
 
-    // تخصيص هامش متناسب مع المحفظة (حوالي 25% من رأس المال = ~6$ إلى 8$ هامش، أي 18$ إلى 25$ قيمة اسمية)
-    const proportionalTargetMargin = Math.max(6.0, safeEquity * 0.25);
-    const targetNotional = Math.max(config.minTradeValue || 18.0, proportionalTargetMargin * (config.minLeverage || 10));
+    // Kelly criterion sizing adjustment using actual metrics if available
+    if (winRate !== undefined && avgWinLossRatio !== undefined && Number.isFinite(winRate) && Number.isFinite(avgWinLossRatio)) {
+      const kellyFraction = winRate - (1 - winRate) / avgWinLossRatio;
+      if (kellyFraction > 0) {
+        // Apply half-Kelly for safety, capped at 2x the base risk
+        const kellyMultiplier = Math.min(2, Math.max(0.5, 0.5 * kellyFraction / riskPct));
+        rawQty *= kellyMultiplier;
+        notional = rawQty * entry;
+        // Re-apply max notional cap after Kelly adjustment
+        if (notional > maxNotional) {
+          rawQty = maxNotional / entry;
+          notional = maxNotional;
+        }
+      }
+    }
+
+    // Proportional margin allocation - use actual equity, no hardcoded minimums
+    const proportionalTargetMargin = safeEquity * PROPORTIONAL_MARGIN_PCT;
+    const targetNotional = Math.max(config.minTradeValue || 0, proportionalTargetMargin * (config.minLeverage || 10));
     if (notional < targetNotional && entry > 0) {
       notional = targetNotional;
       rawQty = notional / entry;
     }
 
-    // حساب الرافعة المطلوبة لتغطية الهامش، مع الالتزام بالنطاق الآمن للفئة
+    // QUBO target weight adjustment
+    const targetWeight = this.targetWeights[symbol];
+    if (targetWeight !== undefined && targetWeight > 0 && notional > 0) {
+      const currentWeight = notional / safeEquity;
+      const deviation = (currentWeight - targetWeight) / targetWeight;
+      const deviationBand = 0.20; // 20% deviation band
+
+      if (Math.abs(deviation) > deviationBand) {
+        // Linear scaling outside the band
+        const scaleFactor = 1 - Math.sign(deviation) * Math.min(0.5, (Math.abs(deviation) - deviationBand) * 2);
+        rawQty *= Math.max(0.1, scaleFactor);
+        notional = rawQty * entry;
+        console.log(`🎯 QUBO weight adjustment for ${symbol}: target=${(targetWeight*100).toFixed(1)}%, current=${(currentWeight*100).toFixed(1)}%, deviation=${(deviation*100).toFixed(1)}%, scale=${scaleFactor.toFixed(2)}`);
+      }
+    }
+
+    // Calculate required leverage to cover margin, respecting tier safe range
     const calculatedLev = Math.max(config.minLeverage || 10, Math.ceil(notional / safeEquity));
     const leverage = Math.min(config.maxLeverage || 20, Math.max(config.minLeverage || 10, calculatedLev));
 

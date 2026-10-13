@@ -50,6 +50,8 @@ export class DatabaseService {
         prices: Record<string, PriceRecord[]>;
         botState: Record<string, any>;
     };
+    // Write queue to prevent concurrent writes corrupting the JSON file
+    private writeQueue: Promise<void> = Promise.resolve();
 
     constructor(dbPath: string = 'data/baselbot_db.json') {
         this.filePath = path.join(process.cwd(), dbPath);
@@ -87,9 +89,7 @@ export class DatabaseService {
         }
     }
 
-    // ... (rest of save method remains similar)
-
-    private save() {
+    private _save() {
         try {
             const dir = path.dirname(this.filePath);
             if (!fs.existsSync(dir)) {
@@ -99,6 +99,11 @@ export class DatabaseService {
         } catch (err) {
             console.error('Error saving persistent database:', err);
         }
+    }
+
+    private save() {
+        // Chain writes to prevent concurrent corruption
+        this.writeQueue = this.writeQueue.then(() => this._save());
     }
 
     // --- Prices ---
@@ -232,8 +237,8 @@ export class DatabaseService {
         };
     }
 
-    public close() {
-        this.save();
+    public async close() {
+        await this.writeQueue;
         console.log('🔒 Database connection closed gracefully');
     }
 }
