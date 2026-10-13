@@ -71,13 +71,6 @@ jobs:
         run: |
           wrangler deploy --config api/wrangler.toml --env production
 
-      - name: Deploy to Supabase
-        env:
-          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
-          SUPABASE_PROJECT_REF: ${{ secrets.SUPABASE_PROJECT_REF }}
-        run: |
-          npx supabase db push --project-ref ${{ secrets.SUPABASE_PROJECT_REF }}
-
       - name: Configure Telegram Webhook
         if: env.TELEGRAM_BOT_TOKEN != ''
         env:
