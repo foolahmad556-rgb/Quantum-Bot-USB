@@ -4,13 +4,16 @@
  */
 
 import { AssetSymbol, OrderBook, OrderBookLevel, Tick } from '../domain/types';
+import { mulberry32 } from '../utils/seededRng';
 
 export class OrderBookBuilder {
   private books: Map<AssetSymbol, OrderBook> = new Map();
   private depthLevels: number;
+  private rng: () => number;
 
-  constructor(depthLevels: number = 10) {
+  constructor(depthLevels: number = 10, seed: number = 0x5eed) {
     this.depthLevels = depthLevels;
+    this.rng = mulberry32(seed);
   }
 
   public initialize(symbol: AssetSymbol, basePrice: number, baseSpreadBps: number = 2): OrderBook {
@@ -28,8 +31,8 @@ export class OrderBookBuilder {
       const bidPrice = Number((bestBid * (1 - i * 0.0004)).toFixed(symbol.includes('USDT') && basePrice > 100 ? 2 : 4));
       const askPrice = Number((bestAsk * (1 + i * 0.0004)).toFixed(symbol.includes('USDT') && basePrice > 100 ? 2 : 4));
       
-      const bidSize = Number((Math.random() * 2.5 + 0.5 * (i + 1)).toFixed(3));
-      const askSize = Number((Math.random() * 2.5 + 0.5 * (i + 1)).toFixed(3));
+      const bidSize = Number((this.rng() * 2.5 + 0.5 * (i + 1)).toFixed(3));
+      const askSize = Number((this.rng() * 2.5 + 0.5 * (i + 1)).toFixed(3));
 
       cumBidSize += bidSize;
       cumAskSize += askSize;
@@ -65,7 +68,7 @@ export class OrderBookBuilder {
     }
 
     // Adjust top of book based on tick price and size
-    const drift = (Math.random() - 0.5) * 0.0006 * tick.price;
+    const drift = (this.rng() - 0.5) * 0.0006 * tick.price;
     const newMid = Math.max(0.01, tick.price + drift);
     const halfSpread = Math.max(newMid * 0.0002, book.spread / 2);
 
@@ -83,11 +86,11 @@ export class OrderBookBuilder {
       const aPrice = Number((bestAsk * (1 + stepPct)).toFixed(newMid > 100 ? 2 : 4));
 
       // Fluctuate sizes with liquidity memory
-      const prevBSize = book.bids[i]?.size || (Math.random() * 2 + 1);
-      const prevASize = book.asks[i]?.size || (Math.random() * 2 + 1);
+      const prevBSize = book.bids[i]?.size || (this.rng() * 2 + 1);
+      const prevASize = book.asks[i]?.size || (this.rng() * 2 + 1);
 
-      const bSize = Number(Math.max(0.1, prevBSize + (Math.random() - 0.48) * 0.8).toFixed(3));
-      const aSize = Number(Math.max(0.1, prevASize + (Math.random() - 0.48) * 0.8).toFixed(3));
+      const bSize = Number(Math.max(0.1, prevBSize + (this.rng() - 0.48) * 0.8).toFixed(3));
+      const aSize = Number(Math.max(0.1, prevASize + (this.rng() - 0.48) * 0.8).toFixed(3));
 
       cumBidSize += bSize;
       cumAskSize += aSize;

@@ -7,6 +7,7 @@ import { EventEmitter } from 'events';
 import WebSocket from 'ws';
 import { AssetSymbol, Candle, ExecutionMode, Tick, getBinanceWsUrl, normalizeExecutionMode } from '../domain/types';
 import { OrderBookBuilder } from './OrderBookBuilder';
+import { mulberry32, secureUUID } from '../utils/seededRng';
 
 export interface SymbolConfig {
   symbol: AssetSymbol;
@@ -168,6 +169,7 @@ export class ExchangeMarketData extends EventEmitter {
   private intervalId: any = null;
   private isRunning: boolean = false;
   private tradeCounter: number = 0;
+  private rng: () => number = mulberry32(0x7ade);
 
   // Live WebSocket variables
   private marketWs: WebSocket | null = null;
@@ -376,10 +378,10 @@ export class ExchangeMarketData extends EventEmitter {
             const tick: Tick = {
               symbol: sym,
               price: p,
-              size: Number((Math.random() * 0.5 + 0.05).toFixed(3)),
+              size: Number((this.rng() * 0.5 + 0.05).toFixed(3)),
               side: p >= oldPrice ? 'buy' : 'sell',
               timestamp: now,
-              tradeId: `REST-${this.tradeCounter}-${Math.random().toString(36).substring(2, 6).toUpperCase()}`
+              tradeId: `REST-${this.tradeCounter}-${secureUUID().slice(0, 8).toUpperCase()}`
             };
 
             const book = this.orderBookBuilder.getBook(sym);

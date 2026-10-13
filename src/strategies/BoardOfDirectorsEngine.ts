@@ -17,6 +17,8 @@
 
 import * as fs from 'fs';
 import * as path from 'path';
+import { randomUUID } from 'crypto';
+import { createRng } from '../quantum/seededRng';
 import { AssetSymbol, TradingSignal } from '../domain/types';
 import { CalculatedFeatures } from '../features/FeatureEngine';
 import { RegimeAnalysis } from '../risk/RegimeDetector';
@@ -604,8 +606,11 @@ export class SensitivityGuard extends ExpertAgent {
 }
 
 export class BootstrapGuard extends ExpertAgent {
-  constructor() {
+  private readonly seed?: number;
+
+  constructor(seed?: number) {
     super('BootstrapGuard', 'حارس فواصل الثقة (Bootstrap CI 95%)', '1,000 محاكاة عشوائية بدون نماذج لضمان إيجابية الربح المتوقع', 'guard', 0.92);
+    this.seed = seed;
   }
 
   public vote(candles: Array<{ close: number }>): AgentVoteProposal {
@@ -615,11 +620,12 @@ export class BootstrapGuard extends ExpertAgent {
     }
     const iterations = 1000;
     const means: number[] = [];
+    const rnd = createRng(this.seed);
 
     for (let iter = 0; iter < iterations; iter++) {
       let sum = 0;
       for (let j = 0; j < pnls.length; j++) {
-        const randIdx = Math.floor(Math.random() * pnls.length);
+        const randIdx = Math.floor(rnd() * pnls.length);
         sum += pnls[randIdx];
       }
       means.push(sum / pnls.length);
@@ -947,7 +953,7 @@ export class BoardOfDirectorsEngine {
       }
 
       const event: TradeLearningEvent = {
-        id: `learn-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`,
+        id: `learn-${Date.now()}-${randomUUID().slice(0, 5)}`,
         timestamp: new Date().toISOString(),
         pnl,
         symbol: symbol || 'BTC/USDT',
@@ -979,7 +985,7 @@ export class BoardOfDirectorsEngine {
       }
 
       const event: TradeLearningEvent = {
-        id: `sim-learn-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`,
+        id: `sim-learn-${Date.now()}-${randomUUID().slice(0, 5)}`,
         timestamp: new Date().toISOString(),
         pnl,
         symbol: symbol || 'BTC/USDT',
@@ -1497,7 +1503,7 @@ export class BoardOfDirectorsEngine {
       : `Operational flaw eliminated: Z-Score entry threshold raised to ${targetPolicy.zScoreEntryThreshold} with reinforced guard quorum (Error Reduction Score: ${targetPolicy.errorReductionScore}%).`;
 
     const session: BoardDeliberationSession = {
-      id: `delib-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`,
+      id: `delib-${Date.now()}-${randomUUID().slice(0, 5)}`,
       tradeId: context.tradeId,
       symbol,
       pnl,

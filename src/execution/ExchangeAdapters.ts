@@ -5,6 +5,7 @@
  */
 
 import { AssetSymbol, OrderBook, OrderSide, OrderType } from '../domain/types';
+import { mulberry32 } from '../utils/seededRng';
 
 export interface ExchangeAdapter {
   exchangeId: 'BINANCE' | 'BYBIT' | 'COINBASE' | 'SANDBOX_MOCK';
@@ -24,17 +25,18 @@ export class MockExchangeAdapter implements ExchangeAdapter {
   public isTestnet: boolean;
   public isConnected: boolean = true;
   public pingMs: number = 18;
+  private rng: () => number = mulberry32(0xbeef);
 
   constructor(exchangeId: 'BINANCE' | 'BYBIT' | 'COINBASE' | 'SANDBOX_MOCK' = 'SANDBOX_MOCK', isTestnet: boolean = true) {
     this.exchangeId = exchangeId;
     this.name = exchangeId === 'BINANCE' ? 'Binance Pro API v3' : exchangeId === 'BYBIT' ? 'Bybit Unified v5' : exchangeId === 'COINBASE' ? 'Coinbase Advanced' : 'Basel Ultra-Fast Mock Engine';
     this.isTestnet = isTestnet;
-    this.pingMs = Math.floor(Math.random() * 15 + 12);
+    this.pingMs = Math.floor(this.rng() * 15 + 12);
   }
 
   public async connect(apiKey?: string, secretKey?: string): Promise<boolean> {
     this.isConnected = true;
-    this.pingMs = Math.floor(Math.random() * 12 + 8);
+    this.pingMs = Math.floor(this.rng() * 12 + 8);
     return true;
   }
 

@@ -6,6 +6,7 @@
  */
 
 import React, { useState, useMemo } from 'react';
+import { mulberry32 } from '../utils/seededRng';
 import { BotStrategy, StrategyScreenerItem, TradingSignal, AssetSymbol } from '../domain/types';
 import { fetchWithAuth } from '../lib/api.ts';
 import { DEFAULT_BOT_STRATEGIES } from '../strategies/StrategyManager';
@@ -182,10 +183,11 @@ export const StrategyEngineView: React.FC<StrategyEngineViewProps> = ({
       const n = pnls.length;
       const finalReturns: number[] = [];
       const drawdowns: number[] = [];
+      const rng = mulberry32(42);
       for (let i = 0; i < iters; i++) {
         let cum = 0, pk = 0, maxD = 0;
         for (let j = 0; j < n; j++) {
-          const val = pnls[Math.floor(Math.random() * n)];
+          const val = pnls[Math.floor(rng() * n)];
           cum += val;
           if (cum > pk) pk = cum;
           if (pk - cum > maxD) maxD = pk - cum;

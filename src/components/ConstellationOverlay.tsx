@@ -4,6 +4,7 @@
  */
 
 import React, { useEffect, useState } from 'react';
+import { mulberry32 } from '../utils/seededRng';
 
 export interface ConstellationRay {
   id: string;
@@ -19,6 +20,7 @@ export const ConstellationOverlay: React.FC = () => {
   const [rays, setRays] = useState<ConstellationRay[]>([]);
 
   useEffect(() => {
+    const rng = mulberry32(42);
     const handleFireConstellation = (e: CustomEvent<{ pair: string; isWin: boolean }>) => {
       const { pair, isWin } = e.detail;
       const coreEl = document.getElementById('coreCanvas');
@@ -35,7 +37,7 @@ export const ConstellationOverlay: React.FC = () => {
       const y2 = sRect.top + sRect.height / 2;
 
       const newRay: ConstellationRay = {
-        id: `ray-${Date.now()}-${Math.random()}`,
+        id: `ray-${Date.now()}-${rng()}`,
         x1,
         y1,
         x2,

@@ -15,6 +15,7 @@
 import { AssetSymbol, TradingSignal, SignalType } from '../domain/types';
 import { CalculatedFeatures } from '../features/FeatureEngine';
 import { RegimeAnalysis } from '../risk/RegimeDetector';
+import { createRng } from '../quantum/seededRng';
 
 export interface MultiAgentConfig {
   timeframe: string;
@@ -283,7 +284,8 @@ export class MultiAgentQuantEngine {
    */
   public runMonteCarloBootstrapping(
     tradePnls: number[],
-    iterations: number = 10000
+    iterations: number = 10000,
+    seed?: number
   ): MonteCarloSimulationResult {
     if (!tradePnls || tradePnls.length < 5) {
       // Default baseline bootstrap from empirical crypto distribution
@@ -293,6 +295,7 @@ export class MultiAgentQuantEngine {
     const n = tradePnls.length;
     const finalReturns: number[] = [];
     const maxDrawdowns: number[] = [];
+    const rnd = createRng(seed);
 
     for (let i = 0; i < iterations; i++) {
       let cumPnl = 0;
@@ -301,7 +304,7 @@ export class MultiAgentQuantEngine {
 
       for (let j = 0; j < n; j++) {
         // Sample with replacement (Empirical Bootstrapping)
-        const randIdx = Math.floor(Math.random() * n);
+        const randIdx = Math.floor(rnd() * n);
         const pnl = tradePnls[randIdx];
         cumPnl += pnl;
 

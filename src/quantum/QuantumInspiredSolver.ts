@@ -6,6 +6,7 @@
 
 import { AssetSymbol, QuboMatrix, QuboSolution, SolverType } from '../domain/types';
 import { QuboPortfolio } from '../portfolio/QuboPortfolio';
+import { createRng } from './seededRng';
 
 export interface SolverOptions {
   numSweeps?: number;
@@ -14,6 +15,7 @@ export interface SolverOptions {
   gammaInitial?: number; // Transverse magnetic field for quantum tunneling
   numTrotterSlices?: number; // Quantum Trotter replica slices
   tabuTenure?: number;
+  seed?: number; // Optional PRNG seed for deterministic runs
 }
 
 export class QuantumInspiredSolver {
@@ -31,13 +33,14 @@ export class QuantumInspiredSolver {
   ): QuboSolution {
     const startTime = performance.now();
     const dim = qubo.dimension;
+    const rnd = createRng(options.seed);
     const numSweeps = options.numSweeps || 350;
     const trotterSlices = options.numTrotterSlices || 8;
 
     // Initialize Trotter replicas (slices)
     const replicas: number[][] = Array(trotterSlices)
       .fill(0)
-      .map(() => Array(dim).fill(0).map(() => (Math.random() > 0.5 ? 1 : 0)));
+      .map(() => Array(dim).fill(0).map(() => (rnd() > 0.5 ? 1 : 0)));
 
     let bestVector = [...replicas[0]];
     let bestEnergy = QuboPortfolio.evaluateEnergy(qubo, bestVector);
@@ -80,7 +83,7 @@ export class QuantumInspiredSolver {
           const totalDeltaE = (1 - s) * deltaEQuantum + s * deltaEClassical;
 
           // Quantum Metropolis Acceptance criterion
-          if (totalDeltaE < 0 || Math.random() < Math.exp(-beta * totalDeltaE)) {
+          if (totalDeltaE < 0 || rnd() < Math.exp(-beta * totalDeltaE)) {
             replicas[r][i] = flippedBit;
 
             // Track global minimum
@@ -119,12 +122,13 @@ export class QuantumInspiredSolver {
   ): QuboSolution {
     const startTime = performance.now();
     const dim = qubo.dimension;
+    const rnd = createRng(options.seed);
     const numSweeps = options.numSweeps || 500;
     const tInit = options.initialTemperature || 10.0;
     const tFinal = options.finalTemperature || 0.01;
     const coolingRate = Math.pow(tFinal / tInit, 1 / numSweeps);
 
-    let state: number[] = Array(dim).fill(0).map(() => (Math.random() > 0.5 ? 1 : 0));
+    let state: number[] = Array(dim).fill(0).map(() => (rnd() > 0.5 ? 1 : 0));
     let currentEnergy = QuboPortfolio.evaluateEnergy(qubo, state);
 
     let bestState = [...state];
@@ -133,14 +137,14 @@ export class QuantumInspiredSolver {
 
     for (let step = 0; step < numSweeps; step++) {
       for (let i = 0; i < dim; i++) {
-        const flipIdx = Math.floor(Math.random() * dim);
+        const flipIdx = Math.floor(rnd() * dim);
         const originalBit = state[flipIdx];
         state[flipIdx] = 1 - originalBit;
 
         const newEnergy = QuboPortfolio.evaluateEnergy(qubo, state);
         const deltaE = newEnergy - currentEnergy;
 
-        if (deltaE < 0 || Math.random() < Math.exp(-deltaE / Math.max(0.001, temp))) {
+        if (deltaE < 0 || rnd() < Math.exp(-deltaE / Math.max(0.001, temp))) {
           currentEnergy = newEnergy;
           if (currentEnergy < bestEnergy) {
             bestEnergy = currentEnergy;
@@ -179,10 +183,11 @@ export class QuantumInspiredSolver {
   ): QuboSolution {
     const startTime = performance.now();
     const dim = qubo.dimension;
+    const rnd = createRng(options.seed);
     const maxIterations = options.numSweeps || 250;
     const tabuTenure = options.tabuTenure || 7;
 
-    let currentState: number[] = Array(dim).fill(0).map(() => (Math.random() > 0.6 ? 1 : 0));
+    let currentState: number[] = Array(dim).fill(0).map(() => (rnd() > 0.6 ? 1 : 0));
     let currentEnergy = QuboPortfolio.evaluateEnergy(qubo, currentState);
 
     let bestState = [...currentState];

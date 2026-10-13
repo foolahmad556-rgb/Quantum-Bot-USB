@@ -11,6 +11,7 @@
  */
 
 import React, { useEffect, useRef } from 'react';
+import { mulberry32 } from '../utils/seededRng';
 
 interface HolographicQuantumCanvasProps {
   currentPrice?: number;
@@ -38,6 +39,7 @@ export const HolographicQuantumCanvas: React.FC<HolographicQuantumCanvasProps> =
   statusRef.current = status;
 
   useEffect(() => {
+    const rng = mulberry32(42);
     const canvas = canvasRef.current;
     if (!canvas) return;
     const ctx = canvas.getContext('2d', { alpha: false });
@@ -61,14 +63,14 @@ export const HolographicQuantumCanvas: React.FC<HolographicQuantumCanvasProps> =
     // Adaptive holographic particles
     const particleCount = isMobile ? 22 : 55;
     const particles = Array.from({ length: particleCount }, () => ({
-      x: (Math.random() - 0.5) * width * 1.2,
-      y: (Math.random() - 0.5) * height * 1.2,
-      z: Math.random() * 400 + 50,
-      vx: (Math.random() - 0.5) * 0.7,
-      vy: (Math.random() - 0.5) * 0.7,
-      vz: (Math.random() - 0.5) * 1.2,
-      size: Math.random() * 2.2 + 1.0,
-      color: Math.random() > 0.45 ? '#00f3ff' : '#ff007f',
+      x: (rng() - 0.5) * width * 1.2,
+      y: (rng() - 0.5) * height * 1.2,
+      z: rng() * 400 + 50,
+      vx: (rng() - 0.5) * 0.7,
+      vy: (rng() - 0.5) * 0.7,
+      vz: (rng() - 0.5) * 1.2,
+      size: rng() * 2.2 + 1.0,
+      color: rng() > 0.45 ? '#00f3ff' : '#ff007f',
     }));
 
     let angle = 0;

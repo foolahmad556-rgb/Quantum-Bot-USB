@@ -4,6 +4,7 @@
  */
 
 import React, { useEffect, useRef } from 'react';
+import { mulberry32 } from '../utils/seededRng';
 
 interface NeuralCoreCanvasProps {
   decisionOps?: number;
@@ -30,6 +31,7 @@ export const NeuralCoreCanvas: React.FC<NeuralCoreCanvasProps> = React.memo(({
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
 
   useEffect(() => {
+    const rng = mulberry32(42);
     const canvas = canvasRef.current;
     if (!canvas) return;
     const ctx = canvas.getContext('2d', { alpha: true });
@@ -67,7 +69,7 @@ export const NeuralCoreCanvas: React.FC<NeuralCoreCanvasProps> = React.memo(({
         x: Math.sin(phi) * Math.cos(theta),
         y: Math.sin(phi) * Math.sin(theta),
         z: Math.cos(phi),
-        size: 1 + Math.random() * 1.8,
+        size: 1 + rng() * 1.8,
       });
     }
 
@@ -103,9 +105,9 @@ export const NeuralCoreCanvas: React.FC<NeuralCoreCanvasProps> = React.memo(({
       if (reduceMotion) return;
       if (pulses.length < 32 && edges.length > 0) {
         pulses.push({
-          edge: Math.floor(Math.random() * edges.length),
+          edge: Math.floor(rng() * edges.length),
           t: 0,
-          speed: 0.008 + Math.random() * 0.018,
+          speed: 0.008 + rng() * 0.018,
         });
       }
     }, 180);

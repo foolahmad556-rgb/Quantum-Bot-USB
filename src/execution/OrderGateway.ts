@@ -730,7 +730,11 @@ export class OrderGateway {
       targetStatus = 'NEW';
     }
 
-    if (this.fsm.canTransition(order.status, targetStatus)) {
+    const terminal: OrderStatus[] = ['FILLED', 'CANCELLED', 'REJECTED', 'EXPIRED'];
+    if (terminal.includes(order.status) && targetStatus !== order.status) {
+      // Out-of-order stream event: never regress a terminal order (e.g. FILLED -> PARTIALLY_FILLED).
+      console.warn(`⚠️ Ignoring status ${targetStatus} for terminal order ${order.id} (current ${order.status})`);
+    } else if (this.fsm.canTransition(order.status, targetStatus)) {
       this.fsm.transition(order, targetStatus);
     } else {
       order.status = targetStatus;
@@ -950,7 +954,7 @@ export class OrderGateway {
     const commission = Number(((notional * feeBps) / 10000).toFixed(4));
 
     const fill: Fill = {
-      fillId: `FILL-${Date.now().toString(36)}-${Math.random().toString(36).substring(2, 6).toUpperCase()}`,
+      fillId: `FILL-${Date.now().toString(36)}-${crypto.randomUUID().slice(0, 8).toUpperCase()}`,
       orderId: order.id,
       symbol: order.symbol,
       side: order.side,

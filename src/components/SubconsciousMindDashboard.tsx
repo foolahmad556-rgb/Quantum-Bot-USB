@@ -5,6 +5,7 @@
  */
 
 import React, { useEffect, useRef, useState, useMemo, useCallback } from 'react';
+import { mulberry32 } from '../utils/seededRng';
 import {
   AccountBalance,
   AssetSymbol,
@@ -391,8 +392,11 @@ export const SubconsciousMindDashboard: React.FC<SubconsciousMindDashboardProps>
     isPaused: false,
   });
 
+  // Seeded PRNG (stable across renders)
+  const rng = useRef(mulberry32(42)).current;
+
   // Physics helpers
-  const rand = (a: number, b: number) => a + Math.random() * (b - a);
+  const rand = (a: number, b: number) => a + rng() * (b - a);
   const clamp = (v: number, a: number, b: number) => Math.max(a, Math.min(b, v));
 
   const shapeTarget = (shape: number, idx: number, total: number, tVal: number) => {
@@ -407,7 +411,7 @@ export const SubconsciousMindDashboard: React.FC<SubconsciousMindDashboardProps>
         const cx = (i + 0.5) / n;
         const bodyH = 0.1 + ((Math.sin(i * 1.7) + 1) * 0.25);
         const wickH = bodyH + 0.15;
-        if (idx % 2 === 0) return { x: cx + (Math.random() - 0.5) * 0.04, y: 0.5 + (inBody - 0.5) * bodyH };
+        if (idx % 2 === 0) return { x: cx + (rng() - 0.5) * 0.04, y: 0.5 + (inBody - 0.5) * bodyH };
         return { x: cx, y: 0.5 + (inBody - 0.5) * wickH };
       }
       case 2: { // whale
@@ -462,7 +466,7 @@ export const SubconsciousMindDashboard: React.FC<SubconsciousMindDashboardProps>
     }
 
     s.lastSignal = s.t;
-    const r = Math.random();
+    const r = rng();
     const side: 'BUY' | 'SELL' | 'WAIT' | 'HOLD' = r < 0.48 ? 'BUY' : r < 0.78 ? 'SELL' : r < 0.90 ? 'WAIT' : 'HOLD';
 
     const color = side === 'BUY' ? '200,255,61'
@@ -504,9 +508,9 @@ export const SubconsciousMindDashboard: React.FC<SubconsciousMindDashboardProps>
     };
 
     setMonologueText(isAr ? phrases[side].ar : phrases[side].en);
-    setZoneSurface((Math.random() * 0.8 + 0.2).toFixed(1) + 'ms');
-    setZoneDepth((2000 + Math.floor(Math.random() * 800)).toLocaleString() + ' · w');
-    setZoneDream((Math.random() * 0.4 + 0.1).toFixed(2) + ' · σ');
+    setZoneSurface((rng() * 0.8 + 0.2).toFixed(1) + 'ms');
+    setZoneDepth((2000 + Math.floor(rng() * 800)).toLocaleString() + ' · w');
+    setZoneDream((rng() * 0.4 + 0.1).toFixed(2) + ' · σ');
 
     haptic(18);
     playTone(side === 'BUY' ? 880 : side === 'SELL' ? 440 : 660, 0.15, 'sine');
@@ -584,15 +588,15 @@ export const SubconsciousMindDashboard: React.FC<SubconsciousMindDashboardProps>
     const particleList: Particle[] = [];
     for (let i = 0; i < targetCount; i++) {
       particleList.push({
-        x: Math.random() * W,
-        y: Math.random() * H,
-        z: Math.random(),
+        x: rng() * W,
+        y: rng() * H,
+        z: rng(),
         vx: rand(-0.2, 0.2),
         vy: rand(-0.2, 0.2),
         baseSize: rand(0.6, 1.9),
         baseBright: rand(0.35, 0.85),
         bright: rand(0.35, 0.85),
-        phase: Math.random() * Math.PI * 2,
+        phase: rng() * Math.PI * 2,
         hue: rand(180, 260),
         isMemory: false,
         dreamTargetX: null,
@@ -628,8 +632,8 @@ export const SubconsciousMindDashboard: React.FC<SubconsciousMindDashboardProps>
           p.baseBright = Math.min(1, p.baseBright * 1.3);
           p.bright = p.baseBright;
         } else {
-          p.x = Math.random() * W;
-          p.y = Math.random() * H;
+          p.x = rng() * W;
+          p.y = rng() * H;
           p.vx = rand(-0.3, 0.3);
           p.vy = rand(-0.3, 0.3);
           p.isMemory = false;
@@ -675,7 +679,7 @@ export const SubconsciousMindDashboard: React.FC<SubconsciousMindDashboardProps>
             const sinceSignal = s.t - s.lastSignal;
             if (s.mode === 'awake' && sinceSignal > settings.dreamThreshold) {
               s.mode = 'dreaming';
-              s.dreamShape = Math.floor(Math.random() * 5);
+              s.dreamShape = Math.floor(rng() * 5);
               s.dreamShapeStart = s.t;
               setMindMode('dreaming');
             }
@@ -883,7 +887,7 @@ export const SubconsciousMindDashboard: React.FC<SubconsciousMindDashboardProps>
         onToggleBot();
       } else if (e.key === 'd' || e.key === 'D') {
         stateRef.current.mode = 'dreaming';
-        stateRef.current.dreamShape = Math.floor(Math.random() * 5);
+        stateRef.current.dreamShape = Math.floor(rng() * 5);
         stateRef.current.dreamShapeStart = stateRef.current.t;
         setMindMode('dreaming');
         haptic(30);
@@ -1288,7 +1292,7 @@ export const SubconsciousMindDashboard: React.FC<SubconsciousMindDashboardProps>
           onClick={() => {
             if (isManuallyPaused) return;
             stateRef.current.mode = 'dreaming';
-            stateRef.current.dreamShape = Math.floor(Math.random() * 5);
+            stateRef.current.dreamShape = Math.floor(rng() * 5);
             stateRef.current.dreamShapeStart = stateRef.current.t;
             setMindMode('dreaming');
             haptic(30);

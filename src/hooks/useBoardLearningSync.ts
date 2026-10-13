@@ -16,6 +16,7 @@
  */
 
 import { useState, useEffect, useCallback, useRef } from 'react';
+import { secureUUID } from '../utils/seededRng';
 
 export interface AgentProfileReport {
   id: string;
@@ -244,7 +245,7 @@ export function useBoardLearningSync(initialBoardData?: BoardStatusReport | null
     setLastTradeResult({ pnl, symbol, isWin, timestamp: now });
 
     const newEvent: TradeLearningEvent = {
-      id: `learn-${now}-${Math.random().toString(36).substring(2, 6)}`,
+      id: `learn-${now}-${secureUUID().slice(0, 8)}`,
       timestamp: new Date().toISOString(),
       pnl,
       symbol,

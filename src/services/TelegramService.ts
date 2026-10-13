@@ -2,6 +2,7 @@
 
 import fs from 'fs';
 import path from 'path';
+import { secureUUID } from '../utils/seededRng';
 
 export interface TelegramConfig {
     chatId: string;
@@ -194,7 +195,7 @@ export class TelegramService {
         }
 
         this.queue.push({
-            id: `tg-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
+            id: `tg-${Date.now()}-${secureUUID().slice(0, 8)}`,
             text: trimmed,
             retries: 0,
             resolve,

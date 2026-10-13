@@ -5,6 +5,7 @@
  */
 
 import React, { useState, useMemo, useEffect } from 'react';
+import { mulberry32 } from '../utils/seededRng';
 import { motion, AnimatePresence } from 'motion/react';
 import {
   Area,
@@ -162,6 +163,7 @@ export const LiveTradingDashboard: React.FC<DashboardProps> = React.memo(({
   const chartData = useMemo(() => {
     if (!Array.isArray(candles) || candles.length === 0) {
       const now = Date.now();
+      const rng = mulberry32(42);
       return Array.from({ length: 35 }).map((_, i) => {
         const p = currentPrice + (Math.sin(i * 0.35) * (currentPrice * 0.003)) + ((i - 15) * 5);
         return {
@@ -170,7 +172,7 @@ export const LiveTradingDashboard: React.FC<DashboardProps> = React.memo(({
           vwap: Number((p * 0.999).toFixed(2)),
           upper: Number((p + ouSigma * 2).toFixed(2)),
           lower: Number((p - ouSigma * 2).toFixed(2)),
-          volume: Math.floor(Math.random() * 40) + 10,
+          volume: Math.floor(rng() * 40) + 10,
         };
       });
     }

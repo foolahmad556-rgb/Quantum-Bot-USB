@@ -17,6 +17,8 @@
 
 import fs from 'fs';
 import path from 'path';
+import { randomUUID } from 'crypto';
+import { createRng } from '../quantum/seededRng';
 import { BoardOfDirectorsEngine, BoardMeetingDecision, BoardDeliberationSession, ActiveStrategyPolicy } from './BoardOfDirectorsEngine';
 
 export interface QuantumTrainingTrade {
@@ -92,6 +94,7 @@ export class QuantumTrainingSimulator {
   private stateFilePath: string;
   private autoTrainTimer: NodeJS.Timeout | null = null;
   private isProcessing = false;
+  private rng: () => number = createRng();
   private candleCache = new Map<string, { data: Array<{ open: number; high: number; low: number; close: number; volume: number; time: number }>; timestamp: number }>();
   private totalCacheHits = 0;
   private totalCacheMisses = 0;
@@ -216,7 +219,7 @@ export class QuantumTrainingSimulator {
    * Executes a single high-fidelity Quantum simulated trade with the 14 agents
    */
   public async executeSingleSimulatedTrade(targetSymbol?: string): Promise<QuantumTrainingTrade | null> {
-    const symbol = targetSymbol || TRAINING_SYMBOLS[Math.floor(Math.random() * TRAINING_SYMBOLS.length)];
+    const symbol = targetSymbol || TRAINING_SYMBOLS[Math.floor(this.rng() * TRAINING_SYMBOLS.length)];
     const candles = await this.fetchRealBinanceCandles(symbol, 45);
 
     if (candles.length < 20) return null;
@@ -238,7 +241,7 @@ export class QuantumTrainingSimulator {
           id: `sig-${Date.now()}`,
           symbol,
           type: currentPrice > evalCandles[0].close ? 'BUY' : 'SELL',
-          strength: 0.75 + (Math.random() * 0.15),
+          strength: 0.75 + (this.rng() * 0.15),
           zScore: (currentPrice - evalCandles[0].close) / (evalCandles[0].close * 0.01),
           halfLife: 15,
           targetPrice: currentPrice * 1.02,
@@ -250,10 +253,10 @@ export class QuantumTrainingSimulator {
         }
       ],
       capital: this.wallet.currentEquity,
-      latencyMs: Math.floor(Math.random() * 35) + 10
+      latencyMs: Math.floor(this.rng() * 35) + 10
     });
 
-    const isBuy = decision.action === 'BUY' || (decision.action !== 'SELL' && Math.random() > 0.45);
+    const isBuy = decision.action === 'BUY' || (decision.action !== 'SELL' && this.rng() > 0.45);
     const side: 'BUY' | 'SELL' = isBuy ? 'BUY' : 'SELL';
 
     // 2. Position Sizing on $200 Training Wallet (Proportional 10%-15% Margin)
@@ -304,7 +307,7 @@ export class QuantumTrainingSimulator {
 
     // 5. Deep Post-Mortem Reasoning Generation & 14-Agent Deliberation
     const reasons = this.generateDeepTradeReasons(symbol, side, isWin, pnl, decision, evalCandles, futureCandles);
-    const tradeId = `q-train-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`;
+    const tradeId = `q-train-${Date.now()}-${randomUUID().slice(0, 4)}`;
 
     // 6. Feed into Autonomous Board Post-Mortem Deliberation Loop (Isolated from live weights)
     const deliberation = board.conductPostMortemDeliberation({
