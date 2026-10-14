@@ -9,3 +9,7 @@ coverage/
 
 # Firebase credentials (contains apiKey)
 # Set actual values in an environment variable like FIREBASE_CREDENTIALS_JSON or via Secrets management (Cloudflare Workers Secret). This file contains placeholders only.
+# runtime state (never commit)
+data/
+quantum_training_state.json
+*.bak
