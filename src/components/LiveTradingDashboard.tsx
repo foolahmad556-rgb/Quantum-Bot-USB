@@ -117,7 +117,7 @@ export const LiveTradingDashboard: React.FC<DashboardProps> = React.memo(({
 
   const availableCash = balance?.availableCash || 0;
   const latestCandlePrice = candles && candles.length > 0 ? candles[candles.length - 1]?.close : 0;
-  const currentPrice = (orderBook?.midPrice && orderBook.midPrice > 0) ? orderBook.midPrice : (latestCandlePrice || 68500);
+  const currentPrice = (orderBook?.midPrice && orderBook.midPrice > 0) ? orderBook.midPrice : latestCandlePrice || 0;
   const spread = orderBook?.spread || (currentPrice * 0.00015);
   const spreadPct = (spread / currentPrice) * 100;
 
@@ -153,8 +153,8 @@ export const LiveTradingDashboard: React.FC<DashboardProps> = React.memo(({
     return {
       high: currentPrice * 1.025,
       low: currentPrice * 0.982,
-      change: +1.84,
-      vol: 12450.8,
+      change: 0,
+      vol: 0,
     };
   }, [candles, currentPrice]);
 
@@ -170,7 +170,7 @@ export const LiveTradingDashboard: React.FC<DashboardProps> = React.memo(({
           vwap: Number((p * 0.999).toFixed(2)),
           upper: Number((p + ouSigma * 2).toFixed(2)),
           lower: Number((p - ouSigma * 2).toFixed(2)),
-          volume: Math.floor(Math.random() * 40) + 10,
+          volume: Math.floor(candles?.[0]?.volume || 15),
         };
       });
     }
@@ -188,15 +188,18 @@ export const LiveTradingDashboard: React.FC<DashboardProps> = React.memo(({
   // Simulated live tape stream for recent fills
   const recentTradesTape = useMemo(() => {
     const now = Date.now();
-    return [
-      { id: 't1', time: new Date(now - 800).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }), price: currentPrice + 0.5, size: 0.142, side: 'BUY' },
-      { id: 't2', time: new Date(now - 2100).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }), price: currentPrice - 0.2, size: 0.850, side: 'SELL' },
-      { id: 't3', time: new Date(now - 3900).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }), price: currentPrice + 0.1, size: 0.045, side: 'BUY' },
-      { id: 't4', time: new Date(now - 5200).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }), price: currentPrice - 0.4, size: 1.200, side: 'SELL' },
-      { id: 't5', time: new Date(now - 7800).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }), price: currentPrice + 0.8, size: 0.560, side: 'BUY' },
-      { id: 't6', time: new Date(now - 9400).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }), price: currentPrice + 0.3, size: 0.310, side: 'BUY' },
-    ];
-  }, [currentPrice]);
+    if (!Array.isArray(candles) || candles.length === 0) {
+      return [
+        { id: 't1', time: new Date(now - 800).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }), price: currentPrice + 0.5, size: 0.142, side: 'BUY' },
+        { id: 't2', time: new Date(now - 2100).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }), price: currentPrice - 0.2, size: 0.850, side: 'SELL' },
+        { id: 't3', time: new Date(now - 3900).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }), price: currentPrice + 0.1, size: 0.045, side: 'BUY' },
+        { id: 't4', time: new Date(now - 5200).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }), price: currentPrice - 0.4, size: 1.200, side: 'SELL' },
+        { id: 't5', time: new Date(now - 7800).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }), price: currentPrice + 0.8, size: 0.560, side: 'BUY' },
+        { id: 't6', time: new Date(now - 9400).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }), price: currentPrice + 0.3, size: 0.310, side: 'BUY' },
+      ];
+    }
+    return [];
+  }, [candles, currentPrice]);
 
   // Estimated order cost & liquidation
   const estimatedOrderCost = (orderQty * currentPrice) / leverage;

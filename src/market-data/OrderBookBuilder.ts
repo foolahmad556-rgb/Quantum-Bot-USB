@@ -65,7 +65,7 @@ export class OrderBookBuilder {
     }
 
     // Adjust top of book based on tick price and size
-    const drift = (Math.random() - 0.5) * 0.0006 * tick.price;
+        const drift = (-0.5) * 0.0006 * tick.price;
     const newMid = Math.max(0.01, tick.price + drift);
     const halfSpread = Math.max(newMid * 0.0002, book.spread / 2);
 
@@ -82,12 +82,12 @@ export class OrderBookBuilder {
       const bPrice = Number((bestBid * (1 - stepPct)).toFixed(newMid > 100 ? 2 : 4));
       const aPrice = Number((bestAsk * (1 + stepPct)).toFixed(newMid > 100 ? 2 : 4));
 
-      // Fluctuate sizes with liquidity memory
-      const prevBSize = book.bids[i]?.size || (Math.random() * 2 + 1);
-      const prevASize = book.asks[i]?.size || (Math.random() * 2 + 1);
+      // Fluctuate sizes with liquidity memory - deterministic based on existing sizes and depth
+            const prevBSize = book.bids[i]?.size || (2 + i * 0.3);
+            const prevASize = book.asks[i]?.size || (2 + i * 0.3);
 
-      const bSize = Number(Math.max(0.1, prevBSize + (Math.random() - 0.48) * 0.8).toFixed(3));
-      const aSize = Number(Math.max(0.1, prevASize + (Math.random() - 0.48) * 0.8).toFixed(3));
+            const bSize = Number(Math.max(0.1, prevBSize + 0.1).toFixed(3));
+            const aSize = Number(Math.max(0.1, prevASize + 0.1).toFixed(3));
 
       cumBidSize += bSize;
       cumAskSize += aSize;

@@ -35,9 +35,11 @@ export class QuantumInspiredSolver {
     const trotterSlices = options.numTrotterSlices || 8;
 
     // Initialize Trotter replicas (slices)
+    const seededRandom = (seed: number) => { let s = seed; return () => { s = Math.sin(s * 9999.999) * 10000; return s - Math.floor(s); }; };
+    const rnd = seededRandom(42);
     const replicas: number[][] = Array(trotterSlices)
       .fill(0)
-      .map(() => Array(dim).fill(0).map(() => (Math.random() > 0.5 ? 1 : 0)));
+      .map(() => Array(dim).fill(0).map(() => (rnd() > 0.5 ? 1 : 0)));
 
     let bestVector = [...replicas[0]];
     let bestEnergy = QuboPortfolio.evaluateEnergy(qubo, bestVector);
@@ -80,7 +82,7 @@ export class QuantumInspiredSolver {
           const totalDeltaE = (1 - s) * deltaEQuantum + s * deltaEClassical;
 
           // Quantum Metropolis Acceptance criterion
-          if (totalDeltaE < 0 || Math.random() < Math.exp(-beta * totalDeltaE)) {
+          if (totalDeltaE < 0 || rnd() < Math.exp(-beta * totalDeltaE)) {
             replicas[r][i] = flippedBit;
 
             // Track global minimum
@@ -124,7 +126,9 @@ export class QuantumInspiredSolver {
     const tFinal = options.finalTemperature || 0.01;
     const coolingRate = Math.pow(tFinal / tInit, 1 / numSweeps);
 
-    let state: number[] = Array(dim).fill(0).map(() => (Math.random() > 0.5 ? 1 : 0));
+    const seededRandom = (seed: number) => { let s = seed; return () => { s = Math.sin(s * 9999.999) * 10000; return s - Math.floor(s); }; };
+    const rnd = seededRandom(42);
+    let state: number[] = Array(dim).fill(0).map(() => (rnd() > 0.5 ? 1 : 0));
     let currentEnergy = QuboPortfolio.evaluateEnergy(qubo, state);
 
     let bestState = [...state];

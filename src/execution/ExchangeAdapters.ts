@@ -26,17 +26,23 @@ export class MockExchangeAdapter implements ExchangeAdapter {
   public pingMs: number = 18;
 
   constructor(exchangeId: 'BINANCE' | 'BYBIT' | 'COINBASE' | 'SANDBOX_MOCK' = 'SANDBOX_MOCK', isTestnet: boolean = true) {
-    this.exchangeId = exchangeId;
-    this.name = exchangeId === 'BINANCE' ? 'Binance Pro API v3' : exchangeId === 'BYBIT' ? 'Bybit Unified v5' : exchangeId === 'COINBASE' ? 'Coinbase Advanced' : 'Basel Ultra-Fast Mock Engine';
-    this.isTestnet = isTestnet;
-    this.pingMs = Math.floor(Math.random() * 15 + 12);
-  }
+      this.exchangeId = exchangeId;
+      this.name = exchangeId === 'BINANCE' ? 'Binance Pro API v3' : exchangeId === 'BYBIT' ? 'Bybit Unified v5' : exchangeId === 'COINBASE' ? 'Coinbase Advanced' : 'Basel Ultra-Fast Mock Engine';
+      this.isTestnet = isTestnet;
+      // Deterministic hash-based ping calculation replacing Math.random()
+      // Uses exchange ID and testnet flag as seed for reproducible timing
+      const hash = (exchangeId.charCodeAt(0) * 31 + (isTestnet ? 1 : 0)) % 1000;
+      this.pingMs = Math.floor((hash % 15) + 12);
+    }
 
   public async connect(apiKey?: string, secretKey?: string): Promise<boolean> {
-    this.isConnected = true;
-    this.pingMs = Math.floor(Math.random() * 12 + 8);
-    return true;
-  }
+      this.isConnected = true;
+      // Deterministic hash-based ping calculation replacing Math.random()
+      // Uses exchange ID and testnet flag as seed for reproducible timing
+      const hash = (this.exchangeId.charCodeAt(0) * 31 + (this.isTestnet ? 1 : 0)) % 1000;
+      this.pingMs = Math.floor((hash % 12) + 8);
+      return true;
+    }
 
   public disconnect(): void {
     this.isConnected = false;

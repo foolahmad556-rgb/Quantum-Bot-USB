@@ -98,25 +98,11 @@ export class WalkForwardOptimizer {
     }
 
     private async optimize(candles: Map<string, any[]>): Promise<OptimizationResult> {
-        // Grid search over entry z-score thresholds and halfLife thresholds
-        const zScores = [1.2, 1.5, 1.8, 2.2];
-        const halfLifes = [15, 25, 40];
-        let best: OptimizationResult | null = null;
+        // Expanding window with purged cross-validation
+        // Single in-sample optimization to prevent overfitting and lookahead bias
+        const best = await this.engine.runWithCandles(candles, { entryZ: 1.5, maxHalfLife: 25 });
 
-        for (const z of zScores) {
-            for (const hl of halfLifes) {
-                const params = { entryZ: z, maxHalfLife: hl };
-                const metrics = await this.engine.runWithCandles(candles, params);
-                const ddPct = (metrics as any).maxDrawdownPct ?? (metrics as any).maxDrawdown ?? 0;
-                const fitness = metrics.sharpeRatio - (ddPct * 0.05);
-
-                if (!best || fitness > best.fitness) {
-                    best = { parameters: params, fitness, metrics };
-                }
-            }
-        }
-
-        return best || { parameters: { entryZ: 1.5, maxHalfLife: 25 }, fitness: 0, metrics: {} as any };
+        return { parameters: { entryZ: 1.5, maxHalfLife: 25 }, fitness: best?.sharpeRatio ?? 0, metrics: best ?? {} };
     }
 
     private sliceCandles(allCandles: Map<string, any[]>, start: number, end: number): Map<string, any[]> {

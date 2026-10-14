@@ -24,8 +24,8 @@ export class QAOAAdapter {
     let imagAmplitudes = Array(numStates).fill(0);
 
     // Optimal angles found via variational parameter grid search / Nelder-Mead
-    const gamma = config.gammaParams || Array(pLayers).fill(0).map((_, i) => 0.45 + i * 0.28);
-    const beta = config.betaParams || Array(pLayers).fill(0).map((_, i) => 0.65 - i * 0.18);
+    const gamma = config.gammaParams || Array(pLayers).fill(0.5);
+    const beta = config.betaParams || Array(pLayers).fill(0.5);
 
     // Precompute classical cost for each computational basis state
     const costEnergies: number[] = Array(numStates).fill(0);

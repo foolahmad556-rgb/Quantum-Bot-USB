@@ -1180,13 +1180,17 @@ export class TradingPipeline {
       const headers = { 'X-MBX-APIKEY': apiKey };
 
       const [accountRes, positionsRes] = await Promise.all([
-        fetch(`${baseUrl}/fapi/v2/account?${query}&signature=${signature}`, { headers }),
-        fetch(`${baseUrl}/fapi/v2/positionRisk?${query}&signature=${signature}`, { headers })
+        fetch(`${baseUrl}/fapi/v2/account?${query}&signature=${signature}`, { headers }).catch(() => null),
+        fetch(`${baseUrl}/fapi/v2/positionRisk?${query}&signature=${signature}`, { headers }).catch(() => null)
       ]);
 
+      if (!accountRes || !positionsRes) {
+        console.warn('⚠️ Reconciliation skipped: Exchange API unreachable (no response)');
+        return;
+      }
       if (!accountRes.ok || !positionsRes.ok) {
-        const accErr = !accountRes.ok ? await accountRes.text().catch(() => '') : 'OK';
-        const posErr = !positionsRes.ok ? await positionsRes.text().catch(() => '') : 'OK';
+        const accErr = accountRes.ok ? 'OK' : await accountRes.text().catch(() => '');
+        const posErr = positionsRes.ok ? 'OK' : await positionsRes.text().catch(() => '');
         console.warn(`⚠️ Reconciliation skipped: Exchange API returned error (Account HTTP ${accountRes.status}: ${accErr} | Positions HTTP ${positionsRes.status}: ${posErr})`);
         return;
       }

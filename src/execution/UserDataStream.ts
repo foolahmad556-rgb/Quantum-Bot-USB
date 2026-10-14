@@ -154,62 +154,67 @@ export class UserDataStream {
   }
 
   public processFill(fill: Fill, currentPrice: number) {
-    this.fillsHistory.unshift(fill);
-    if (this.fillsHistory.length > 500) this.fillsHistory.pop();
-    
-    for (const l of this.fillListeners) l(fill);
+      this.fillsHistory.unshift(fill);
+      if (this.fillsHistory.length > 500) this.fillsHistory.pop();
 
-    // TESTNET/LIVE: positions and balances are authoritative from ACCOUNT_UPDATE.
-    // Applying the fill here as well would double count size/cash, so only record + notify.
-    if (this.executionMode !== 'PAPER') {
-      const existing = this.positions.get(fill.symbol);
-      if (existing) existing.currentPrice = currentPrice;
-      return;
+      for (const l of this.fillListeners) l(fill);
+
+      // Apply fill to position state (always — prevents stale state in LIVE/TESTNET).
+      // Balance adjustments below are gated by execution mode to avoid double-counting
+      // when positions/balances come from ACCOUNT_UPDATE.
+      let pos = this.positions.get(fill.symbol);
+      if (!pos) {
+        pos = {
+          symbol: fill.symbol,
+          size: 0,
+          entryPrice: fill.price,
+          currentPrice: fill.price,
+          unrealizedPnl: 0,
+          unrealizedPnlPct: 0,
+          realizedPnl: 0,
+          marginUsed: 0,
+          liquidationPrice: 0,
+          leverage: 1.0,
+          updatedAt: fill.timestamp,
+        };
+        this.positions.set(fill.symbol, pos);
+      }
+
+      const tradeSize = fill.side === 'BUY' ? fill.quantity : -fill.quantity;
+      const oldSize = pos.size;
+      const newSize = Number((oldSize + tradeSize).toFixed(4));
+      pos.size = newSize;
+      pos.currentPrice = currentPrice;
+
+      if ((oldSize > 0 && tradeSize < 0) || (oldSize < 0 && tradeSize > 0)) {
+        // Closing an existing position — realize PnL only in PAPER mode;
+        // in LIVE/TESTNET the PnL is refreshed from ACCOUNT_UPDATE.
+        if (this.executionMode === 'PAPER') {
+          const closingQty = Math.min(Math.abs(oldSize), Math.abs(tradeSize));
+          const pnlPerUnit = oldSize > 0 ? fill.price - pos.entryPrice : pos.entryPrice - fill.price;
+          const realized = closingQty * pnlPerUnit - fill.commission;
+
+          pos.realizedPnl += realized;
+          this.balance.realizedPnl += realized;
+          this.balance.dailyPnl += realized;
+          this.balance.availableCash += realized;
+        }
+      } else if (Math.abs(newSize) > Math.abs(oldSize)) {
+        // Adding to position — update entry price only in PAPER mode;
+        // in LIVE/TESTNET entry price is refreshed from ACCOUNT_UPDATE.
+        if (this.executionMode === 'PAPER') {
+          const totalCost = Math.abs(oldSize) * pos.entryPrice + fill.quantity * fill.price;
+          pos.entryPrice = Number((totalCost / Math.abs(newSize)).toFixed(4));
+        }
+      }
+
+      // Balance updates only in PAPER mode; LIVE/TESTNET relies on ACCOUNT_UPDATE.
+      if (this.executionMode === 'PAPER') {
+        this.balance.availableCash -= fill.commission;
+        this.balance.totalEquity = this.balance.availableCash + this.balance.unrealizedPnl;
+        for (const l of this.balanceListeners) l(this.getBalance());
+      }
     }
-
-    let pos = this.positions.get(fill.symbol);
-    if (!pos) {
-      pos = {
-        symbol: fill.symbol,
-        size: 0,
-        entryPrice: fill.price,
-        currentPrice,
-        unrealizedPnl: 0,
-        unrealizedPnlPct: 0,
-        realizedPnl: 0,
-        marginUsed: 0,
-        liquidationPrice: 0,
-        leverage: 1.0,
-        updatedAt: fill.timestamp,
-      };
-      this.positions.set(fill.symbol, pos);
-    }
-
-    const tradeSize = fill.side === 'BUY' ? fill.quantity : -fill.quantity;
-    const oldSize = pos.size;
-    const newSize = Number((oldSize + tradeSize).toFixed(4));
-    pos.size = newSize;
-    pos.currentPrice = currentPrice;
-
-    if ((oldSize > 0 && tradeSize < 0) || (oldSize < 0 && tradeSize > 0)) {
-      const closingQty = Math.min(Math.abs(oldSize), Math.abs(tradeSize));
-      const pnlPerUnit = oldSize > 0 ? fill.price - pos.entryPrice : pos.entryPrice - fill.price;
-      const realized = closingQty * pnlPerUnit - fill.commission;
-
-      pos.realizedPnl += realized;
-      this.balance.realizedPnl += realized;
-      this.balance.dailyPnl += realized;
-      this.balance.availableCash += realized;
-    } else if (Math.abs(newSize) > Math.abs(oldSize)) {
-      const totalCost = Math.abs(oldSize) * pos.entryPrice + fill.quantity * fill.price;
-      pos.entryPrice = Number((totalCost / Math.abs(newSize)).toFixed(4));
-    }
-
-    this.balance.availableCash -= fill.commission;
-    this.balance.totalEquity = this.balance.availableCash + this.balance.unrealizedPnl;
-    
-    for (const l of this.balanceListeners) l(this.getBalance());
-  }
 
   private async fetchInitialAccountData() {
     if (!this.apiKey || !this.apiSecret) {

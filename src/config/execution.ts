@@ -10,9 +10,9 @@ function readExecutionMode(): ExecutionMode {
 const mode = readExecutionMode();
 
 export const EXECUTION = Object.freeze({
+  apiKey: process.env.EXCHANGE_API_KEY || '',
+  apiSecret: process.env.EXCHANGE_API_SECRET || '',
   mode,
   restUrl: mode === 'LIVE' ? 'https://fapi.binance.com' : 'https://testnet.binancefuture.com',
   wsUrl: mode === 'LIVE' ? 'wss://fstream.binance.com/private/ws' : 'wss://fstream.binancefuture.com/private/ws',
-  apiKey: process.env.EXCHANGE_API_KEY || process.env.BINANCE_API_KEY || '',
-  apiSecret: process.env.EXCHANGE_API_SECRET || process.env.BINANCE_API_SECRET || '',
 });

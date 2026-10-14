@@ -39,13 +39,12 @@ export class OrderStateMachine {
       throw new Error(`Illegal order state transition from ${order.status} to ${newStatus} for order ${order.id}`);
     }
 
+    const orderCopy = { ...order, status: newStatus, updatedAt: Date.now() };
     const fromStatus = order.status;
-    order.status = newStatus;
-    order.updatedAt = Date.now();
-    if (reason) order.errorMessage = reason;
+    if (reason) orderCopy.errorMessage = reason;
 
     const event: StateTransitionEvent = {
-      orderId: order.id,
+      orderId: orderCopy.id,
       fromStatus,
       toStatus: newStatus,
       timestamp: Date.now(),
@@ -55,7 +54,7 @@ export class OrderStateMachine {
     this.history.unshift(event);
     if (this.history.length > 200) this.history.pop();
 
-    return order;
+    return orderCopy;
   }
 
   public getHistory(): StateTransitionEvent[] {

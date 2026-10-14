@@ -25,4 +25,16 @@ export const createPool = () => {
 };
 
 const pool = createPool();
+// Register shutdown hook to close pool gracefully
+const shutdown = async () => {
+  try {
+    await pool.end();
+    console.log('PostgreSQL pool closed gracefully');
+  } catch (e) {
+    console.error('Error closing PostgreSQL pool:', e);
+  }
+};
+process.on('SIGTERM', shutdown);
+process.on('SIGINT', shutdown);
+
 export const db = drizzle(pool, { schema });

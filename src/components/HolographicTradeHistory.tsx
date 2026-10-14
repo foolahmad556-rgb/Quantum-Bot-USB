@@ -77,11 +77,11 @@ export const HolographicTradeHistory: React.FC<HolographicTradeHistoryProps> = (
     setError(null);
     try {
       const [orderRes, statusRes] = await Promise.all([
-        fetch('/api/protected/order-history'),
-        fetch('/api/live-status'),
+        fetch('/api/protected/order-history').catch(() => null),
+        fetch('/api/live-status').catch(() => null)
       ]);
 
-      if (orderRes.ok) {
+      if (orderRes && orderRes.ok) {
         const orderData = await orderRes.json();
         if (orderData.success && Array.isArray(orderData.orders)) {
           setOrders(orderData.orders);
@@ -90,7 +90,7 @@ export const HolographicTradeHistory: React.FC<HolographicTradeHistoryProps> = (
         }
       }
 
-      if (statusRes.ok) {
+      if (statusRes && statusRes.ok) {
         const statusData = await statusRes.json();
         if (Array.isArray(statusData.positions)) {
           setPositions(statusData.positions);

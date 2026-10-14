@@ -86,7 +86,14 @@ export default {
     if (url.pathname === '/webhook' && request.method === 'POST') {
       try {
         const auth = request.headers.get('Authorization');
-        if (!auth || auth !== `Bearer ${env.WEBHOOK_SECRET}`) {
+        const secret = env.WEBHOOK_SECRET;
+        if (!secret) {
+          return new Response(JSON.stringify({ error: 'Webhook secret not configured' }), {
+            status: 500,
+            headers: { 'Content-Type': 'application/json' }
+          });
+        }
+        if (!auth || auth !== `Bearer ${secret}`) {
           return new Response(JSON.stringify({ error: 'Unauthorized' }), {
             status: 401,
             headers: { 'Content-Type': 'application/json' }

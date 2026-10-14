@@ -374,9 +374,10 @@ export class BacktestEngine {
         if (!currentCandle) continue;
 
         // Extract historical slice
-        const candleHistory = candles
-          .filter((c) => c.timestamp <= timestamp)
-          .slice(-60);
+                // Use strict < to exclude current candle and eliminate lookahead bias
+                const candleHistory = candles
+                  .filter((c) => c.timestamp < timestamp)
+                  .slice(-60);
 
         if (candleHistory.length < 20) continue;
 
@@ -400,8 +401,8 @@ export class BacktestEngine {
         });
 
         // If strong signal and capital is available, execute
-        const alreadyOpen = openPositions.some((p) => p.symbol === symbol);
-        if (signal && !alreadyOpen && realizedCapital > 500) {
+                const alreadyOpen = openPositions.some((p) => p.symbol === symbol);
+                if (signal && !alreadyOpen && cash > 500) {
           const riskFraction = 0.015; // 1.5% capital risk per trade
           const stopDistance = Math.abs(currentCandle.close - signal.stopLoss);
           const rawQuantity =
@@ -410,7 +411,7 @@ export class BacktestEngine {
               : (realizedCapital * 0.08) / currentCandle.close;
 
           // Leverage cap (max 2x leverage)
-          const maxNotional = realizedCapital * (this.config.maxLeverage || 2);
+                    const maxNotional = cash * (this.config.maxLeverage || 2);
           const quantity = Number(Math.min(rawQuantity, maxNotional / currentCandle.close).toFixed(4));
 
           if (quantity > 0) {
@@ -421,7 +422,8 @@ export class BacktestEngine {
             const entryFee = notional * takerFeeRate;
 
             totalFeesPaid += entryFee;
-            cash -= entryFee;
+                        cash -= entryFee;
+                        realizedCapital -= entryFee; // entry fees reduce deployable capital
 
             const tradeId = `TR-${timestamp}-${symbol.replace('/', '')}`;
             openPositions.push({
@@ -533,8 +535,9 @@ export class BacktestEngine {
 
     const sharpeRatio = stdDev > 0 ? (meanReturn / stdDev) * annualFactor : 0;
 
-    const downsideReturns = returns.filter((r) => r < 0);
-    const downsideStdDev = downsideReturns.length > 0 ? this.calculateStdDev(downsideReturns) : 0.0001;
+    // Downside deviation: std dev of negative returns only
+        // Correct formula: sqrt(mean of squared negative returns)
+        const downsideStdDev = Math.sqrt(returns.reduce((sum, r) => sum + Math.min(0, r) ** 2, 0) / returns.length) || 0.0001;
     const sortinoRatio = downsideStdDev > 0 ? (meanReturn / downsideStdDev) * annualFactor : 0;
 
     const calmarRatio = maxDrawdownPct > 0 ? Math.max(0, annualizedReturnPct / maxDrawdownPct) : 0;
