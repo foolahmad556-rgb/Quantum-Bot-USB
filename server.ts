@@ -295,9 +295,7 @@ app.get('/api/quantum-training/status', async (_req: Request, res: Response) => 
 app.post('/api/quantum-training/batch', async (req: Request, res: Response) => {
   try {
     const count = Math.min(Math.max(Number(req.body?.count) || 25, 1), 200);
-    const r = await callAny(simulator, ['runBatchTraining'], [count]);
-    if (!r.called) return fail(res, 503, 'simulator batch unavailable');
-    ok(res, r.value && typeof r.value === 'object' ? r.value : { result: r.value });
+    return fail(res, 410, 'Synthetic quantum training disabled; use Binance market data and exchange execution.');
   } catch (e: any) {
     fail(res, 500, e?.message || 'batch training failed');
   }
@@ -315,10 +313,7 @@ app.post('/api/quantum-training/toggle-auto', async (req: Request, res: Response
 
 app.post('/api/quantum-training/reset', async (req: Request, res: Response) => {
   try {
-    const amount = Number(req.body?.amount) || 200;
-    const r = await callAny(simulator, ['resetWallet', 'reset'], [amount]);
-    const payload = await quantumStatusPayload().catch(() => ({}));
-    ok(res, { reset: r.called, ...(payload as object) });
+    return fail(res, 410, 'Synthetic wallet reset disabled; balance must come from Binance.');
   } catch (e: any) {
     fail(res, 500, e?.message || 'quantum reset failed');
   }

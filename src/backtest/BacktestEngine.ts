@@ -89,7 +89,7 @@ export class BacktestEngine {
     try {
       historicalData = await this.loadHistoricalData();
     } catch (err) {
-      historicalData = this.generateDeterministicHighFidelityData();
+      throw new Error(`Real Binance historical data unavailable; synthetic backtest data disabled: ${(err as Error).message}`);
     }
 
     const result = this.simulateAndCalculate(historicalData, this.config.solver, customParams);
@@ -175,11 +175,10 @@ export class BacktestEngine {
     return allData;
   }
 
-  /**
-   * High-fidelity multi-asset deterministic synthetic series generator
-   * Based on correlated Ornstein-Uhlenbeck drift-diffusion process
-   */
+  /** Synthetic data is forbidden. Backtests require Binance historical candles. */
   public generateDeterministicHighFidelityData(): Map<string, Candle[]> {
+    throw new Error('Synthetic market data disabled; use Binance historical candles.');
+    /* istanbul ignore next */
     const allData: Map<string, Candle[]> = new Map();
     const startTime = new Date(this.config.startDate || '2024-01-01').getTime();
     const endTime = new Date(this.config.endDate || '2024-07-01').getTime();

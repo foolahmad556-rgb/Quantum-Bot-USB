@@ -145,11 +145,8 @@ export class TradingPipeline {
     this.orderBookBuilder = new OrderBookBuilder(10);
     this.marketData = new ExchangeMarketData(this.orderBookBuilder);
     this.featureEngine = new FeatureEngine();
-    const configuredPaperCapital = Number(process.env.PAPER_INITIAL_CAPITAL ?? 1000);
-    const paperInitialCapital = executionMode === 'PAPER' && Number.isFinite(configuredPaperCapital) && configuredPaperCapital > 0
-      ? configuredPaperCapital
-      : 0;
-    this.userDataStream = new UserDataStream(paperInitialCapital); // Exchange modes populate equity from Binance.
+    // Never seed balances. Account equity must come from Binance REST/WebSocket only.
+    this.userDataStream = new UserDataStream(0);
     
     this.orderGateway = new OrderGateway(this.userDataStream, this.orderBookBuilder, {
       executionMode,
@@ -211,7 +208,8 @@ export class TradingPipeline {
     );
     this.dynamicRiskManager = new DynamicRiskManager({ zScoreThreshold: -1.6, halfLifeMax: 30 });
     this.regimeDetector = new RegimeDetector();
-    this.subWalletManager = new SubWalletManager(25.0);
+    // Sub-wallet equity must be derived from Binance account data, never seeded.
+    this.subWalletManager = new SubWalletManager(0);
     this.portfolioSizer = new PortfolioSizer(this.assetScreener);
     this.partialProfitManager = new PartialProfitManager(this.orderGateway);
     this.scaleInManager = new ScaleInManager(this.orderGateway);

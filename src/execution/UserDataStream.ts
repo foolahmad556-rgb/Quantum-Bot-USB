@@ -75,8 +75,7 @@ export class UserDataStream {
     this.isRunning = true;
     
     if (this.executionMode === 'PAPER') {
-      console.log('📝 UserDataStream: Running in PAPER simulation mode.');
-      return;
+      throw new Error('PAPER mode disabled: account data must come from Binance API.');
     }
 
     console.log(`🌐 UserDataStream: Starting connection to Binance Futures (${this.executionMode})...`);
@@ -88,7 +87,7 @@ export class UserDataStream {
       this.connectWebSocket();
       this.startListenKeyKeepAlive();
     } catch (error) {
-      console.error('❌ UserDataStream: Failed to start Binance stream, falling back to simulation state.', error);
+      console.error('❌ UserDataStream: Binance stream unavailable; no simulated account state allowed.', error);
       this.scheduleReconnect();
     }
   }
@@ -213,8 +212,7 @@ export class UserDataStream {
 
   private async fetchInitialAccountData() {
     if (!this.apiKey || !this.apiSecret) {
-      console.warn('⚠️ UserDataStream: API credentials missing, using simulated initial capital.');
-      return;
+      throw new Error('Binance API credentials missing; account balance cannot be simulated.');
     }
 
     try {

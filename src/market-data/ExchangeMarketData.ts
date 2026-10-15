@@ -212,10 +212,9 @@ export class ExchangeMarketData extends EventEmitter {
 
   private initializeState() {
     for (const [symbol, config] of Object.entries(DEFAULT_SYMBOLS) as [AssetSymbol, SymbolConfig][]) {
-      this.currentPrices.set(symbol, config.basePrice);
       this.hawkesIntensity.set(symbol, 1.0);
-      this.orderBookBuilder.initialize(symbol, config.basePrice);
-      // Initialize with empty real candle array; populated exclusively via backfillRealCandles and live kline stream
+      // No synthetic price/order book initialization. Binance data must arrive first.
+      // Candle history populated exclusively via Binance REST/WebSocket.
       this.candleHistory.set(symbol, []);
     }
   }
@@ -225,7 +224,9 @@ export class ExchangeMarketData extends EventEmitter {
   }
 
   public getPrice(symbol: AssetSymbol): number {
-    return this.currentPrices.get(symbol) || DEFAULT_SYMBOLS[symbol].basePrice;
+    const price = this.currentPrices.get(symbol);
+    if (!price || !Number.isFinite(price)) throw new Error(`No live Binance price available for ${symbol}`);
+    return price;
   }
 
   public getLastUpdateTime(symbol: AssetSymbol): number {
@@ -371,25 +372,12 @@ export class ExchangeMarketData extends EventEmitter {
             this.lastUpdateTimes.set(sym, now);
 
             // Construct or update candle in candleHistory
-            this.updateCandleHistory(sym, p, Math.max(0.01, Math.abs(p - oldPrice) * 10));
-
-            // Construct real tick
-            this.tradeCounter += 1;
-            const tick: Tick = {
-              symbol: sym,
-              price: p,
-              size: Number((this.rng() * 0.5 + 0.05).toFixed(3)),
-              side: p >= oldPrice ? 'buy' : 'sell',
-              timestamp: now,
-              tradeId: `REST-${this.tradeCounter}-${secureUUID().slice(0, 8).toUpperCase()}`
-            };
+            // Price ticker has no real volume. Candle volume comes only from Binance kline stream.
+            this.updateCandleHistory(sym, p, 0);
 
             const book = this.orderBookBuilder.getBook(sym);
-            if (!book || book.bids.length === 0) {
-              this.orderBookBuilder.initialize(sym, p);
-            }
-
-            this.tickListeners.forEach((fn) => fn(tick));
+            // REST ticker is price-only. Do not fabricate trade size, side, or order-book depth.
+            if (!book || book.bids.length === 0) continue;
             this.emit('market_update', sym);
           }
         }
@@ -676,12 +664,6 @@ export class ExchangeMarketData extends EventEmitter {
         timestamp: data.T,
         tradeId: data.a ? data.a.toString() : `TICK-${Date.now()}`
       };
-
-      // Reconstruct orderbook from tick only if no real book is available yet
-      const existingBook = this.orderBookBuilder.getBook(symbol);
-      if (!existingBook || existingBook.bids.length === 0) {
-        this.orderBookBuilder.processTick(tick);
-      }
 
       // Trigger listeners
       this.tickListeners.forEach((fn) => fn(tick));

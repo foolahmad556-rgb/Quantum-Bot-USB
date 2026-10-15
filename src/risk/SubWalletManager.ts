@@ -38,7 +38,7 @@ const SUB_WALLET_STATE_FILE = path.join(process.cwd(), 'data', 'sub_wallet_state
 export class SubWalletManager extends EventEmitter {
   private state: SubWalletState;
 
-  constructor(initialCapital: number = 25.0) {
+  constructor(initialCapital: number = 0) {
     super();
     this.state = this.loadState(initialCapital);
   }
@@ -49,16 +49,15 @@ export class SubWalletManager extends EventEmitter {
         const raw = fs.readFileSync(SUB_WALLET_STATE_FILE, 'utf-8');
         const parsed = JSON.parse(raw);
         if (parsed && typeof parsed.currentEquity === 'number') {
-          // If depleted (< $1.00), reset back to $25
+          // Never replenish depleted state with fabricated capital.
           if (parsed.currentEquity < 1.0) {
-            console.log('🔄 [SUB-WALLET] Previous capital was depleted. Re-allocating $25.00 quarantine slice.');
-            return this.createNewState(initialCapital);
+            return this.createNewState(0);
           }
           return parsed;
         }
       }
     } catch (e) {
-      console.warn('⚠️ [SUB-WALLET] Could not load saved state, initializing fresh $25 slice:', e);
+      console.warn('⚠️ [SUB-WALLET] Could not load saved state; starting with zero until Binance sync:', e);
     }
     return this.createNewState(initialCapital);
   }
