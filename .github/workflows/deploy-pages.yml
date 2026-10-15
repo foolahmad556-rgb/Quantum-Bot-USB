@@ -38,7 +38,7 @@ jobs:
           status=$(curl -sS -o /tmp/pages-project.json -w "%{http_code}" \
             -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
             "https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID/pages/projects/$CLOUDFLARE_PAGES_PROJECT")
-          if [ "$status" != "200" ] || ! grep -q '"success":true' /tmp/pages-project.json; then
+          if [ "$status" != "200" ] || ! jq -e '.success == true and .result.name == env.CLOUDFLARE_PAGES_PROJECT' /tmp/pages-project.json >/dev/null; then
             echo "Cloudflare Pages project mismatch or inaccessible: $CLOUDFLARE_PAGES_PROJECT"
             cat /tmp/pages-project.json
             exit 1
