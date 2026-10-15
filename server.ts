@@ -42,7 +42,7 @@ import { BacktestEngine } from './src/backtest/BacktestEngine.ts';
 
 const PORT = Number(process.env.PORT || process.env.SERVER_PORT || 3000);
 const OPERATOR_SECRET = (process.env.OPERATOR_SECRET || process.env.ADMIN_API_KEY || '').trim();
-const AUTOSTART = String(process.env.AUTOSTART_TRADING || '').toLowerCase() === 'true';
+const AUTOSTART = String(process.env.AUTOSTART_TRADING || process.env.AUTO_START_TRADING || '').toLowerCase() === 'true';
 
 /* ------------------------------------------------------------------ */
 /* helpers                                                             */

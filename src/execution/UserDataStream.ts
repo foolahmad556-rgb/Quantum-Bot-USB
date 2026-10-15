@@ -34,8 +34,8 @@ export class UserDataStream {
 
   constructor(initialCapital: number = 0, onEvent?: EventCallback) {
     this.onEvent = onEvent;
-    this.apiKey = process.env.EXCHANGE_API_KEY || '';
-    this.apiSecret = process.env.EXCHANGE_API_SECRET || '';
+    this.apiKey = process.env.EXCHANGE_API_KEY || process.env.BINANCE_API_KEY || '';
+    this.apiSecret = process.env.EXCHANGE_API_SECRET || process.env.BINANCE_API_SECRET || '';
     this.executionMode = normalizeExecutionMode(process.env.EXECUTION_MODE, !!this.apiKey);
     
     // Strict real accounting: defaults to 0 and populated exclusively via Binance REST/WebSocket

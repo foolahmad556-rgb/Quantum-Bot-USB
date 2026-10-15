@@ -130,7 +130,9 @@ export class TradingPipeline {
     
     // Read environment configuration
     const rawMode = process.env.EXECUTION_MODE;
-    const hasKey = !!process.env.EXCHANGE_API_KEY;
+    const apiKey = process.env.EXCHANGE_API_KEY || process.env.BINANCE_API_KEY || '';
+    const apiSecret = process.env.EXCHANGE_API_SECRET || process.env.BINANCE_API_SECRET || '';
+    const hasKey = !!apiKey;
     const executionMode: ExecutionMode = normalizeExecutionMode(rawMode, hasKey);
     const apiBaseUrl = getBinanceBaseUrl(executionMode);
 
@@ -150,8 +152,8 @@ export class TradingPipeline {
     
     this.orderGateway = new OrderGateway(this.userDataStream, this.orderBookBuilder, {
       executionMode,
-      apiKey: process.env.EXCHANGE_API_KEY,
-      apiSecret: process.env.EXCHANGE_API_SECRET,
+      apiKey,
+      apiSecret,
       apiBaseUrl: apiBaseUrl,
     });
 
@@ -203,8 +205,8 @@ export class TradingPipeline {
     // Initialize Asset Screener & Dynamic Risk System
     this.assetScreener = new AssetScreener(
       apiBaseUrl,
-      process.env.EXCHANGE_API_KEY || '',
-      process.env.EXCHANGE_API_SECRET || ''
+      apiKey,
+      apiSecret
     );
     this.dynamicRiskManager = new DynamicRiskManager({ zScoreThreshold: -1.6, halfLifeMax: 30 });
     this.regimeDetector = new RegimeDetector();
