@@ -103,6 +103,7 @@ export interface Fill {
 
 export interface Position {
   symbol: AssetSymbol;
+  positionSide?: 'BOTH' | 'LONG' | 'SHORT';
   size: number;
   entryPrice: number;
   currentPrice: number;
@@ -365,7 +366,7 @@ export interface SystemHealth {
   lastHeartbeat: number;
 }
 
-export type ExecutionMode = 'LIVE' | 'TESTNET' | 'PAPER';
+export type ExecutionMode = 'LIVE' | 'TESTNET' | 'PAPER' | 'BACKTEST' | 'SHADOW_PAPER';
 
 export function normalizeExecutionMode(mode?: string, hasApiKey: boolean = false): ExecutionMode {
   if (!mode || typeof mode !== 'string') {
@@ -375,18 +376,22 @@ export function normalizeExecutionMode(mode?: string, hasApiKey: boolean = false
   if (m === 'LIVE' || m === 'PRODUCTION') return 'LIVE';
   if (m === 'TESTNET') return 'TESTNET';
   if (m === 'PAPER' || m === 'SIMULATION' || m === 'PAPER_TRADING') return 'PAPER';
-  
-  // Refuse unknown modes silently switching to TESTNET - fail-safe to PAPER
-  console.warn(`⚠️ Unknown EXECUTION_MODE '${mode}' specified. Falling back to fail-safe 'PAPER' mode.`);
-  return 'PAPER';
+  if (m === 'BACKTEST') return 'BACKTEST';
+  if (m === 'SHADOW_PAPER' || m === 'SHADOW') return 'SHADOW_PAPER';
+
+  throw new Error(`Invalid EXECUTION_MODE '${mode}'. Allowed: PAPER, BACKTEST, SHADOW_PAPER, TESTNET, LIVE`);
 }
 
 export function getBinanceBaseUrl(mode: ExecutionMode): string {
-  return mode === 'LIVE' ? 'https://fapi.binance.com' : 'https://testnet.binancefuture.com';
+  if (mode === 'LIVE') return 'https://fapi.binance.com';
+  if (mode === 'TESTNET') return 'https://testnet.binancefuture.com';
+  return '';
 }
 
 export function getBinanceWsUrl(mode: ExecutionMode): string {
-  return mode === 'LIVE' ? 'wss://fstream.binance.com/private' : 'wss://fstream.binancefuture.com/private';
+  if (mode === 'LIVE') return 'wss://fstream.binance.com/private';
+  if (mode === 'TESTNET') return 'wss://fstream.binancefuture.com/private';
+  return '';
 }
 
 /**

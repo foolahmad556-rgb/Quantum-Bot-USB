@@ -31,7 +31,9 @@ export class ReconciliationService {
     const discrepancies: ReconciliationReport['discrepancies'] = [];
     let isBalanced = true;
 
+    const checkedSymbols = new Set<AssetSymbol>();
     for (const pos of internalPositions) {
+      checkedSymbols.add(pos.symbol);
       const exchangeSize = mockExchangePositions?.get(pos.symbol) ?? pos.size;
       const drift = Number((pos.size - exchangeSize).toFixed(4));
 
@@ -45,6 +47,18 @@ export class ReconciliationService {
           actionTaken: Math.abs(drift) < 0.01 ? 'AUTO_CORRECTED' : 'MANUAL_ALERT',
         });
       }
+    }
+
+    for (const [symbol, exchangeSize] of mockExchangePositions ?? []) {
+      if (checkedSymbols.has(symbol) || Math.abs(exchangeSize) <= 0.0001) continue;
+      isBalanced = false;
+      discrepancies.push({
+        symbol,
+        internalSize: 0,
+        exchangeSize,
+        drift: Number((-exchangeSize).toFixed(4)),
+        actionTaken: 'MANUAL_ALERT',
+      });
     }
 
     const report: ReconciliationReport = {

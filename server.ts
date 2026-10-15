@@ -23,14 +23,12 @@ import express, { Request, Response, NextFunction } from 'express';
 import expressWs from 'express-ws';
 import path from 'path';
 import fs from 'fs';
-import { fileURLToPath } from 'url';
-
-// __dirname compat: CJS bundle (dist) provides it; ESM (tsx dev) does not.
+// __dirname exists in bundled CJS; dev mode uses project working directory.
 declare const __dirname: string | undefined;
 const serverDir: string =
   typeof __dirname === 'string' && __dirname
     ? __dirname
-    : path.dirname(fileURLToPath(import.meta.url));
+    : process.cwd();
 
 import { TradingPipeline } from './src/app/TradingPipeline.ts';
 import { BoardOfDirectorsEngine } from './src/strategies/BoardOfDirectorsEngine.ts';

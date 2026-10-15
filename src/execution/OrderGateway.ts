@@ -20,7 +20,7 @@ export interface GatewayConfig {
   apiKey?: string;
   apiSecret?: string;
   apiBaseUrl?: string;
-  executionMode?: 'LIVE' | 'TESTNET' | 'PAPER' | string;
+  executionMode?: ExecutionMode;
 }
 
 export interface PreTradeValidationInput {
@@ -230,7 +230,7 @@ export class OrderGateway {
   public getApiKey(): string { return this.apiKey; }
   public getApiSecret(): string { return this.apiSecret; }
   public getApiBaseUrl(): string { return this.apiBaseUrl; }
-  public getExecutionMode(): 'LIVE' | 'TESTNET' | 'PAPER' { return this.executionMode; }
+  public getExecutionMode(): ExecutionMode { return this.executionMode; }
   public setExecutionMode(mode: ExecutionMode): void { this.executionMode = mode; }
 
   /**

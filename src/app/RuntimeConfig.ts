@@ -3,10 +3,10 @@
  * Master Dynamic Runtime Configuration
  */
 
-import { AssetSymbol, SolverType } from '../domain/types';
+import { AssetSymbol, ExecutionMode, SolverType } from '../domain/types';
 
 export interface RuntimeConfigState {
-  executionMode: 'LIVE_EXCHANGE' | 'LIVE_SIMULATION' | 'PAPER_TRADING' | 'TESTNET_EXCHANGE' | 'STRESS_TEST';
+  executionMode: ExecutionMode;
   activeSymbols: AssetSymbol[];
   activeSolver: SolverType;
   rebalanceIntervalMs: number;
@@ -20,7 +20,7 @@ export interface RuntimeConfigState {
 }
 
 export const INITIAL_RUNTIME_CONFIG: RuntimeConfigState = {
-  executionMode: 'TESTNET_EXCHANGE',
+  executionMode: 'TESTNET',
   activeSymbols: ['BTC/USDT', 'ETH/USDT', 'SOL/USDT', 'QNT/USDT'],
   activeSolver: 'QUANTUM_ANNEALING',
   rebalanceIntervalMs: 4 * 60 * 60 * 1000, // 4 ساعات (تحسين أداء QUBO وتقليل التردد العالي)

@@ -49,6 +49,7 @@ import { PortfolioSizer } from '../risk/PortfolioSizer';
 import { SubWalletManager, SubWalletState } from '../risk/SubWalletManager';
 import { PartialProfitManager } from '../execution/PartialProfitManager';
 import { ScaleInManager } from '../execution/ScaleInManager';
+import { failClosedOnInvalidEquity, restorePersistentKillSwitch, watchdogMayRestart } from '../execution/ReconciliationSafety';
 import { AssetScreener } from '../market-data/AssetScreener';
 import { StrategyManager } from '../strategies/StrategyManager';
 import { SystemWatchdog, WatchdogStatus } from '../monitoring/SystemWatchdog';
@@ -136,13 +137,7 @@ export class TradingPipeline {
     const executionMode: ExecutionMode = normalizeExecutionMode(rawMode, hasKey);
     const apiBaseUrl = getBinanceBaseUrl(executionMode);
 
-    if (executionMode === 'LIVE') {
-      this.config.executionMode = 'LIVE_SIMULATION';
-    } else if (executionMode === 'TESTNET') {
-      this.config.executionMode = 'TESTNET_EXCHANGE';
-    } else {
-      this.config.executionMode = 'PAPER_TRADING';
-    }
+    this.config.executionMode = executionMode;
 
     this.orderBookBuilder = new OrderBookBuilder(10);
     this.marketData = new ExchangeMarketData(this.orderBookBuilder);
@@ -230,9 +225,9 @@ export class TradingPipeline {
         return maxTime > 0 ? maxTime : Date.now();
       },
       onFeedStall: async () => {
-        await this.marketData.fetchLiveRestPrices();
-        await this.marketData.fetchOrderBookSnapshots();
-        this.eventJournal.record('WARN', 'SYSTEM', 'Watchdog 24/7 auto-healed stalled market data stream via Binance live REST snapshot');
+        // Never replace live Futures WebSocket with REST during a stall.
+        // Entry checks reject stale ticks; open-position risk checks remain active.
+        this.eventJournal.record('WARN', 'SYSTEM', 'Market WebSocket stalled; new entries remain blocked until live feed recovers');
       },
       getInFlightLocks: () => this.inFlightSymbols,
       onClearStaleLocks: (stale) => {
@@ -297,20 +292,19 @@ export class TradingPipeline {
         console.warn('⚠️ Could not sync sub-wallet with DB trades on boot:', err);
       }
 
-      this.portfolioSizer.updateBalance(this.subWalletManager.getCurrentEquity());
-      this.config.activeSymbols = this.portfolioSizer.getAllowedSymbols();
-
-      // 1. Reconcile State with Exchange
-      await this.reconcileState();
-      
-      // 2. Start Market Data & User Data Streams
+      // 1. Load authoritative account state before any trading loop or entry.
       console.log('🌐 Connecting to Market Data & User Data Streams...');
+      await this.userDataStream.start();
+      await this.reconcileState();
+      this.portfolioSizer.updateBalance(this.userDataStream.getBalance().totalEquity);
+      this.config.activeSymbols = this.portfolioSizer.getAllowedSymbols();
+      
+      // 2. Start Market Data Stream
       try {
         await this.marketData.backfillRealCandles(this.config.activeSymbols);
       } catch (e: any) {
         console.warn('⚠️ Non-blocking candle backfill notice:', e.message);
       }
-      await this.userDataStream.start();
       this.marketData.startStreaming(300, this.config.activeSymbols);
 
       // 3. Start Optimization
@@ -442,7 +436,7 @@ export class TradingPipeline {
     // Zero-Halt Continuous Auto-Recovery Watchdog (every 10s)
     this.watchdogInterval = setInterval(async () => {
       try {
-        if (!this.isRunning && !this.killSwitch.isActive()) {
+        if (watchdogMayRestart(this.isRunning, this.killSwitch)) {
           console.log('🔄 Zero-Halt Watchdog: Auto-recovering autonomous trading loop...');
           await this.startAutonomousTrading();
         }
@@ -1145,13 +1139,8 @@ export class TradingPipeline {
     try {
       // Restore persistent KillSwitch state if previously triggered
       const savedKs = await this.db.getState<{ level: KillSwitchLevel; active: boolean; reason: string }>('killswitch_state');
-      if (savedKs && savedKs.active && savedKs.level !== 'NORMAL') {
-        if (savedKs.reason.includes('Account equity is invalid')) {
-          console.log(`ℹ️ Persistent KillSwitch was previously set to [${savedKs.level}] due to startup zero-equity. Will verify with live exchange equity.`);
-        } else {
-          console.warn(`🚨 Restoring persisted KillSwitch state: [${savedKs.level}] - ${savedKs.reason}`);
-          this.killSwitch.trigger(savedKs.level, `Restored from persistent state: ${savedKs.reason}`, 'AUTO_RISK_ENGINE');
-        }
+      if (savedKs && restorePersistentKillSwitch(savedKs, this.killSwitch)) {
+        console.warn(`🚨 Restoring persisted KillSwitch state: [${savedKs.level}] - ${savedKs.reason}`);
       }
 
       const apiKey = this.orderGateway.getApiKey();
@@ -1190,23 +1179,12 @@ export class TradingPipeline {
       const positionsData = await positionsRes.json();
 
       const realEquity = parseFloat(accountData.totalWalletBalance);
-      if (isNaN(realEquity)) {
-        console.warn('⚠️ Reconciliation skipped: Invalid account data received.');
+      if (!failClosedOnInvalidEquity(realEquity, this.killSwitch)) {
         return;
       }
 
-      // If KillSwitch was previously tripped by startup zero-equity and real equity is positive, auto-reset it
-      if (this.killSwitch.isActive() && realEquity > 0) {
-        const history = this.killSwitch.getHistory();
-        const latestEvent = history[0];
-        if (!latestEvent || latestEvent.reason.includes('Account equity is invalid') || latestEvent.reason.includes('Restored from persistent state')) {
-          console.log(`✅ Verified positive exchange equity ($${realEquity.toFixed(2)}). Auto-clearing startup KillSwitch.`);
-          this.resetEmergencyKill();
-        }
-      }
-
       // Keep portfolio sizer synced with real exchange equity
-      this.portfolioSizer.updateBalance(this.subWalletManager.getCurrentEquity());
+      this.portfolioSizer.updateBalance(realEquity);
 
       const dbState = await this.db.getState<{ equity: number; timestamp: number }>('last_balance');
       if (dbState && Math.abs(realEquity - dbState.equity) > 1) {
@@ -1216,13 +1194,13 @@ export class TradingPipeline {
 
       if (Array.isArray(positionsData)) {
         const realOpenPositions = positionsData.filter((p: any) => parseFloat(p.positionAmt) !== 0);
-        const realOpenSymbols = new Set(realOpenPositions.map((p: any) => p.symbol));
+        const realOpenKeys = new Set(realOpenPositions.map((p: any) => `${p.symbol}:${p.positionSide || 'BOTH'}`));
 
         // 1. Reconcile DB open trades: if a trade in DB is not on exchange, mark it CLOSED
         const dbOpenTrades = await this.db.getOpenTrades();
         for (const trade of dbOpenTrades) {
           const cleanSym = trade.symbol.replace('/', '');
-          if (!realOpenSymbols.has(cleanSym)) {
+          if (!realOpenKeys.has(`${cleanSym}:${(trade as any).positionSide || 'BOTH'}`)) {
             console.log(`🔄 Reconciled: Trade ${trade.id} (${trade.symbol}) is closed on exchange. Syncing DB status to CLOSED.`);
             await this.db.closeTrade(trade.id, 0);
           }
@@ -1231,21 +1209,32 @@ export class TradingPipeline {
         // 2. Detect & Adopt Orphan Positions (صفقات يتيمة):
         // إذا كان هناك مركز مفتوح على بايننس غير مسجل في قاعدة البيانات أو إدارة المخاطر
         // يقوم البوت بتبنيه فوراً، وإدراجه تحت نظام التتبع ووقف الخسارة وجني الأرباح التلقائي!
-        const knownDbSymbols = new Set(dbOpenTrades.map((t) => t.symbol.replace('/', '')));
+        const knownDbSymbols = new Set(dbOpenTrades.map((t) => `${t.symbol.replace('/', '')}:${(t as any).positionSide || 'BOTH'}`));
         for (const p of realOpenPositions) {
           const rawSymbol = p.symbol;
           const posAmt = parseFloat(p.positionAmt);
           if (posAmt === 0) continue;
 
-          if (!knownDbSymbols.has(rawSymbol)) {
+          if (!knownDbSymbols.has(`${rawSymbol}:${p.positionSide || 'BOTH'}`)) {
             const baseAsset = rawSymbol.replace('USDT', '');
             const formattedSymbol = `${baseAsset}/USDT` as AssetSymbol;
             const side = posAmt > 0 ? 'BUY' : 'SELL';
             const qty = Math.abs(posAmt);
             const entryPrice = parseFloat(p.entryPrice) || this.marketData.getPrice(formattedSymbol) || 1;
+            const currentPrice = parseFloat(p.markPrice) || this.marketData.getPrice(formattedSymbol) || entryPrice;
             const orphanOrderId = `ADOPTED-${Date.now().toString(36)}-${rawSymbol}`;
 
             console.log(`🛡️ Orphan Position Detected for ${rawSymbol} (${side} ${qty} @ $${entryPrice}). Adopting under algorithmic management...`);
+
+            this.userDataStream.adoptPosition({
+              symbol: formattedSymbol, positionSide: p.positionSide === 'LONG' || p.positionSide === 'SHORT' ? p.positionSide : 'BOTH',
+              size: posAmt, entryPrice, currentPrice,
+              unrealizedPnl: parseFloat(p.unRealizedProfit || p.unrealizedProfit || '0') || 0,
+              unrealizedPnlPct: 0, realizedPnl: 0,
+              marginUsed: Math.abs(posAmt * entryPrice) / (parseFloat(p.leverage) || 1),
+              liquidationPrice: parseFloat(p.liquidationPrice || '0') || 0,
+              leverage: parseFloat(p.leverage) || 1, updatedAt: Date.now(),
+            });
 
             // تسجيل الصفقة اليتيمة في قاعدة البيانات
             await this.db.saveTrade({
@@ -1890,13 +1879,7 @@ export class TradingPipeline {
   }
 
   public setExecutionMode(mode: ExecutionMode): void {
-    if (mode === 'LIVE') {
-      this.config.executionMode = 'LIVE_SIMULATION';
-    } else if (mode === 'TESTNET') {
-      this.config.executionMode = 'TESTNET_EXCHANGE';
-    } else {
-      this.config.executionMode = 'PAPER_TRADING';
-    }
+    this.config.executionMode = mode;
     this.orderGateway.setExecutionMode(mode);
     this.userDataStream.setExecutionMode(mode);
   }

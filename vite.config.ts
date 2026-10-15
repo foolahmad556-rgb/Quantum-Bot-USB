@@ -20,7 +20,18 @@ export default defineConfig(() => {
       watch: process.env.DISABLE_HMR === 'true' ? null : {},
     },
     build: {
-      chunkSizeWarningLimit: 900,
+      chunkSizeWarningLimit: 700,
+      rollupOptions: {
+        output: {
+          manualChunks(id) {
+            if (id.includes('node_modules/react') || id.includes('node_modules/react-dom') || id.includes('node_modules/react-is')) return 'react-vendor';
+            if (id.includes('node_modules/recharts')) return 'chart-vendor';
+            if (id.includes('node_modules/motion')) return 'motion-vendor';
+            if (id.includes('node_modules/lucide-react')) return 'icons-vendor';
+            return undefined;
+          },
+        },
+      },
     },
   };
 });

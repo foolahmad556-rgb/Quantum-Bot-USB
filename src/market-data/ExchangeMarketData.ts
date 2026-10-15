@@ -9,6 +9,15 @@ import { AssetSymbol, Candle, ExecutionMode, Tick, getBinanceWsUrl, normalizeExe
 import { OrderBookBuilder } from './OrderBookBuilder';
 import { mulberry32, secureUUID } from '../utils/seededRng';
 
+export function buildFuturesCombinedStreamUrl(symbols: AssetSymbol[]): string {
+  const streams = symbols.filter(s => s.endsWith('/USDT')).map(s => `${s.replace('/', '').toLowerCase()}@aggTrade`).join('/');
+  return `wss://fstream.binance.com/stream?streams=${streams}`;
+}
+
+export function getReconnectDelay(attempt: number): number {
+  return Math.min(60_000, 5_000 * (2 ** Math.max(0, attempt)));
+}
+
 export interface SymbolConfig {
   symbol: AssetSymbol;
   basePrice: number;
@@ -164,7 +173,7 @@ export class ExchangeMarketData extends EventEmitter {
   private candleHistory: Map<AssetSymbol, Candle[]> = new Map();
   private orderBookBuilder: OrderBookBuilder;
   private tickListeners: Set<(tick: Tick) => void> = new Set();
-  
+
   // Simulated streaming timer fallback
   private intervalId: any = null;
   private isRunning: boolean = false;
@@ -174,7 +183,6 @@ export class ExchangeMarketData extends EventEmitter {
   // Live WebSocket variables
   private marketWs: WebSocket | null = null;
   private depthWs: WebSocket | null = null;
-  private spotWs: WebSocket | null = null;
   private executionMode: string;
   private activeCryptoSymbols: AssetSymbol[] = [
     'BTC/USDT',
@@ -192,8 +200,8 @@ export class ExchangeMarketData extends EventEmitter {
     'RENDER/USDT',
   ];
   private reconnectTimer: NodeJS.Timeout | null = null;
+  private reconnectAttempt = 0;
   private livePollTimer: NodeJS.Timeout | null = null;
-  private depthPollTimer: NodeJS.Timeout | null = null;
 
   constructor(orderBookBuilder?: OrderBookBuilder, activeSymbols?: AssetSymbol[]) {
     super();
@@ -204,10 +212,6 @@ export class ExchangeMarketData extends EventEmitter {
       this.activeCryptoSymbols = activeSymbols.filter(s => s.endsWith('/USDT'));
     }
     this.initializeState();
-    // Immediate initial live price sync
-    this.fetchLiveRestPrices().catch(err => {
-      console.warn('Initial price sync notice:', err.message);
-    });
   }
 
   private initializeState() {
@@ -258,7 +262,7 @@ export class ExchangeMarketData extends EventEmitter {
     const primarySymbols = targetSymbols;
     console.log(`📥 ExchangeMarketData: Backfilling real historical candles for ${primarySymbols.length} pairs (${primarySymbols.slice(0, 6).join(', ')}...)...`);
 
-    await Promise.all(primarySymbols.map(async (sym) => {
+    for (const sym of primarySymbols) {
       const binanceSym = sym.replace('/', '').toUpperCase();
       try {
         const res = await fetch(`${baseUrl}/fapi/v1/klines?symbol=${binanceSym}&interval=1m&limit=100`);
@@ -288,38 +292,27 @@ export class ExchangeMarketData extends EventEmitter {
       } catch (err: any) {
         console.warn(`⚠️ ExchangeMarketData: Failed to backfill candles for ${sym}:`, err.message);
       }
-    }));
+    }
   }
 
   public startStreaming(tickRateMs: number = 300, activeSymbols?: AssetSymbol[]) {
+    if (activeSymbols && activeSymbols.length > 0) {
+      const nextSymbols = activeSymbols.filter(s => s.endsWith('/USDT'));
+      if (this.isRunning && nextSymbols.join('|') !== this.activeCryptoSymbols.join('|')) {
+        this.stopStreaming();
+      }
+      this.activeCryptoSymbols = nextSymbols;
+    }
     if (this.isRunning) return;
     this.isRunning = true;
-
-    if (activeSymbols && activeSymbols.length > 0) {
-      this.activeCryptoSymbols = activeSymbols.filter(s => s.endsWith('/USDT'));
-    }
 
     console.log(`🌐 ExchangeMarketData: Starting live Binance real-time data engine for ${this.activeCryptoSymbols.join(', ')}...`);
 
     // 1. Initial backfill of real klines and live price pull
-    this.fetchLiveRestPrices().catch(() => {});
     this.backfillRealCandles().catch(() => {});
-    this.fetchOrderBookSnapshots().catch(() => {});
 
-    // 2. Start WebSocket real-time streams
+    // Start WebSocket real-time streams
     this.startWebSocketStreaming();
-
-    // 3. High-frequency live REST price poller: guarantees 100% real live market prices every 1.5 seconds
-    this.livePollTimer = setInterval(() => {
-      this.fetchLiveRestPrices().catch(err => {
-        // Silent catch for resilience
-      });
-    }, 1500);
-
-    // 4. Real OrderBook depth poller: refreshes real L2 depth levels every 3.5 seconds
-    this.depthPollTimer = setInterval(() => {
-      this.fetchOrderBookSnapshots().catch(() => {});
-    }, 3500);
 
     // 5. Fallback heartbeat timer: keeps system health metrics alive
     this.intervalId = setInterval(() => {
@@ -333,7 +326,7 @@ export class ExchangeMarketData extends EventEmitter {
         }
       }
       if (!hasLiveFeed) {
-        this.fetchLiveRestPrices().catch(() => {});
+        this.emit('market_stale');
       }
     }, Math.max(tickRateMs, 1000));
   }
@@ -420,14 +413,6 @@ export class ExchangeMarketData extends EventEmitter {
       clearInterval(this.intervalId);
       this.intervalId = null;
     }
-    if (this.livePollTimer) {
-      clearInterval(this.livePollTimer);
-      this.livePollTimer = null;
-    }
-    if (this.depthPollTimer) {
-      clearInterval(this.depthPollTimer);
-      this.depthPollTimer = null;
-    }
     if (this.marketWs) {
       this.marketWs.close();
       this.marketWs = null;
@@ -435,10 +420,6 @@ export class ExchangeMarketData extends EventEmitter {
     if (this.depthWs) {
       this.depthWs.close();
       this.depthWs = null;
-    }
-    if (this.spotWs) {
-      this.spotWs.close();
-      this.spotWs = null;
     }
     if (this.reconnectTimer) {
       clearTimeout(this.reconnectTimer);
@@ -468,9 +449,6 @@ export class ExchangeMarketData extends EventEmitter {
     this.connectMarketWs(marketUrl);
     this.connectDepthWs(depthUrl);
 
-    // 3. Optional Spot fallback stream for maximum uptime
-    const spotStreams = rawPairs.slice(0, 4).map(s => `${s}@ticker`).join('/');
-    this.connectSpotWs(`wss://stream.binance.com:9443/stream?streams=${spotStreams}`);
   }
 
   private updateCandleHistory(symbol: AssetSymbol, price: number, volume: number) {
@@ -492,33 +470,6 @@ export class ExchangeMarketData extends EventEmitter {
     }
   }
 
-  private connectSpotWs(url: string) {
-    if (this.spotWs) {
-      try { this.spotWs.close(); } catch (e) {}
-    }
-
-    try {
-      this.spotWs = new WebSocket(url);
-      this.spotWs.on('message', (data: any) => {
-        try {
-          const msg = JSON.parse(data.toString());
-          if (msg.data && msg.data.s && msg.data.c) {
-            const sym = this.toSystemSymbol(msg.data.s);
-            const p = parseFloat(msg.data.c);
-            if (p > 0) {
-              const oldPrice = this.currentPrices.get(sym) || p;
-              this.currentPrices.set(sym, p);
-              this.lastUpdateTimes.set(sym, Date.now());
-              this.updateCandleHistory(sym, p, parseFloat(msg.data.v) || 0.1);
-              this.emit('market_update', sym);
-            }
-          }
-        } catch {}
-      });
-      this.spotWs.on('error', () => {});
-    } catch {}
-  }
-
   private connectMarketWs(url: string) {
     if (this.marketWs) {
       try { this.marketWs.close(); } catch (e) {}
@@ -528,6 +479,7 @@ export class ExchangeMarketData extends EventEmitter {
       this.marketWs = new WebSocket(url);
 
       this.marketWs.on('open', () => {
+        this.reconnectAttempt = 0;
         console.log(`✅ ExchangeMarketData: Connected to Binance Futures live trade & kline stream`);
       });
 
@@ -542,7 +494,7 @@ export class ExchangeMarketData extends EventEmitter {
 
       this.marketWs.on('close', () => {
         if (this.isRunning) {
-          console.log('⚠️ ExchangeMarketData: Market WebSocket closed. Reconnecting in 5s...');
+          console.log(`⚠️ ExchangeMarketData: Market WebSocket closed. Reconnecting in ${getReconnectDelay(this.reconnectAttempt)}ms...`);
           this.scheduleReconnect();
         }
       });
@@ -620,8 +572,8 @@ export class ExchangeMarketData extends EventEmitter {
         low: parseFloat(data.k.l),
         close: parseFloat(data.k.c),
         volume: parseFloat(data.k.v),
-        vwap: parseFloat(data.k.V) > 0 && parseFloat(data.k.v) > 0 
-          ? parseFloat(data.k.V) / parseFloat(data.k.v) 
+        vwap: parseFloat(data.k.V) > 0 && parseFloat(data.k.v) > 0
+          ? parseFloat(data.k.V) / parseFloat(data.k.v)
           : parseFloat(data.k.c)
       };
 
@@ -640,7 +592,7 @@ export class ExchangeMarketData extends EventEmitter {
 
       this.currentPrices.set(symbol, candle.close);
       this.lastUpdateTimes.set(symbol, Date.now());
-      
+
       this.emit('market_update', symbol);
       if (data.k.x) {
         this.emit('candle_close', symbol, candle);
@@ -667,7 +619,7 @@ export class ExchangeMarketData extends EventEmitter {
 
       // Trigger listeners
       this.tickListeners.forEach((fn) => fn(tick));
-      
+
       this.emit('market_update', symbol);
     }
   }
@@ -693,7 +645,7 @@ export class ExchangeMarketData extends EventEmitter {
       if (this.isRunning) {
         this.startWebSocketStreaming();
       }
-    }, 5000);
+    }, getReconnectDelay(this.reconnectAttempt++));
   }
 
 }

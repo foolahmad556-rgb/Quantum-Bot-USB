@@ -22,7 +22,7 @@ export class UserDataStream {
   private reconnectTimer: NodeJS.Timeout | null = null;
   
   private balance: AccountBalance;
-  private positions: Map<AssetSymbol, Position> = new Map();
+  private positions: Map<string, Position> = new Map();
   private fillsHistory: Fill[] = [];
   
   private onEvent?: EventCallback;
@@ -116,6 +116,26 @@ export class UserDataStream {
     return Array.from(this.positions.values()).filter((p) => p.size !== 0);
   }
 
+  private positionKey(symbol: AssetSymbol, positionSide: Position['positionSide'] = 'BOTH'): string {
+    return `${symbol}:${positionSide || 'BOTH'}`;
+  }
+
+  public adoptPosition(position: Position): void {
+    this.positions.set(this.positionKey(position.symbol, position.positionSide), position);
+  }
+
+  public replaceAccountState(balance: AccountBalance, positions: Position[]): void {
+    this.balance = { ...balance };
+    this.positions.clear();
+    positions.forEach((position) => this.adoptPosition(position));
+    for (const listener of this.balanceListeners) listener(this.getBalance());
+  }
+
+  public getPosition(symbol: AssetSymbol, positionSide?: Position['positionSide']): Position | undefined {
+    if (positionSide) return this.positions.get(this.positionKey(symbol, positionSide));
+    return Array.from(this.positions.values()).find((position) => position.symbol === symbol);
+  }
+
   public removePosition(symbol: AssetSymbol) {
     this.positions.delete(symbol);
     const totalUnrealized = Array.from(this.positions.values()).reduce((sum, p) => sum + (p.unrealizedPnl || 0), 0);
@@ -132,10 +152,6 @@ export class UserDataStream {
     this.balance.unrealizedPnl = 0;
     this.balance.totalEquity = this.balance.availableCash;
     for (const l of this.balanceListeners) l(this.getBalance());
-  }
-
-  public getPosition(symbol: AssetSymbol): Position | undefined {
-    return this.positions.get(symbol);
   }
 
   public getFills(): Fill[] {
@@ -266,6 +282,7 @@ export class UserDataStream {
             
             this.positions.set(symbol as AssetSymbol, {
               symbol: symbol as AssetSymbol,
+              positionSide: pos.positionSide === 'LONG' || pos.positionSide === 'SHORT' ? pos.positionSide : 'BOTH',
               size: amount,
               entryPrice: parseFloat(pos.entryPrice),
               currentPrice: parseFloat(pos.entryPrice),
@@ -284,6 +301,7 @@ export class UserDataStream {
       for (const l of this.balanceListeners) l(this.getBalance());
     } catch (err) {
       console.error('❌ UserDataStream: Error fetching initial REST account data:', err);
+      throw err;
     }
   }
 
@@ -345,6 +363,7 @@ export class UserDataStream {
             const lev = parseFloat(pos.leverage || '') || previousLeverage || 1;
             this.positions.set(symbol as AssetSymbol, {
               symbol: symbol as AssetSymbol,
+              positionSide: pos.positionSide === 'LONG' || pos.positionSide === 'SHORT' ? pos.positionSide : 'BOTH',
               size: amount,
               entryPrice: ep,
               currentPrice: ep,

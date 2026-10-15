@@ -1,18 +1,19 @@
 // src/config/execution.ts
-export type ExecutionMode = 'LIVE' | 'TESTNET';
+import { ExecutionMode, getBinanceBaseUrl, getBinanceWsUrl, normalizeExecutionMode } from '../domain/types';
 
 function readExecutionMode(): ExecutionMode {
-  const envMode = process.env.EXECUTION_MODE?.toUpperCase() || process.env.VITE_EXECUTION_MODE?.toUpperCase();
-  if (envMode === 'LIVE' || envMode === 'PRODUCTION') return 'LIVE';
-  return 'TESTNET';
+  return normalizeExecutionMode(process.env.EXECUTION_MODE || process.env.VITE_EXECUTION_MODE);
 }
 
 const mode = readExecutionMode();
+const isExchangeMode = mode === 'LIVE' || mode === 'TESTNET';
 
 export const EXECUTION = Object.freeze({
   mode,
-  restUrl: mode === 'LIVE' ? 'https://fapi.binance.com' : 'https://testnet.binancefuture.com',
-  wsUrl: mode === 'LIVE' ? 'wss://fstream.binance.com/private/ws' : 'wss://fstream.binancefuture.com/private/ws',
-  apiKey: process.env.EXCHANGE_API_KEY || process.env.BINANCE_API_KEY || '',
-  apiSecret: process.env.EXCHANGE_API_SECRET || process.env.BINANCE_API_SECRET || '',
+  restUrl: isExchangeMode ? getBinanceBaseUrl(mode) : '',
+  wsUrl: isExchangeMode ? getBinanceWsUrl(mode) : '',
+  apiKey: isExchangeMode ? (process.env.EXCHANGE_API_KEY || process.env.BINANCE_API_KEY || '') : '',
+  apiSecret: isExchangeMode ? (process.env.EXCHANGE_API_SECRET || process.env.BINANCE_API_SECRET || '') : '',
 });
+
+export type { ExecutionMode };
