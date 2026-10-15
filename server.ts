@@ -115,6 +115,7 @@ const simulator: any = QuantumTrainingSimulator.getInstance();
 let cloudDb: CloudDatabaseService | null = null;
 let cloudStorageOk = false;
 try {
+  console.log(`🔐 D1 env: URL=${process.env.D1_API_URL ? 'set' : 'missing'} SECRET=${process.env.D1_API_SECRET ? 'set' : 'missing'}`);
   if (process.env.D1_API_URL) {
     cloudDb = new D1DatabaseService() as any;
     const maybe = (pipeline as any).setDatabase;
