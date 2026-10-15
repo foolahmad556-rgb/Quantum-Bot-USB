@@ -1,17 +1,17 @@
 /**
  * Basel Quantum CyberPulse Nexus (BQ-CPN)
  * Futuristic UI/UX Dashboard with Holographic Interface
- * 
+ *
  * 100% PURIFIED: NO MOCK DATA, NO SYNTHETIC VALUES, NO FAKE NUMBERS.
  * All data is strictly fetched from:
  * 1. Binance Live WebSocket Streams (ticker, klines, orderbook depth)
  * 2. Binance REST API / fapi endpoints & User Data Streams
  * 3. Server OrderGateway and Real Position/Balance states
- * 
+ *
  * Bilingual Support: Arabic (RTL) & English (LTR)
  */
 
-import React, { useEffect, useRef, useState } from 'react';
+import React, { lazy, Suspense, useEffect, useRef, useState } from 'react';
 import {
   Activity,
   Terminal,
@@ -38,17 +38,19 @@ import {
   Server,
 } from 'lucide-react';
 
-import { HolographicQuantumCanvas } from './components/HolographicQuantumCanvas';
-import { HolographicDataVizChart, RealChartPoint } from './components/HolographicDataVizChart';
-import { HolographicHUDWidgets } from './components/HolographicHUDWidgets';
-import { HolographicPairSelector, HolographicAsset } from './components/HolographicPairSelector';
-import { HolographicTradeHistory } from './components/HolographicTradeHistory';
-import { HolographicPerformanceHeatmap } from './components/HolographicPerformanceHeatmap';
+const HolographicQuantumCanvas = lazy(() => import('./components/HolographicQuantumCanvas').then((module) => ({ default: module.HolographicQuantumCanvas })));
+const HolographicDataVizChart = lazy(() => import('./components/HolographicDataVizChart').then((module) => ({ default: module.HolographicDataVizChart })));
+const HolographicHUDWidgets = lazy(() => import('./components/HolographicHUDWidgets').then((module) => ({ default: module.HolographicHUDWidgets })));
+const HolographicPairSelector = lazy(() => import('./components/HolographicPairSelector').then((module) => ({ default: module.HolographicPairSelector })));
+const HolographicTradeHistory = lazy(() => import('./components/HolographicTradeHistory').then((module) => ({ default: module.HolographicTradeHistory })));
+const HolographicPerformanceHeatmap = lazy(() => import('./components/HolographicPerformanceHeatmap').then((module) => ({ default: module.HolographicPerformanceHeatmap })));
+import type { RealChartPoint } from './components/HolographicDataVizChart';
+import type { HolographicAsset } from './components/HolographicPairSelector';
 import { SubWalletModal } from './components/SubWalletModal';
 import { TelegramNotificationModal } from './components/TelegramNotificationModal';
 import { KeepAliveGuideModal } from './components/KeepAliveGuideModal';
 import { QuantumTrainingModal } from './components/QuantumTrainingModal';
-import { BoardOfDirectorsTab } from './components/BoardOfDirectorsTab';
+const BoardOfDirectorsTab = lazy(() => import('./components/BoardOfDirectorsTab').then((module) => ({ default: module.BoardOfDirectorsTab })));
 import { SubWalletState } from './risk/SubWalletManager';
 import { useAuth } from './contexts/AuthContext.tsx';
 import { LoginView } from './components/LoginView.tsx';
@@ -255,7 +257,7 @@ export default function CyberPulseNexusApp() {
         // Calculate real technical RSI from these actual historical closes
         const closes = rawKlines.map((k: any) => parseFloat(k[4]));
         const computedRsi = computeRSIFromCandles(closes);
-        
+
         setMarkets((prev) =>
           prev.map((m) =>
             m.binanceSymbol === binanceSym.toLowerCase()
@@ -297,7 +299,7 @@ export default function CyberPulseNexusApp() {
       if (depthData && depthData.bids && depthData.asks) {
         const bids = depthData.bids.map((b: any) => ({ price: parseFloat(b[0]), quantity: parseFloat(b[1]) }));
         const asks = depthData.asks.map((a: any) => ({ price: parseFloat(a[0]), quantity: parseFloat(a[1]) }));
-        
+
         const totalBidVol = bids.reduce((acc: number, b: any) => acc + (b.price * b.quantity), 0);
         const totalAskVol = asks.reduce((acc: number, a: any) => acc + (a.price * a.quantity), 0);
         const imb = (totalBidVol + totalAskVol) > 0 ? (totalBidVol - totalAskVol) / (totalBidVol + totalAskVol) : 0;
@@ -307,7 +309,7 @@ export default function CyberPulseNexusApp() {
     } catch {}
   };
 
-  
+
   // 24/7 Autonomous Watchdog & Screen WakeLock (Zero-Idle KeepAlive)
   useEffect(() => {
     let wakeLock: any = null;
@@ -594,7 +596,7 @@ export default function CyberPulseNexusApp() {
 
   return (
     <div className={`min-h-screen bg-[#06090e] text-slate-100 font-sans relative overflow-x-hidden selection:bg-cyan-500 selection:text-black quant-grid-bg ${isAr ? 'rtl' : 'ltr'}`}>
-      
+
       {/* 1. Subtle Background Ambience */}
       <div className="fixed inset-0 pointer-events-none z-0 overflow-hidden">
         <div className="absolute -top-[10%] left-[15%] w-[500px] h-[500px] bg-[radial-gradient(circle,rgba(6,182,212,0.06)_0%,rgba(0,0,0,0)_70%)] blur-[90px]" />
@@ -730,6 +732,7 @@ export default function CyberPulseNexusApp() {
       </header>
 
       {/* 3. MAIN DASHBOARD VIEWPORT */}
+      <Suspense fallback={<div className="quant-card p-6 text-cyan-300">Loading dashboard...</div>}>
       <main className="max-w-[1700px] mx-auto px-3 sm:px-6 lg:px-8 py-3.5 sm:py-6 space-y-4 sm:space-y-6 relative z-10 pb-mobile-nav">
 
         {/* 💎 REALIZED PROFITS STRIP & SUB-WALLET PERFORMANCE */}
@@ -899,7 +902,7 @@ export default function CyberPulseNexusApp() {
         {/* PRIMARY TAB: MATRIX */}
         {activeTab === 'matrix' && (
           <div className="grid grid-cols-1 lg:grid-cols-12 gap-4 sm:gap-6 items-stretch">
-            
+
             {/* Left Column: 3D Holographic Canvas */}
             <div className="lg:col-span-7 h-[360px] sm:h-[460px]">
               <HolographicQuantumCanvas
@@ -1183,13 +1186,15 @@ export default function CyberPulseNexusApp() {
 
         {/* TAB: BOARD OF DIRECTORS (14 QUANTUM AGENTS) */}
         {activeTab === 'board' && (
-          <BoardOfDirectorsTab
-            boardData={boardData}
-            selectedSymbol={selectedAsset.symbol}
-            isAr={isAr}
-            onRefresh={fetchLiveServerStatus}
-            playTone={playHoloTone}
-          />
+          <Suspense fallback={<div className="quant-card p-6 text-cyan-300">Loading board...</div>}>
+            <BoardOfDirectorsTab
+              boardData={boardData}
+              selectedSymbol={selectedAsset.symbol}
+              isAr={isAr}
+              onRefresh={fetchLiveServerStatus}
+              playTone={playHoloTone}
+            />
+          </Suspense>
         )}
 
         {/* TAB: TRADE HISTORY */}
@@ -1292,6 +1297,7 @@ export default function CyberPulseNexusApp() {
         )}
 
       </main>
+      </Suspense>
 
       {/* 4. MOBILE FLOATING BOTTOM NAVIGATION DOCK (Thumb Ergonomics) */}
       <nav aria-label="Mobile Navigation" className="lg:hidden fixed bottom-0 left-0 right-0 z-50 bg-[#06090e]/95 backdrop-blur-lg border-t border-white/10 px-2 py-1.5 flex items-center justify-around shadow-2xl">

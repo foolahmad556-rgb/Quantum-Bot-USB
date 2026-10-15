@@ -77,8 +77,7 @@ export class BacktestEngine {
       initialCapital,
     });
 
-    const historicalData = engine.generateDeterministicHighFidelityData();
-    return engine.simulateAndCalculate(historicalData, customConfig.solver, customConfig as any);
+    throw new Error('Synchronous backtest requires real Binance historical candles; use `run()` or `runWithCandles()`.');
   }
 
   /**
@@ -567,14 +566,18 @@ export class BacktestEngine {
     const alpha = Number((annualizedReturnPct - beta * (benchmarkReturnPct * (365 / totalDays))).toFixed(2));
 
     // Monthly breakdown
-    const monthlyReturns = [
-      { month: 'Jan', returnPct: Number((totalReturnPct * 0.18).toFixed(1)) },
-      { month: 'Feb', returnPct: Number((totalReturnPct * 0.22).toFixed(1)) },
-      { month: 'Mar', returnPct: Number((totalReturnPct * -0.05).toFixed(1)) },
-      { month: 'Apr', returnPct: Number((totalReturnPct * 0.28).toFixed(1)) },
-      { month: 'May', returnPct: Number((totalReturnPct * 0.16).toFixed(1)) },
-      { month: 'Jun', returnPct: Number((totalReturnPct * 0.21).toFixed(1)) },
-    ];
+    const monthlyBuckets = new Map<string, { start: number; end: number }>();
+    for (let i = 1; i < equityCurve.length; i++) {
+      const point = equityCurve[i];
+      const monthKey = new Date(point.timestamp).toISOString().slice(0, 7);
+      const previous = monthlyBuckets.get(monthKey);
+      if (previous) previous.end = point.equity;
+      else monthlyBuckets.set(monthKey, { start: equityCurve[i - 1].equity, end: point.equity });
+    }
+    const monthlyReturns = Array.from(monthlyBuckets.entries()).map(([month, values]) => ({
+      month,
+      returnPct: Number((((values.end - values.start) / values.start) * 100).toFixed(1)),
+    }));
 
     const fullConfig: BacktestConfig = {
       startDate: this.config.startDate || '2024-01-01',

@@ -529,7 +529,8 @@ app.post('/api/trades/reset-and-realign', requireAuth, async (_req: Request, res
 
 app.post('/api/backtest/run', requireAuth, async (req: Request, res: Response) => {
   try {
-    const result = await BacktestEngine.runBacktest(req.body || {});
+    const engine = new BacktestEngine(req.body || {});
+    const result = await engine.run(req.body?.strategyParams);
     ok(res, { result });
   } catch (e: any) {
     fail(res, 500, e?.message || 'backtest failed');

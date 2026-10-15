@@ -414,17 +414,10 @@ export class PortfolioSizer {
       notional = maxNotional;
     }
 
-    // تخصيص هامش متناسب مع المحفظة (حوالي 25% من رأس المال = ~6$ إلى 8$ هامش، أي 18$ إلى 25$ قيمة اسمية)
-    const proportionalTargetMargin = Math.max(6.0, safeEquity * 0.25);
-    const targetNotional = Math.max(config.minTradeValue || 18.0, proportionalTargetMargin * (config.minLeverage || 10));
-    if (notional < targetNotional && entry > 0) {
-      notional = targetNotional;
-      rawQty = notional / entry;
-    }
-
-    // حساب الرافعة المطلوبة لتغطية الهامش، مع الالتزام بالنطاق الآمن للفئة
-    const calculatedLev = Math.max(config.minLeverage || 10, Math.ceil(notional / safeEquity));
-    const leverage = Math.min(config.maxLeverage || 20, Math.max(config.minLeverage || 10, calculatedLev));
+    // لا نرفع الحجم للوصول إلى حد أدنى اسمي؛ ذلك يكسر ميزانية الخطر.
+    // إذا كان الحجم أقل من حد Binance، يرفض OrderGateway الصفقة.
+    const calculatedLev = Math.max(1, Math.ceil(notional / safeEquity));
+    const leverage = Math.min(config.maxLeverage || 20, calculatedLev);
 
     return {
       quantity: Number(rawQty.toFixed(4)),

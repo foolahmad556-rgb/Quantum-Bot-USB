@@ -620,7 +620,26 @@ export class TradingPipeline {
           const pending = this.pendingProtection.get(ord.id);
           if (pending) {
             this.pendingProtection.delete(ord.id); // delete first: protection must run exactly once
-            await this.applyProtection(ord, pending);
+            const protectedOk = await this.applyProtection(ord, pending);
+            if (protectedOk) {
+              const fillPrice = ord.avgFillPrice || ord.price;
+              await this.db.saveTrade({
+                id: ord.id,
+                timestamp: Date.now(),
+                symbol: ord.symbol,
+                side: ord.side,
+                quantity: ord.filledQuantity,
+                price: fillPrice,
+                strategy: ord.strategyId || 'OU-DECISION-ENGINE',
+                status: 'OPEN',
+              });
+              this.partialProfitManager.registerPosition(
+                ord.id, ord.symbol, ord.side, fillPrice, ord.filledQuantity, pending.ouMu
+              );
+              this.scaleInManager.registerOriginalPosition(
+                ord.id, ord.symbol, ord.side, fillPrice, ord.filledQuantity
+              );
+            }
           }
         }
       } else if (ord.status === 'REJECTED' || ord.status === 'CANCELLED') {
@@ -639,7 +658,7 @@ export class TradingPipeline {
    * Places SL/TP for a filled entry and VERIFIES the stop. If the stop cannot be placed the position
    * is closed immediately and the KillSwitch is raised: a leveraged position must never stay naked.
    */
-  private async applyProtection(ord: any, pending: { side: 'BUY' | 'SELL'; ouSigma: number; ouMu: number }): Promise<void> {
+  private async applyProtection(ord: any, pending: { side: 'BUY' | 'SELL'; ouSigma: number; ouMu: number }): Promise<boolean> {
     const fill = ord.avgFillPrice || ord.price;
     // Stop distance: 2 sigma, clamped to a sane band (0.4%..3% of price) so a degenerate sigma cannot produce a nonsense stop
     const rawDist = 2 * Number(pending.ouSigma);
@@ -652,7 +671,7 @@ export class TradingPipeline {
 
     if (prot.slOk) {
       this.telegramService.sendMessage(`🛡️ <b>تم تثبيت وقف الخسارة</b> على ${ord.symbol} عند $${Number(sl).toFixed(4)}${prot.tpId ? ' + هدف الربح' : ' (بدون هدف ربح)'}`).catch(() => {});
-      return;
+      return true;
     }
 
     this.eventJournal.record('CRITICAL', 'ORDER_GATEWAY', `Stop-loss placement FAILED for ${ord.symbol}; closing position immediately`);
@@ -666,6 +685,7 @@ export class TradingPipeline {
     } catch (e) {
       console.warn('KillSwitch trigger after protection failure failed:', e);
     }
+    return false;
   }
 
   /** Feeds the RiskEngine (VaR / Sharpe / Sortino) with the real return of a settled trade. */
@@ -944,8 +964,12 @@ export class TradingPipeline {
         });
 
         if (val.allowed) {
-          // Set leverage and isolated margin on Binance Futures
-          await this.orderGateway.ensureLeverage(symbol, this.config.maxLeverage || 10, 'ISOLATED');
+          // Fail closed: never submit entry when leverage setup fails.
+          const leverageReady = await this.orderGateway.ensureLeverage(symbol, requiredLev, 'ISOLATED');
+          if (!leverageReady) {
+            console.warn(`⛔ Skipping ${symbol}: Binance leverage/margin setup failed`);
+            return;
+          }
 
           // Register pending protection to be sent upon actual order fill (البند 23)
           const ord = this.orderGateway.submitOrder({
@@ -968,37 +992,6 @@ export class TradingPipeline {
             side: signalType,
             symbol,
           });
-
-          // 💾 Save Trade to database
-          await this.db.saveTrade({
-            id: ord.id,
-            timestamp: Date.now(),
-            symbol,
-            side: signalType,
-            quantity: qty,
-            price: features.currentPrice,
-            strategy: 'OU-DECISION-ENGINE',
-            status: 'OPEN',
-          });
-
-          // 📝 Register with Partial Profit Manager (including maxHoldMs for Point 11 time exit)
-          this.partialProfitManager.registerPosition(
-            ord.id,
-            symbol,
-            signalType,
-            features.currentPrice,
-            qty,
-            sig.maxHoldMs
-          );
-
-          // 📈 Register with Scale-In Manager
-          this.scaleInManager.registerOriginalPosition(
-            ord.id,
-            symbol,
-            signalType,
-            features.currentPrice,
-            qty
-          );
 
           this.eventJournal.record(
             'ORDER',
@@ -1187,7 +1180,9 @@ export class TradingPipeline {
       if (!accountRes.ok || !positionsRes.ok) {
         const accErr = !accountRes.ok ? await accountRes.text().catch(() => '') : 'OK';
         const posErr = !positionsRes.ok ? await positionsRes.text().catch(() => '') : 'OK';
-        console.warn(`⚠️ Reconciliation skipped: Exchange API returned error (Account HTTP ${accountRes.status}: ${accErr} | Positions HTTP ${positionsRes.status}: ${posErr})`);
+        const reason = `Exchange reconciliation failed (Account HTTP ${accountRes.status}: ${accErr} | Positions HTTP ${positionsRes.status}: ${posErr})`;
+        console.error(`🚨 ${reason}`);
+        this.killSwitch.trigger('HARD_HALT', reason, 'AUTO_RISK_ENGINE');
         return;
       }
 
@@ -1301,7 +1296,9 @@ export class TradingPipeline {
         console.log(`✅ State Reconciliation complete. In sync with Binance Futures (${executionMode}). Equity: $${realEquity.toFixed(2)}, Open positions: ${realOpenPositions.length}`);
       }
     } catch (error) {
-      console.error('❌ Reconciliation failed:', error);
+      const reason = `Reconciliation failed: ${error instanceof Error ? error.message : String(error)}`;
+      console.error(`🚨 ${reason}`);
+      this.killSwitch.trigger('HARD_HALT', reason, 'AUTO_RISK_ENGINE');
     }
   }
 
