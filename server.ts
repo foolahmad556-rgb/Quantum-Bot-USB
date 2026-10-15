@@ -38,6 +38,7 @@ import { QuantumTrainingSimulator } from './src/strategies/QuantumTrainingSimula
 import { TelegramService } from './src/services/TelegramService.ts';
 import { DatabaseService } from './src/storage/DatabaseService.ts';
 import { CloudDatabaseService } from './src/storage/CloudDatabaseService.ts';
+import { D1DatabaseService } from './src/storage/D1DatabaseService.ts';
 import { BacktestEngine } from './src/backtest/BacktestEngine.ts';
 
 const PORT = Number(process.env.PORT || process.env.SERVER_PORT || 3000);
@@ -114,7 +115,13 @@ const simulator: any = QuantumTrainingSimulator.getInstance();
 let cloudDb: CloudDatabaseService | null = null;
 let cloudStorageOk = false;
 try {
-  if (process.env.FIREBASE_CREDENTIALS_JSON && process.env.SQL_HOST) {
+  if (process.env.D1_API_URL) {
+    cloudDb = new D1DatabaseService() as any;
+    const maybe = (pipeline as any).setDatabase;
+    if (typeof maybe === 'function') maybe.call(pipeline, cloudDb);
+    cloudStorageOk = true;
+    console.log('✅ External storage: Cloudflare D1');
+  } else if (process.env.FIREBASE_CREDENTIALS_JSON && process.env.SQL_HOST) {
     cloudDb = new CloudDatabaseService();
     const maybe = (pipeline as any).setDatabase;
     if (typeof maybe === 'function') maybe.call(pipeline, cloudDb);
