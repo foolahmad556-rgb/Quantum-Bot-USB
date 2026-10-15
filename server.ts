@@ -116,7 +116,7 @@ let cloudDb: CloudDatabaseService | null = null;
 let cloudStorageOk = false;
 try {
   console.log(`🔐 D1 env: URL=${process.env.D1_API_URL ? 'set' : 'missing'} SECRET=${process.env.D1_API_SECRET ? 'set' : 'missing'}`);
-  if (process.env.D1_API_URL) {
+  if (process.env.STORAGE_BACKEND === 'd1' || process.env.D1_API_URL) {
     cloudDb = new D1DatabaseService() as any;
     const maybe = (pipeline as any).setDatabase;
     if (typeof maybe === 'function') maybe.call(pipeline, cloudDb);
@@ -170,7 +170,7 @@ app.get('/api/health', (_req: Request, res: Response) => {
     uptimeSec: Math.floor((Date.now() - bootTime) / 1000),
     version: process.env.npm_package_version || '1.0.0',
     tradingRunning: !!pipeline.isRunning,
-    storage: cloudStorageOk ? 'cloud (firestore+sql)' : 'local-fallback',
+    storage: process.env.STORAGE_BACKEND === 'd1' && cloudStorageOk ? 'cloudflare-d1' : cloudStorageOk ? 'cloud (firestore+sql)' : 'local-fallback',
     autostart: AUTOSTART,
   });
 });

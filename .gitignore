@@ -13,3 +13,5 @@ coverage/
 data/
 quantum_training_state.json
 *.bak
+migration-export/
+.env.migration
