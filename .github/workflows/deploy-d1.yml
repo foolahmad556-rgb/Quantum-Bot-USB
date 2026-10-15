@@ -30,9 +30,13 @@ jobs:
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
         run: npx wrangler@4 deploy --config wrangler.toml
       - name: Set D1 API secret
-        if: ${{ secrets.D1_API_SECRET != '' }}
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           D1_API_SECRET: ${{ secrets.D1_API_SECRET }}
-        run: printf '%s' "$D1_API_SECRET" | npx wrangler@4 secret put D1_API_SECRET --config wrangler.toml
+        run: |
+          if [ -n "$D1_API_SECRET" ]; then
+            printf '%s' "$D1_API_SECRET" | npx wrangler@4 secret put D1_API_SECRET --config wrangler.toml
+          else
+            echo "D1_API_SECRET not configured; deploy continues without API secret"
+          fi
