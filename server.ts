@@ -170,7 +170,7 @@ app.get('/api/health', (_req: Request, res: Response) => {
     uptimeSec: Math.floor((Date.now() - bootTime) / 1000),
     version: process.env.npm_package_version || '1.0.0',
     tradingRunning: !!pipeline.isRunning,
-    storage: process.env.STORAGE_BACKEND === 'd1' && cloudStorageOk ? 'cloudflare-d1' : cloudStorageOk ? 'cloud (firestore+sql)' : 'local-fallback',
+    storage: cloudStorageOk && (process.env.STORAGE_BACKEND?.trim().toLowerCase() === 'd1' || !!process.env.D1_API_URL) ? 'cloudflare-d1' : cloudStorageOk ? 'cloud (firestore+sql)' : 'local-fallback',
     autostart: AUTOSTART,
   });
 });
@@ -615,7 +615,7 @@ app.use('/api/', (_req: Request, res: Response) => fail(res, 404, 'unknown api r
 
 app.listen(PORT, '0.0.0.0', async () => {
   console.log(`🚀 Quantum Bot server listening on 0.0.0.0:${PORT}`);
-  console.log(`   storage=${cloudStorageOk ? 'cloud (firestore+sql)' : 'LOCAL-FALLBACK'} autostart=${AUTOSTART}`);
+  console.log(`   storage=${cloudStorageOk && (process.env.STORAGE_BACKEND?.trim().toLowerCase() === 'd1' || !!process.env.D1_API_URL) ? 'cloudflare-d1' : cloudStorageOk ? 'cloud (firestore+sql)' : 'LOCAL-FALLBACK'} autostart=${AUTOSTART}`);
   if (!AUTOSTART) {
     console.log('⏸ Trading NOT autostarted (set AUTOSTART_TRADING=true to enable). API + UI live.');
     return;
