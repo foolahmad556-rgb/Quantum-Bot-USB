@@ -47,6 +47,7 @@ import type { HolographicAsset } from './components/HolographicPairSelector';
 import { TelegramNotificationModal } from './components/TelegramNotificationModal';
 import { KeepAliveGuideModal } from './components/KeepAliveGuideModal';
 const BoardOfDirectorsTab = lazy(() => import('./components/BoardOfDirectorsTab').then((module) => ({ default: module.BoardOfDirectorsTab })));
+const ShadowReportPanel = lazy(() => import('./components/ShadowReportPanel').then((module) => ({ default: module.ShadowReportPanel })));
 import { useAuth } from './contexts/AuthContext.tsx';
 import { LoginView } from './components/LoginView.tsx';
 import { fetchWithAuth } from './lib/api.ts';
@@ -1097,6 +1098,11 @@ export default function CyberPulseNexusApp() {
         )}
 
         {/* TAB: BOARD OF DIRECTORS (14 QUANTUM AGENTS) */}
+        {activeTab === 'board' && (
+          <Suspense fallback={<div className="quant-card p-6 text-cyan-300">Loading shadow report...</div>}>
+            <ShadowReportPanel isAr={isAr} />
+          </Suspense>
+        )}
         {activeTab === 'board' && (
           <Suspense fallback={<div className="quant-card p-6 text-cyan-300">Loading board...</div>}>
             <BoardOfDirectorsTab
