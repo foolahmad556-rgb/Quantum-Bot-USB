@@ -75,7 +75,22 @@ jobs:
       - name: Health Check
         env:
           BOTKEEP_URL: ${{ vars.BOTKEEP_URL }}
+          D1_API_URL: https://quantum-bot-d1.foolahmad556.workers.dev
         run: |
-          if [ -z "$BOTKEEP_URL" ]; then echo "BOTKEEP_URL var not set, skipping"; exit 0; fi
-          sleep 10
-          curl -f "${BOTKEEP_URL}/api/health" || exit 1
+          if [ -z "$BOTKEEP_URL" ]; then echo "BOTKEEP_URL var not set, skipping"; else curl --retry 5 --retry-delay 3 -f "${BOTKEEP_URL}/api/health" || exit 1; fi
+          curl --retry 5 --retry-delay 3 -f "$D1_API_URL/health" || exit 1
+
+      - name: Verify D1 auth boundary
+        env:
+          D1_API_URL: https://quantum-bot-d1.foolahmad556.workers.dev
+        run: |
+          test "$(curl -s -o /dev/null -w '%{http_code}' "$D1_API_URL/d1/council/shadow?limit=1")" = "401" || exit 1
+          echo "D1 shadow endpoint protected" 
+
+      - name: Verify runtime D1 configuration
+        env:
+          D1_API_URL: ${{ vars.D1_API_URL }}
+        run: |
+          if [ -n "$D1_API_URL" ]; then echo "D1_API_URL configured"; else echo "D1_API_URL repository variable not set; runtime storage must be configured in Botkeep"; fi
+          grep -q 'EXPOSE 3000' Dockerfile || exit 1
+          echo "Docker port contract verified"
