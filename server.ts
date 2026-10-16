@@ -23,6 +23,7 @@ import express, { Request, Response, NextFunction } from 'express';
 import expressWs from 'express-ws';
 import path from 'path';
 import fs from 'fs';
+import sqlite3 from 'sqlite3';
 // __dirname exists in bundled CJS; dev mode uses project working directory.
 declare const __dirname: string | undefined;
 const serverDir: string =
@@ -40,6 +41,7 @@ import { generateToken, verifyToken, hashPassword, comparePassword } from './src
 
 const PORT = Number(process.env.PORT || process.env.SERVER_PORT || 3000);
 const OPERATOR_SECRET = (process.env.OPERATOR_SECRET || process.env.ADMIN_API_KEY || '').trim();
+const JWT_SECRET = (process.env.JWT_SECRET || 'dev-secret-change-in-production').trim();
 const AUTOSTART = String(process.env.AUTOSTART_TRADING || process.env.AUTO_START_TRADING || '').toLowerCase() === 'true';
 
 /* ------------------------------------------------------------------ */
@@ -90,6 +92,42 @@ const app = express();
 expressWs(app as any);
 app.disable('x-powered-by');
 app.use(express.json({ limit: '1mb' }));
+
+// SQLite local DB for users (auth)
+const dbPath = path.join(serverDir, 'users.db');
+let userDb: sqlite3.Database | null = null;
+
+const initDb = (): Promise<void> => {
+  return new Promise((resolve, reject) => {
+    userDb = new sqlite3.Database(dbPath, (err) => {
+      if (err) {
+        console.error('❌ SQLite init failed:', err.message);
+        reject(err);
+        return;
+      }
+      userDb!.serialize(() => {
+        userDb!.run(`
+          CREATE TABLE IF NOT EXISTS users (
+            id TEXT PRIMARY KEY,
+            email TEXT UNIQUE NOT NULL,
+            password_hash TEXT NOT NULL,
+            created_at INTEGER NOT NULL
+          );
+        `, (err) => {
+          if (err && !err.message.includes('already exists')) {
+            console.error('❌ Table creation failed:', err);
+            reject(err);
+          } else {
+            userDb!.run(`CREATE INDEX IF NOT EXISTS idx_users_email ON users(email)`, () => {
+              console.log('✅ SQLite users DB ready:', dbPath);
+              resolve();
+            });
+          }
+        });
+      });
+    });
+  });
+};
 
 // Manual CORS (no extra dep — free-tier image stays small).
 app.use((req: Request, res: Response, next: NextFunction) => {
@@ -163,7 +201,7 @@ const bootTime = Date.now();
 
 app.post('/api/auth/register', async (req: Request, res: Response) => {
   try {
-    if (!requireCloudStorage(res)) return;
+    if (!userDb) return fail(res, 500, 'Database unavailable');
     const { email, password } = req.body || {};
     
     if (typeof email !== 'string' || !email.includes('@')) {
@@ -174,71 +212,74 @@ app.post('/api/auth/register', async (req: Request, res: Response) => {
     }
 
     // Check if user already exists
-    const existing = await (cloudDb as any).query(
-      `SELECT id FROM users WHERE email = ?`,
-      [email]
-    );
-    if (existing && existing.length > 0) {
-      return fail(res, 409, 'Email already registered');
-    }
+    userDb.get('SELECT id FROM users WHERE email = ?', [email], async (err: any, row: any) => {
+      if (err) {
+        return fail(res, 500, err.message);
+      }
+      if (row) {
+        return fail(res, 409, 'Email already registered');
+      }
 
-    // Hash password
-    const passwordHash = await hashPassword(password);
-
-    // Save to D1
-    const result = await (cloudDb as any).query(
-      `INSERT INTO users (email, password_hash, created_at) VALUES (?, ?, ?)`,
-      [email, passwordHash, new Date().toISOString()]
-    );
-
-    const userId = result?.lastID || 1;
-    const token = generateToken({ id: userId, email });
-
-    ok(res, {
-      token,
-      user: { id: userId, email }
+      // Hash password and insert
+      const passwordHash = await hashPassword(password);
+      const userId = `user_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`;
+      
+      userDb!.run(
+        `INSERT INTO users (id, email, password_hash, created_at) VALUES (?, ?, ?, ?)`,
+        [userId, email, passwordHash, Date.now()],
+        function(err: any) {
+          if (err) {
+            return fail(res, 500, err.message);
+          }
+          const token = generateToken({ userId, email }, JWT_SECRET);
+          return ok(res, { 
+            token, 
+            user: { userId, email },
+            message: 'Registration successful'
+          });
+        }
+      );
     });
-  } catch (e: any) {
-    console.error('register failed:', e);
-    fail(res, 500, e?.message || 'Registration failed');
+  } catch (err: any) {
+    console.error('Register error:', err.message);
+    return fail(res, 500, err.message);
   }
 });
 
 app.post('/api/auth/login', async (req: Request, res: Response) => {
   try {
-    if (!requireCloudStorage(res)) return;
+    if (!userDb) return fail(res, 500, 'Database unavailable');
     const { email, password } = req.body || {};
 
     if (typeof email !== 'string' || typeof password !== 'string') {
       return fail(res, 400, 'Email and password required');
     }
 
-    // Query user from D1
-    const users = await (cloudDb as any).query(
-      `SELECT id, email, password_hash FROM users WHERE email = ?`,
-      [email]
-    );
+    // Get user from local DB
+    userDb.get('SELECT id, email, password_hash FROM users WHERE email = ?', [email], async (err: any, user: any) => {
+      if (err) {
+        return fail(res, 500, err.message);
+      }
+      if (!user) {
+        return fail(res, 401, 'Invalid email or password');
+      }
 
-    if (!users || users.length === 0) {
-      return fail(res, 401, 'Invalid email or password');
-    }
+      const passwordMatch = await comparePassword(password, user.password_hash);
 
-    const user = users[0];
-    const passwordMatch = await comparePassword(password, user.password_hash);
+      if (!passwordMatch) {
+        return fail(res, 401, 'Invalid email or password');
+      }
 
-    if (!passwordMatch) {
-      return fail(res, 401, 'Invalid email or password');
-    }
+      const token = generateToken({ userId: user.id, email: user.email }, JWT_SECRET);
 
-    const token = generateToken({ id: user.id, email: user.email });
-
-    ok(res, {
-      token,
-      user: { id: user.id, email: user.email }
+      return ok(res, {
+        token,
+        user: { userId: user.id, email: user.email }
+      });
     });
-  } catch (e: any) {
-    console.error('login failed:', e);
-    fail(res, 500, e?.message || 'Login failed');
+  } catch (err: any) {
+    console.error('Login error:', err.message);
+    return fail(res, 500, err.message);
   }
 });
 
@@ -251,10 +292,10 @@ app.get('/api/auth/validate', async (req: Request, res: Response) => {
       return fail(res, 401, 'No token provided');
     }
 
-    const decoded = verifyToken(token);
-    ok(res, { id: decoded.id, email: decoded.email });
-  } catch (e: any) {
-    fail(res, 401, 'Invalid or expired token');
+    const decoded = verifyToken(token, JWT_SECRET);
+    return ok(res, { userId: decoded.userId, email: decoded.email });
+  } catch (err: any) {
+    return fail(res, 401, 'Invalid or expired token');
   }
 });
 
@@ -666,6 +707,15 @@ app.use('/api/', (_req: Request, res: Response) => fail(res, 404, 'unknown api r
 app.listen(PORT, '0.0.0.0', async () => {
   console.log(`🚀 Quantum Bot server listening on 0.0.0.0:${PORT}`);
   console.log(`   storage=${cloudStorageOk ? 'cloudflare-d1' : 'UNAVAILABLE'} autostart=${AUTOSTART}`);
+  
+  // Initialize SQLite users DB
+  try {
+    await initDb();
+  } catch (err: any) {
+    console.error('❌ SQLite init failed:', err.message);
+    process.exit(1);
+  }
+
   if (!AUTOSTART) {
     console.log('⏸ Trading NOT autostarted (set AUTOSTART_TRADING=true to enable). API + UI live.');
     return;

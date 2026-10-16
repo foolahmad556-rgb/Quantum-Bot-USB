@@ -34,5 +34,17 @@ export class D1DatabaseService extends DatabaseService {
   async getShadowComparisons(limit = 100) {
     return (await this.call<{ items: any[] }>(`/d1/council/shadow?limit=${Math.max(1, Math.min(1000, limit))}`)).items;
   }
+  async query(sql: string, params: any[] = []): Promise<any[]> {
+    return (await this.call<{ results: any[] }>('/d1/query', {
+      method: 'POST',
+      body: JSON.stringify({ sql, params })
+    })).results || [];
+  }
+  async exec(sql: string, params: any[] = []): Promise<any> {
+    return await this.call<any>('/d1/exec', {
+      method: 'POST',
+      body: JSON.stringify({ sql, params })
+    });
+  }
   close() { /* remote service has no local handle */ }
 }
