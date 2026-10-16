@@ -133,7 +133,7 @@ export const BoardOfDirectorsTab: React.FC<BoardOfDirectorsTabProps> = ({
                   {isAr ? 'مجلس الإدارة الكمي (Quantum Board of Directors)' : 'Quantum Board of Directors v6.0'}
                 </h2>
                 <span className="px-2 py-0.5 rounded text-[10px] font-mono bg-cyan-500/10 border border-cyan-500/30 text-cyan-300">
-                  {isAr ? '14 وكيلاً ذاتي التعلم' : '14 Self-Learning Agents'}
+                  {isAr ? '7 أعضاء: ملفان لكل عضو' : '7 Council Members · 2 Files Each'}
                 </span>
                 {isSyncing && (
                   <span className="px-2 py-0.5 rounded text-[10px] font-mono bg-amber-500/20 text-amber-300 border border-amber-500/40 flex items-center gap-1 animate-pulse">
@@ -453,7 +453,7 @@ export const BoardOfDirectorsTab: React.FC<BoardOfDirectorsTabProps> = ({
                   <th className="py-2.5 px-3">{isAr ? 'العملة' : 'Symbol'}</th>
                   <th className="py-2.5 px-3">{isAr ? 'النتيجة' : 'Result'}</th>
                   <th className="py-2.5 px-3">{isAr ? 'الربح / الخسارة' : 'PnL (USDT)'}</th>
-                  <th className="py-2.5 px-3">{isAr ? 'تأثير الثقة على الـ 14 وكيلاً' : 'Agent Confidence Shift'}</th>
+                  <th className="py-2.5 px-3">{isAr ? 'تأثير الثقة على أعضاء المجلس السبعة' : 'Council Confidence Shift'}</th>
                   <th className="py-2.5 px-3">{isAr ? 'السبب' : 'Reason'}</th>
                 </tr>
               </thead>
@@ -478,7 +478,7 @@ export const BoardOfDirectorsTab: React.FC<BoardOfDirectorsTabProps> = ({
                       </td>
                       <td className="py-3 px-3">
                         <span className={`font-mono text-xs font-bold ${ev.isWin ? 'text-emerald-400' : 'text-rose-400'}`}>
-                          {ev.isWin ? '+0.05 (+5%) for all 14 agents' : '-0.10 (-10%) for all 14 agents'}
+                          {ev.isWin ? '+0.05 (+5%) for all 7 council members' : '-0.10 (-10%) for all 7 council members'}
                         </span>
                       </td>
                       <td className="py-3 px-3 text-gray-300 text-[11px]">

@@ -13,9 +13,8 @@ export const ShadowReportPanel: React.FC<Props> = ({ isAr }) => {
   const load = useCallback(async () => {
     setLoading(true); setError(null);
     try {
-      const response = await fetchWithAuth('/api/council/shadow-report?limit=100');
-      if (!response.ok) throw new Error(`HTTP ${response.status}`);
-      const body = await response.json();
+      const body = await fetchWithAuth('/api/council/shadow-report?limit=100');
+      if (!body?.success) throw new Error(body?.error || 'Shadow report request failed');
       setReport(body.report);
     } catch (e) { setError(e instanceof Error ? e.message : 'Load failed'); }
     finally { setLoading(false); }

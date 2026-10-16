@@ -164,7 +164,7 @@ export function applyAgentLearning(
   };
 }
 
-// Institutional default agent templates (display fixtures; see INITIAL_AGENTS below)
+// Seven-member council display templates. Each member owns primary and secondary files.
 const SEED_FIXTURES: AgentProfileReport[] = [
   // 6 Decision Makers
   { id: 'algo', name: 'AlgoEngineer', arabicName: 'خبير الخوارزميات والهندسة', role: 'فحص سلامة التنفيذ والتعقيد الحسابي', type: 'alpha', confidence: 0.85, accuracy: 0.65, totalDecisions: 24, correctDecisions: 16, weight: 0.70, learningCurve: [0.55, 0.58, 0.62, 0.60, 0.65] },
@@ -200,7 +200,7 @@ const INITIAL_AGENTS: AgentProfileReport[] = SEED_FIXTURES.map(a => ({
 
 export function useBoardLearningSync(initialBoardData?: BoardStatusReport | null) {
   const [agents, setAgents] = useState<AgentProfileReport[]>(() => {
-    return initialBoardData?.agents && initialBoardData.agents.length === 14
+    return initialBoardData?.agents && initialBoardData.agents.length === 7
       ? initialBoardData.agents
       : INITIAL_AGENTS;
   });

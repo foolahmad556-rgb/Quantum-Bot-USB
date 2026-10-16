@@ -736,7 +736,7 @@ export default function CyberPulseNexusApp() {
         <div className="hidden lg:flex items-center gap-1.5 p-1 bg-slate-950/80 rounded-xl border border-white/5 overflow-x-auto scrollbar-none">
           {[
             { id: 'matrix', labelEn: 'Market Matrix & Charts', labelAr: 'مصفوفة الأسواق والشارت', icon: Activity },
-            { id: 'board', labelEn: 'Board of Directors (14 Agents)', labelAr: 'مجلس الإدارة الذكي (14 وكيلاً)', icon: Users },
+            { id: 'board', labelEn: 'Board of Directors (7 Members)', labelAr: 'مجلس الإدارة الذكي (7 أعضاء)', icon: Users },
             { id: 'terminal', labelEn: 'Active Positions & Terminal', labelAr: 'المراكز المفتوحة والتنفيذ', icon: Terminal },
             { id: 'history', labelEn: 'Executed Trade Ledger', labelAr: 'سجل الصفقات المنفذة', icon: History },
             { id: 'strategies', labelEn: 'Quantitative Strategies', labelAr: 'النماذج الخوارزمية', icon: Layers },
@@ -1097,7 +1097,7 @@ export default function CyberPulseNexusApp() {
           </div>
         )}
 
-        {/* TAB: BOARD OF DIRECTORS (14 QUANTUM AGENTS) */}
+        {/* TAB: BOARD OF DIRECTORS (7 MEMBERS, TWO FILES EACH) */}
         {activeTab === 'board' && (
           <Suspense fallback={<div className="quant-card p-6 text-cyan-300">Loading shadow report...</div>}>
             <ShadowReportPanel isAr={isAr} />
