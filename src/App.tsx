@@ -22,7 +22,6 @@ import {
   WifiOff,
   Radio,
   ShieldCheck,
-  Brain,
   Users,
   Volume2,
   VolumeX,
@@ -30,7 +29,6 @@ import {
   RefreshCw,
   ArrowUpRight,
   ArrowDownRight,
-  Wallet,
   TrendingUp,
   TrendingDown,
   Percent,
@@ -49,7 +47,6 @@ import type { HolographicAsset } from './components/HolographicPairSelector';
 import { TelegramNotificationModal } from './components/TelegramNotificationModal';
 import { KeepAliveGuideModal } from './components/KeepAliveGuideModal';
 const BoardOfDirectorsTab = lazy(() => import('./components/BoardOfDirectorsTab').then((module) => ({ default: module.BoardOfDirectorsTab })));
-import type { SubWalletState } from './risk/SubWalletManager';
 import { useAuth } from './contexts/AuthContext.tsx';
 import { LoginView } from './components/LoginView.tsx';
 import { fetchWithAuth } from './lib/api.ts';
@@ -99,27 +96,8 @@ export default function CyberPulseNexusApp() {
   const [isConnected, setIsConnected] = useState<boolean>(false);
   const [boardData, setBoardData] = useState<any>(null);
   const [soundEnabled, setSoundEnabled] = useState<boolean>(true);
-  const [showSubWalletModal, setShowSubWalletModal] = useState<boolean>(false);
-  const [showQuantumTrainingModal, setShowQuantumTrainingModal] = useState<boolean>(false);
   const [showTelegramModal, setShowTelegramModal] = useState<boolean>(false);
   const [showKeepAliveModal, setShowKeepAliveModal] = useState<boolean>(false);
-  const [subWalletState, setSubWalletState] = useState<SubWalletState | null>({
-    isActive: true,
-    initialAllocation: 25.0,
-    allocatedCapital: 25.0,
-    currentEquity: 25.0,
-    availableMargin: 25.0,
-    usedMargin: 0,
-    realizedProfit: 0,
-    unrealizedPnl: 0,
-    totalTrades: 0,
-    winningTrades: 0,
-    losingTrades: 0,
-    winRate: 0,
-    growthPct: 0,
-    isDepleted: false,
-    lastUpdated: Date.now(),
-  });
   const [isExecuting, setIsExecuting] = useState<boolean>(false);
 
   // Live orderbook & real klines
@@ -190,9 +168,6 @@ export default function CyberPulseNexusApp() {
             openPositions: data.positions || [],
             orders: data.orders || [],
           });
-        }
-        if (data.subWallet) {
-          setSubWalletState(data.subWallet);
         }
         if (data.boardOfDirectors) {
           setBoardData(data.boardOfDirectors);
@@ -660,38 +635,6 @@ export default function CyberPulseNexusApp() {
 
         {/* Zone 3: Actions & Settings */}
         <div className="flex items-center gap-2 sm:gap-3">
-          {/* Quantum Training $200 Sandbox Button */}
-          <button
-            type="button"
-            onClick={() => {
-              playHoloTone(1150, 0.08);
-              setShowQuantumTrainingModal(true);
-            }}
-            className="px-2.5 sm:px-3 py-1.5 rounded-xl font-mono text-xs font-semibold border border-purple-500/40 bg-purple-500/10 text-purple-300 hover:bg-purple-500/20 transition cursor-pointer flex items-center gap-1.5 shadow-[0_0_12px_rgba(168,85,247,0.15)]"
-          >
-            <Brain className="w-3.5 h-3.5 text-purple-400 shrink-0" />
-            <span className="hidden sm:inline">{isAr ? 'تدريب المجلس' : 'Quant Sandbox'}</span>
-            <span className="px-1.5 py-0.2 text-[10px] rounded bg-purple-500/20 text-purple-200 border border-purple-500/30 tabular-nums">
-              $200
-            </span>
-          </button>
-
-          {/* Sub-Wallet Badge Button */}
-          <button
-            type="button"
-            onClick={() => {
-              playHoloTone(1200, 0.07);
-              setShowSubWalletModal(true);
-            }}
-            className="px-2.5 sm:px-3 py-1.5 rounded-xl font-mono text-xs font-semibold border border-cyan-500/30 bg-cyan-500/10 text-cyan-300 hover:bg-cyan-500/20 transition cursor-pointer flex items-center gap-1.5"
-          >
-            <ShieldCheck className="w-3.5 h-3.5 text-cyan-400 shrink-0" />
-            <span className="hidden sm:inline">{isAr ? 'المحفظة الثانوية' : 'Sub-Wallet'}</span>
-            <span className="px-1.5 py-0.2 text-[10px] rounded bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 tabular-nums">
-              ${(subWalletState?.currentEquity ?? 25.0).toFixed(1)}
-            </span>
-          </button>
-
           {/* Mode Switcher */}
           <div
             className={`px-2.5 sm:px-3 py-1.5 rounded-xl font-mono text-xs font-bold border transition cursor-pointer flex items-center gap-1 ${
@@ -733,7 +676,7 @@ export default function CyberPulseNexusApp() {
       <Suspense fallback={<div className="quant-card p-6 text-cyan-300">Loading dashboard...</div>}>
       <main className="max-w-[1700px] mx-auto px-3 sm:px-6 lg:px-8 py-3.5 sm:py-6 space-y-4 sm:space-y-6 relative z-10 pb-mobile-nav">
 
-        {/* 💎 REALIZED PROFITS STRIP & SUB-WALLET PERFORMANCE */}
+        {/* Account performance strip */}
         <div className="quant-card p-3 sm:p-4 border border-cyan-500/20 flex flex-wrap items-center justify-between gap-3 text-xs font-mono">
           <div className="flex flex-wrap items-center gap-3 sm:gap-6">
             {/* Realized PnL Metric */}
@@ -745,46 +688,36 @@ export default function CyberPulseNexusApp() {
                 <span className="text-[10px] text-slate-400 uppercase block">
                   {isAr ? 'الأرباح والخسائر المحققة' : 'Realized Profit / Loss'}
                 </span>
-                <span className={`text-base sm:text-lg font-bold font-mono tabular-nums ${(subWalletState?.realizedProfit ?? 0) >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
-                  {(subWalletState?.realizedProfit ?? 0) >= 0 ? '+' : ''}${(subWalletState?.realizedProfit ?? 0).toFixed(2)} USDT
+                <span className={`text-base sm:text-lg font-bold font-mono tabular-nums ${accountState.realizedPnl >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
+                  {accountState.realizedPnl >= 0 ? '+' : ''}${accountState.realizedPnl.toFixed(2)} USDT
                 </span>
               </div>
             </div>
 
-            {/* Sub-Wallet Equity & Growth ROI */}
+            {/* Live account equity */}
             <div className="flex items-center gap-2.5 border-r sm:border-r-0 sm:border-l border-white/10 px-0 sm:px-4">
               <div className="w-8 h-8 rounded-lg bg-cyan-500/10 border border-cyan-500/30 flex items-center justify-center text-cyan-400">
-                <Wallet className="w-4 h-4" />
+                <TrendingUp className="w-4 h-4" />
               </div>
               <div>
-                <div className="flex items-center gap-1.5">
-                  <span className="text-[10px] text-slate-400 uppercase block">
-                    {isAr ? 'المحفظة الثانوية ($25)' : 'Sub-Wallet Slice ($25)'}
-                  </span>
-                  <span className={`text-[9px] px-1 rounded font-bold tabular-nums ${(subWalletState?.growthPct ?? 0) >= 0 ? 'bg-emerald-500/10 text-emerald-400' : 'bg-rose-500/10 text-rose-400'}`}>
-                    {(subWalletState?.growthPct ?? 0) >= 0 ? '+' : ''}{(subWalletState?.growthPct ?? 0).toFixed(1)}% ROI
-                  </span>
-                </div>
+                <span className="text-[10px] text-slate-400 uppercase block">
+                  {isAr ? 'رصيد المنصة' : 'Platform Equity'}
+                </span>
                 <span className="text-base sm:text-lg font-bold font-mono text-cyan-300 tabular-nums">
-                  ${(subWalletState?.currentEquity ?? 25.0).toFixed(2)} <span className="text-[10px] text-slate-500 font-normal">/ $25.00</span>
+                  ${accountState.totalEquity.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
                 </span>
               </div>
             </div>
 
-            {/* Win Rate & Trade Stats */}
+            {/* Open positions */}
             <div className="hidden sm:flex items-center gap-2.5 border-l border-white/10 px-4">
               <div>
                 <span className="text-[10px] text-slate-400 uppercase block">
-                  {isAr ? 'معدل نجاح الصفقات' : 'Realized Win Rate'}
+                  {isAr ? 'المراكز المفتوحة' : 'Open Positions'}
                 </span>
-                <div className="flex items-center gap-2">
-                  <span className="text-sm font-bold font-mono text-white tabular-nums">
-                    {(subWalletState?.winRate ?? 0).toFixed(0)}%
-                  </span>
-                  <span className="text-[10px] text-slate-400 tabular-nums">
-                    ({subWalletState?.winningTrades ?? 0} {isAr ? 'ربح' : 'W'} / {subWalletState?.losingTrades ?? 0} {isAr ? 'خسارة' : 'L'})
-                  </span>
-                </div>
+                <span className="text-sm font-bold font-mono text-white tabular-nums">
+                  {accountState.openPositions.length}
+                </span>
               </div>
             </div>
           </div>
@@ -795,24 +728,6 @@ export default function CyberPulseNexusApp() {
               <span>{isAr ? 'الخزينة المحمية:' : 'Master Safe:'}</span>
               <b className="text-slate-200 tabular-nums">${accountState.totalEquity.toFixed(0)}</b>
             </div>
-            <button
-              type="button"
-              onClick={() => {
-                playHoloTone(1150, 0.08);
-                setShowQuantumTrainingModal(true);
-              }}
-              className="px-3 py-1.5 rounded-xl bg-purple-500/15 hover:bg-purple-500/25 border border-purple-400/40 text-purple-300 text-xs font-mono font-semibold transition cursor-pointer flex items-center gap-1.5 shadow-sm"
-            >
-              <Brain className="w-3.5 h-3.5 text-purple-400" />
-              <span>{isAr ? 'تدريب وتكرار الصفقات (200$)' : 'Quant Sandbox ($200)'}</span>
-            </button>
-            <button
-              type="button"
-              onClick={() => setShowSubWalletModal(true)}
-              className="px-3 py-1.5 rounded-xl bg-cyan-500/15 hover:bg-cyan-500/25 border border-cyan-400/40 text-cyan-300 text-xs font-mono font-semibold transition cursor-pointer"
-            >
-              {isAr ? 'إدارة المحفظة' : 'Sub-Wallet'}
-            </button>
           </div>
         </div>
 
@@ -851,8 +766,6 @@ export default function CyberPulseNexusApp() {
 
         {/* HUD TELEMETRY WIDGETS */}
         <HolographicHUDWidgets
-          subWallet={subWalletState}
-          onOpenSubWalletModal={() => setShowSubWalletModal(true)}
           symbol={selectedAsset.symbol}
           price={selectedAsset.price}
           change24h={selectedAsset.change24h}
@@ -872,14 +785,15 @@ export default function CyberPulseNexusApp() {
             setIsRunning(nextState);
             try {
               if (!nextState) {
-                await fetchWithAuth('/api/protected/killswitch/trigger', {
-                  method: 'POST',
-                  body: JSON.stringify({ reason: 'Manual pause by user', level: 'PAUSE_NEW_ORDERS' })
+                await fetchWithAuth('/api/protected/trading/stop', {
+                  method: 'POST'
                 });
               } else {
-                await fetchWithAuth('/api/protected/killswitch/reset', { method: 'POST' });
+                await fetchWithAuth('/api/protected/trading/start', { method: 'POST' });
               }
-            } catch {}
+            } catch {
+              setIsRunning(!nextState);
+            }
           }}
           onExecuteTrade={handleExecuteTrade}
           isExecuting={isExecuting}

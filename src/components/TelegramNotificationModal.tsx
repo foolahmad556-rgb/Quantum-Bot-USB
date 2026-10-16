@@ -181,7 +181,7 @@ export const TelegramNotificationModal: React.FC<TelegramNotificationModalProps>
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 bg-black/80 backdrop-blur-md animate-in fade-in duration-200">
-      <div 
+      <div
         className="w-full max-w-xl rounded-2xl holo-panel border border-[rgba(0,243,255,0.4)] shadow-[0_0_50px_rgba(0,243,255,0.2)] bg-[#030712] overflow-hidden flex flex-col max-h-[92vh]"
         onClick={(e) => e.stopPropagation()}
       >
@@ -245,8 +245,8 @@ export const TelegramNotificationModal: React.FC<TelegramNotificationModalProps>
                 </span>
               </div>
               <span className={`px-2 py-0.5 rounded text-[10px] font-bold border flex items-center gap-1 ${
-                isBotActive 
-                  ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/40' 
+                isBotActive
+                  ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/40'
                   : 'bg-amber-500/20 text-amber-300 border-amber-500/40'
               }`}>
                 <span className={`w-1.5 h-1.5 rounded-full ${isBotActive ? 'bg-emerald-400 animate-ping' : 'bg-amber-400'}`} />
@@ -271,8 +271,8 @@ export const TelegramNotificationModal: React.FC<TelegramNotificationModalProps>
 
             <p className="text-[10px] text-gray-400 leading-relaxed">
               {isAr
-                ? '💡 يقوم البوت تلقائياً وبشكل دوري كل نصف ساعة بإرسال إشارة لحساب تليجرام توضح هل البوت يعمل 24/7 أو متوقف، مع ملخص للأرباح المحققة، رصيد المحفظة الثانوية ($25)، وأسعار العملات.'
-                : '💡 The bot automatically sends a status beacon every half hour verifying whether it is actively trading or halted, with realized PnL and sub-wallet balances.'}
+                ? '💡 يقوم البوت تلقائياً وبشكل دوري كل نصف ساعة بإرسال حالة التشغيل مع الأرباح المحققة ورصيد الحساب الحقيقي وأسعار السوق.'
+                : '💡 The bot automatically sends a status beacon every half hour with live account equity, realized PnL, and market prices.'}
             </p>
 
             {/* Test Send Button */}
@@ -284,8 +284,8 @@ export const TelegramNotificationModal: React.FC<TelegramNotificationModalProps>
             >
               <Zap className={`w-4 h-4 text-cyan-400 ${isSendingTest ? 'animate-spin' : ''}`} />
               <span>
-                {isSendingTest 
-                  ? (isAr ? 'جاري إرسال إشعار الفحص النصف ساعوي...' : 'Dispatching Heartbeat Test...') 
+                {isSendingTest
+                  ? (isAr ? 'جاري إرسال إشعار الفحص النصف ساعوي...' : 'Dispatching Heartbeat Test...')
                   : (isAr ? '📡 إرسال إشعار فحص فوري لتليجرام الآن' : 'Send Test Heartbeat to Telegram Now')}
               </span>
             </button>

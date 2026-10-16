@@ -185,21 +185,21 @@ app.get('/api/live-status', async (_req: Request, res: Response) => {
   try {
     const uds = getAny(pipeline, ['userDataStream', 'getUserDataStream']);
     const gw = getAny(pipeline, ['orderGateway', 'getOrderGateway']);
-    const sub = getAny(pipeline, ['subWalletManager', 'getSubWalletManager']);
     const ks = getAny(pipeline, ['killSwitch', 'getKillSwitch']);
 
     const balance = uds && typeof uds.getBalance === 'function' ? uds.getBalance() : null;
     const positions = uds && typeof uds.getPositions === 'function' ? uds.getPositions() : [];
     const orders = gw && typeof gw.getOrders === 'function' ? gw.getOrders() : [];
-    const equity = sub && typeof sub.getCurrentEquity === 'function' ? sub.getCurrentEquity() : null;
     const ksLevel = ks && typeof ks.getLevel === 'function' ? ks.getLevel() : ks?.level ?? 'NORMAL';
 
     res.json({
       success: true,
       isRunning: !!pipeline.isRunning,
-      executionMode: pipeline.config?.executionMode ?? process.env.EXECUTION_MODE ?? 'TESTNET_EXCHANGE',
+      executionMode: (() => {
+        const mode = String(pipeline.config?.executionMode ?? process.env.EXECUTION_MODE ?? '').trim().toUpperCase();
+        return ['PAPER', 'PAPER_TRADING', 'TESTNET', 'TESTNET_EXCHANGE', 'LIVE'].includes(mode) ? mode : 'UNKNOWN';
+      })(),
       balance,
-      equity,
       positions: Array.isArray(positions) ? positions : [],
       orders: Array.isArray(orders) ? orders : [],
       killSwitchLevel: ksLevel,
@@ -207,6 +207,24 @@ app.get('/api/live-status', async (_req: Request, res: Response) => {
     });
   } catch (e: any) {
     fail(res, 500, e?.message || 'live-status failed');
+  }
+});
+
+app.post('/api/protected/trading/start', requireAuth, async (_req: Request, res: Response) => {
+  try {
+    await pipeline.startAutonomousTrading();
+    return ok(res, { isRunning: true });
+  } catch (e: any) {
+    return fail(res, 409, e?.message || 'trading start failed');
+  }
+});
+
+app.post('/api/protected/trading/stop', requireAuth, async (_req: Request, res: Response) => {
+  try {
+    await pipeline.stop();
+    return ok(res, { isRunning: false });
+  } catch (e: any) {
+    return fail(res, 500, e?.message || 'trading stop failed');
   }
 });
 
@@ -378,6 +396,10 @@ app.post('/api/protected/manual-order', requireAuth, async (req: Request, res: R
     }
     const qty = Number(quantity);
     if (!Number.isFinite(qty) || qty <= 0) return fail(res, 400, 'quantity must be > 0');
+    if (pipeline.orderGateway?.getExecutionMode?.() === 'LIVE' &&
+        String(process.env.CONFIRM_LIVE_TRADING).toLowerCase() !== 'true') {
+      return fail(res, 409, 'LIVE manual orders require CONFIRM_LIVE_TRADING=true');
+    }
 
     const gw = getAny(pipeline, ['orderGateway', 'getOrderGateway']);
     if (gw && typeof gw.submitOrder === 'function') {

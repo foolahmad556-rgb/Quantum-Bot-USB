@@ -176,7 +176,7 @@ export interface BoardConfig {
 export const DEFAULT_BOARD_CONFIG: BoardConfig = {
   learningRate: 0.05,
   maxRiskPerTrade: 0.02,
-  capital: 25.0, // Default to $25 sub-wallet
+  capital: 0,
   maxWfGap: 0.12,
   minOosRatio: 0.55,
   maxCrossAssetStd: 0.65,

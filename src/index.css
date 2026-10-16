@@ -5,7 +5,7 @@
   --bg-secondary: #0c111a;
   --bg-tertiary: #131b27;
   --bg-elevated: #182333;
-  
+
   --border-subtle: rgba(255, 255, 255, 0.08);
   --border-active: rgba(6, 182, 212, 0.4);
   --border-glow: rgba(6, 182, 212, 0.2);
@@ -109,6 +109,56 @@ body {
 @media (min-width: 1024px) {
   .pb-mobile-nav {
     padding-bottom: 2.5rem;
+  }
+}
+
+/* Lightweight performance-driven HUD motion */
+.hud-grid > .quant-card,
+.hud-grid > div:not(.sr-only) {
+  will-change: border-color, transform;
+  transition: border-color 240ms ease, box-shadow 240ms ease;
+}
+
+.hud-grid.hud-positive > div:not(.sr-only) {
+  border-color: rgba(16, 185, 129, 0.28);
+}
+
+.hud-grid.hud-negative > div:not(.sr-only) {
+  border-color: rgba(244, 63, 94, 0.32);
+}
+
+.hud-grid.hud-active > div:not(.sr-only)::after {
+  content: '';
+  position: absolute;
+  inset-inline-end: 0.75rem;
+  top: 0.75rem;
+  width: 0.35rem;
+  height: 0.35rem;
+  border-radius: 999px;
+  background: var(--accent-emerald);
+  opacity: 0.7;
+  animation: hudPulse 2.4s ease-in-out infinite;
+}
+
+@keyframes hudPulse {
+  50% { opacity: 0.25; transform: scale(0.72); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+@media (max-width: 768px) {
+  .hud-grid > div:not(.sr-only) {
+    min-width: 0;
+  }
+  .hud-grid.hud-active > div:not(.sr-only)::after {
+    animation: none;
   }
 }
 

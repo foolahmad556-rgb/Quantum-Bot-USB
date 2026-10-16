@@ -3,11 +3,8 @@
  * ====================================================================
  * Micro-Quant Sub-Portfolio & Isolated Capital Quarantine Engine
  * ====================================================================
- * - Quarantines $25.00 from Master Testnet Wallet for Micro-Trading
- * - Master Wallet is completely untouched and locked against over-exposure
- * - Auto-compounds exclusively from accumulated profits
- * - Persists state in SQLite / Cloud DB so balance doesn't reset on restarts
- * - Only resets if wallet is depleted (currentEquity < $1.00) or requested
+ * Legacy manager retained for migration compatibility.
+ * Production UI and execution use live primary exchange account state.
  * ====================================================================
  */
 
@@ -144,7 +141,10 @@ export class SubWalletManager extends EventEmitter {
     this.emit('update', this.state);
   }
 
-  public resetSubWallet(amount: number = 25.0): SubWalletState {
+  public resetSubWallet(amount: number): SubWalletState {
+    if (!Number.isFinite(amount) || amount <= 0) {
+      throw new Error('Sub-wallet reset requires positive capital from authoritative account state.');
+    }
     this.state = this.createNewState(amount);
     console.log(`🔄 [SUB-WALLET] Manually re-allocated Sub-Wallet capital: $${amount.toFixed(2)}`);
     this.emit('update', this.state);

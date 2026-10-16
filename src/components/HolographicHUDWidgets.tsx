@@ -3,15 +3,14 @@
  * Floating cyber cards, depth-of-field frosted-glass panels,
  * holographic dials, neon gauges, and real-time execution buttons.
  * 
- * 100% Real-Time Account & Risk Metrics strictly connected to Sub-Wallet & Binance Exchange:
- * - Realized Profits & Losses (الأرباح والخسائر المحققة)
- * - Sub-Wallet ($25 Quarantine Slice) Capital & Growth ROI
+ * Real-time account and risk metrics connected to Binance exchange state.
+ * - Realized profits and losses
  * - Floating Unrealized PnL on Active Positions
  * - Mobile-optimized layout with reduced animation overhead to eliminate lag during tab navigation.
  */
 
 import React from 'react';
-import { SubWalletState } from '../risk/SubWalletManager';
+
 import {
   Zap,
   TrendingUp,
@@ -26,6 +25,7 @@ import {
   Layers,
   Crosshair,
   Wallet,
+
   PieChart,
   Percent,
   CheckCircle2,
@@ -44,8 +44,7 @@ interface HolographicHUDWidgetsProps {
   dailyProfit: number;
   dailyProfitPct: number;
   openPositionsCount: number;
-  subWallet?: SubWalletState | null;
-  onOpenSubWalletModal?: () => void;
+
   executionMode: 'TESTNET' | 'LIVE' | 'PAPER';
   isRunning: boolean;
   onToggleBot: () => void;
@@ -66,8 +65,7 @@ export const HolographicHUDWidgets: React.FC<HolographicHUDWidgetsProps> = ({
   dailyProfit,
   dailyProfitPct,
   openPositionsCount,
-  subWallet,
-  onOpenSubWalletModal,
+
   executionMode,
   isRunning,
   onToggleBot,
@@ -77,26 +75,22 @@ export const HolographicHUDWidgets: React.FC<HolographicHUDWidgetsProps> = ({
 }) => {
   const isAr = lang === 'ar';
 
-  // Sub-Wallet values
-  const subBase = subWallet?.initialAllocation ?? 25.0;
-  const subEquity = subWallet?.currentEquity ?? subBase;
-  const subRealizedPnl = subWallet?.realizedProfit ?? realizedPnl ?? 0.0;
-  const subUnrealizedPnl = subWallet?.unrealizedPnl ?? unrealizedPnl ?? 0.0;
-  const subGrowthPct = subWallet?.growthPct ?? (subEquity > 0 && subBase > 0 ? ((subEquity - subBase) / subBase) * 100 : 0);
-  const totalTrades = subWallet?.totalTrades ?? 0;
-  const winningTrades = subWallet?.winningTrades ?? 0;
-  const losingTrades = subWallet?.losingTrades ?? 0;
-  const winRate = subWallet?.winRate ?? (totalTrades > 0 ? (winningTrades / totalTrades) * 100 : 0);
+  const accountRealizedPnl = realizedPnl;
+  const accountUnrealizedPnl = unrealizedPnl;
 
-  const isRealizedPositive = subRealizedPnl >= 0;
-  const isUnrealizedPositive = subUnrealizedPnl >= 0;
+  const isRealizedPositive = accountRealizedPnl >= 0;
+  const isUnrealizedPositive = accountUnrealizedPnl >= 0;
+  const performanceTone = dailyProfitPct > 0.05 ? 'hud-positive' : dailyProfitPct < -0.05 ? 'hud-negative' : 'hud-neutral';
+  const activityTone = openPositionsCount > 0 ? 'hud-active' : 'hud-idle';
 
   return (
-    <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 sm:gap-4">
-      {/* 🌟 WIDGET 1: REALIZED PROFITS & SUB-WALLET */}
+    <div className={`hud-grid grid grid-cols-2 lg:grid-cols-4 gap-3 sm:gap-4 ${performanceTone} ${activityTone}`}>
+      <div className="sr-only" aria-live="polite">
+        {isAr ? `حالة الأداء: ${performanceTone === 'hud-positive' ? 'إيجابي' : performanceTone === 'hud-negative' ? 'سلبي' : 'محايد'}` : `Performance: ${performanceTone.replace('hud-', '')}`}
+      </div>
+      {/* Live account realized PnL */}
       <div 
-        onClick={onOpenSubWalletModal}
-        className="p-3.5 sm:p-5 rounded-2xl quant-card quant-card-interactive cursor-pointer border border-cyan-500/20 hover:border-cyan-400/40 relative overflow-hidden"
+        className="p-3.5 sm:p-5 rounded-2xl quant-card border border-cyan-500/20 relative overflow-hidden"
       >
         <div className="flex items-center justify-between pb-2 border-b border-white/5">
           <div className="flex items-center gap-2">
@@ -108,12 +102,12 @@ export const HolographicHUDWidgets: React.FC<HolographicHUDWidgetsProps> = ({
                 {isAr ? 'الأرباح المحققة' : 'Realized Profit'}
               </span>
               <span className="text-[9px] text-slate-400 block tabular-nums">
-                {isAr ? `المحفظة الثانوية ($${subBase.toFixed(0)})` : `Sub-Wallet ($${subBase.toFixed(0)})`}
+                {isAr ? 'حساب المنصة' : 'Platform account'}
               </span>
             </div>
           </div>
           <span className="text-[10px] font-mono text-cyan-400 bg-cyan-500/10 px-2 py-0.5 rounded border border-cyan-500/20">
-            ${subEquity.toFixed(1)}
+            ${equity.toFixed(2)}
           </span>
         </div>
 
@@ -121,21 +115,21 @@ export const HolographicHUDWidgets: React.FC<HolographicHUDWidgetsProps> = ({
           <div className="flex items-baseline justify-between">
             <div className="flex items-baseline gap-1">
               <span className={`text-xl sm:text-2xl font-mono font-bold tracking-tight tabular-nums ${isRealizedPositive ? 'text-emerald-400' : 'text-rose-400'}`}>
-                {isRealizedPositive ? '+' : ''}${subRealizedPnl.toFixed(2)}
+                {isRealizedPositive ? '+' : ''}${accountRealizedPnl.toFixed(2)}
               </span>
               <span className="text-[10px] font-mono text-slate-500">USDT</span>
             </div>
             <span className={`text-xs font-mono font-semibold px-1.5 py-0.5 rounded tabular-nums ${
-              subGrowthPct >= 0 ? 'bg-emerald-500/10 text-emerald-400' : 'bg-rose-500/10 text-rose-400'
+              dailyProfitPct >= 0 ? 'bg-emerald-500/10 text-emerald-400' : 'bg-rose-500/10 text-rose-400'
             }`}>
-              {subGrowthPct >= 0 ? '+' : ''}{subGrowthPct.toFixed(1)}%
+              {dailyProfitPct >= 0 ? '+' : ''}{dailyProfitPct.toFixed(1)}%
             </span>
           </div>
 
           <div className="grid grid-cols-2 gap-1 pt-1.5 border-t border-white/5 text-[10px] sm:text-[11px] font-mono">
             <div>
-              <span className="text-[9px] text-slate-400 block">{isAr ? 'رصيد المحفظة:' : 'Sub Equity:'}</span>
-              <span className="font-bold text-cyan-300 tabular-nums">${subEquity.toFixed(2)}</span>
+              <span className="text-[9px] text-slate-400 block">{isAr ? 'الرصيد المتاح:' : 'Available Cash:'}</span>
+              <span className="font-bold text-cyan-300 tabular-nums">${availableCash.toFixed(2)}</span>
             </div>
             <div className="text-right rtl:text-left">
               <span className="text-[9px] text-slate-400 block">{isAr ? 'الخزينة المحمية:' : 'Master Vault:'}</span>
@@ -144,14 +138,14 @@ export const HolographicHUDWidgets: React.FC<HolographicHUDWidgetsProps> = ({
           </div>
 
           <div className="flex items-center justify-between text-[10px] font-mono text-slate-400 pt-0.5">
-            <span className="flex items-center gap-1">
-              <CheckCircle2 className="w-3 h-3 text-emerald-400" /> {isAr ? 'ربح:' : 'W:'} <b className="text-slate-200 tabular-nums">{winningTrades}</b>
-            </span>
-            <span className="flex items-center gap-1">
-              <XCircle className="w-3 h-3 text-rose-400" /> {isAr ? 'خسارة:' : 'L:'} <b className="text-slate-200 tabular-nums">{losingTrades}</b>
+            <span className="tabular-nums">
+              {isAr ? 'اليومي:' : 'Daily:'} <b className="text-cyan-300">{dailyProfitPct.toFixed(1)}%</b>
             </span>
             <span className="tabular-nums">
-              {isAr ? 'فوز:' : 'Win:'} <b className="text-cyan-300">{winRate.toFixed(0)}%</b>
+              {isAr ? 'المراكز:' : 'Positions:'} <b className="text-slate-200">{openPositionsCount}</b>
+            </span>
+            <span className="tabular-nums">
+              {isAr ? 'الوضع:' : 'Mode:'} <b className="text-cyan-300">{executionMode}</b>
             </span>
           </div>
         </div>
@@ -159,7 +153,7 @@ export const HolographicHUDWidgets: React.FC<HolographicHUDWidgetsProps> = ({
         <div className="w-full h-1 bg-white/5 rounded-full mt-2.5 overflow-hidden">
           <div
             className="h-full bg-cyan-400 transition-all duration-300"
-            style={{ width: `${Math.min(100, Math.max(10, (subEquity / subBase) * 50))}%` }}
+            style={{ width: `${equity > 0 ? Math.min(100, Math.max(10, (availableCash / equity) * 100)) : 0}%` }}
           />
         </div>
       </div>
@@ -187,7 +181,7 @@ export const HolographicHUDWidgets: React.FC<HolographicHUDWidgetsProps> = ({
           <div className="flex items-baseline justify-between">
             <div className="flex items-baseline gap-1">
               <span className={`text-xl sm:text-2xl font-mono font-bold tracking-tight tabular-nums ${isUnrealizedPositive ? 'text-emerald-400' : 'text-rose-400'}`}>
-                {isUnrealizedPositive ? '+' : ''}${subUnrealizedPnl.toFixed(2)}
+                {isUnrealizedPositive ? '+' : ''}${accountUnrealizedPnl.toFixed(2)}
               </span>
               <span className="text-[10px] font-mono text-slate-500">USDT</span>
             </div>
