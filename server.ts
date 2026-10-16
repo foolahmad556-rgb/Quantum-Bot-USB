@@ -32,10 +32,8 @@ const serverDir: string =
 
 import { TradingPipeline } from './src/app/TradingPipeline.ts';
 import { BoardOfDirectorsEngine } from './src/strategies/BoardOfDirectorsEngine.ts';
-import { QuantumTrainingSimulator } from './src/strategies/QuantumTrainingSimulator.ts';
+
 import { TelegramService } from './src/services/TelegramService.ts';
-import { DatabaseService } from './src/storage/DatabaseService.ts';
-import { CloudDatabaseService } from './src/storage/CloudDatabaseService.ts';
 import { D1DatabaseService } from './src/storage/D1DatabaseService.ts';
 import { BacktestEngine } from './src/backtest/BacktestEngine.ts';
 
@@ -106,12 +104,12 @@ app.use((req: Request, res: Response, next: NextFunction) => {
 const telegramService = new TelegramService();
 const pipeline: any = new TradingPipeline(telegramService as any);
 const board: any = BoardOfDirectorsEngine.getInstance();
-const simulator: any = QuantumTrainingSimulator.getInstance();
 
-// Persistent storage: Cloud (Firestore + Cloud SQL) when credentials exist,
-// otherwise local JSON fallback (dev only — Botkeep free tier MUST set cloud env).
-let cloudDb: CloudDatabaseService | null = null;
+
+// Persistent storage: Cloudflare D1 is mandatory for server operation.
+let cloudDb: D1DatabaseService | null = null;
 let cloudStorageOk = false;
+let storageInitError: Error | null = null;
 try {
   console.log(`🔐 D1 env: URL=${process.env.D1_API_URL ? 'set' : 'missing'} SECRET=${process.env.D1_API_SECRET ? 'set' : 'missing'}`);
   if (process.env.STORAGE_BACKEND === 'd1' || process.env.D1_API_URL) {
@@ -120,19 +118,19 @@ try {
     if (typeof maybe === 'function') maybe.call(pipeline, cloudDb);
     cloudStorageOk = true;
     console.log('✅ External storage: Cloudflare D1');
-  } else if (process.env.FIREBASE_CREDENTIALS_JSON && process.env.SQL_HOST) {
-    cloudDb = new CloudDatabaseService();
-    const maybe = (pipeline as any).setDatabase;
-    if (typeof maybe === 'function') maybe.call(pipeline, cloudDb);
-    cloudStorageOk = true;
-    console.log('✅ External storage: Cloud SQL + Firestore');
   } else {
-    console.warn('⚠️ Cloud env missing — using local DatabaseService fallback (dev only).');
+    throw new Error('Cloudflare D1 is required: set STORAGE_BACKEND=d1 and D1_API_URL');
   }
 } catch (e) {
-  console.warn('⚠️ Cloud storage init failed, local fallback:', (e as Error).message);
+  storageInitError = e as Error;
+  console.error('❌ D1 storage initialization failed:', storageInitError.message);
 }
-const localDb = new DatabaseService();
+
+function requireCloudStorage(res: Response): boolean {
+  if (cloudStorageOk && cloudDb) return true;
+  fail(res, 503, `Persistent D1 storage unavailable: ${storageInitError?.message || 'not configured'}`);
+  return false;
+}
 
 /* ----------------------------- auth -------------------------------- */
 // Protected routes: OPERATOR_SECRET match (VPS/headless) OR Firebase ID token.
@@ -168,7 +166,7 @@ app.get('/api/health', (_req: Request, res: Response) => {
     uptimeSec: Math.floor((Date.now() - bootTime) / 1000),
     version: process.env.npm_package_version || '1.0.0',
     tradingRunning: !!pipeline.isRunning,
-    storage: cloudStorageOk && (process.env.STORAGE_BACKEND?.trim().toLowerCase() === 'd1' || !!process.env.D1_API_URL) ? 'cloudflare-d1' : cloudStorageOk ? 'cloud (firestore+sql)' : 'local-fallback',
+    storage: cloudStorageOk ? 'cloudflare-d1' : 'unavailable',
     autostart: AUTOSTART,
   });
 });
@@ -273,57 +271,7 @@ app.get('/api/board/sessions', async (_req: Request, res: Response) => {
   ok(res, { sessions: s.called ? s.value : [] });
 });
 
-/* ------------------------------------------------------------------ */
-/* quantum training simulator                                          */
-/* ------------------------------------------------------------------ */
 
-async function quantumStatusPayload() {
-  const wallet = await callAny(simulator, ['getWalletState', 'getWallet', 'getState']);
-  const trades = await callAny(simulator, ['getRecentTrades', 'getTrades']);
-  const policy = await callAny(simulator, ['getActivePolicy', 'getPolicy']);
-  const quota = await callAny(pipeline, ['getBinanceQuotaMetrics', 'getQuota']);
-  return {
-    wallet: wallet.called ? wallet.value : null,
-    recentTrades: trades.called ? trades.value : [],
-    activePolicy: policy.called ? policy.value : null,
-    binanceQuota: quota.called ? quota.value : null,
-  };
-}
-
-app.get('/api/quantum-training/status', async (_req: Request, res: Response) => {
-  try {
-    ok(res, await quantumStatusPayload());
-  } catch (e: any) {
-    fail(res, 500, e?.message || 'quantum status failed');
-  }
-});
-
-app.post('/api/quantum-training/batch', async (req: Request, res: Response) => {
-  try {
-    const count = Math.min(Math.max(Number(req.body?.count) || 25, 1), 200);
-    return fail(res, 410, 'Synthetic quantum training disabled; use Binance market data and exchange execution.');
-  } catch (e: any) {
-    fail(res, 500, e?.message || 'batch training failed');
-  }
-});
-
-app.post('/api/quantum-training/toggle-auto', async (req: Request, res: Response) => {
-  try {
-    const r = await callAny(simulator, ['toggleAutoTraining', 'setAutoTraining', 'setAuto'], [req.body?.enable]);
-    const payload = await quantumStatusPayload().catch(() => ({}));
-    ok(res, { toggled: r.called, ...(payload as object) });
-  } catch (e: any) {
-    fail(res, 500, e?.message || 'toggle-auto failed');
-  }
-});
-
-app.post('/api/quantum-training/reset', async (req: Request, res: Response) => {
-  try {
-    return fail(res, 410, 'Synthetic wallet reset disabled; balance must come from Binance.');
-  } catch (e: any) {
-    fail(res, 500, e?.message || 'quantum reset failed');
-  }
-});
 
 /* ------------------------------------------------------------------ */
 /* telegram                                                            */
@@ -404,6 +352,7 @@ app.post('/webhook/telegram', async (req: Request, res: Response) => {
 
 app.get('/api/protected/order-history', requireAuth, async (req: Request, res: Response) => {
   try {
+    if (!requireCloudStorage(res)) return;
     const limit = Math.min(Number(req.query.limit) || 200, 1000);
     let orders: any[] = [];
     if (cloudDb) {
@@ -414,15 +363,6 @@ app.get('/api/protected/order-history', requireAuth, async (req: Request, res: R
         /* fall through */
       }
     }
-    if (!orders.length) {
-      try {
-        const all = await (localDb as any).getAllTrades();
-        orders = Array.isArray(all) ? all : [];
-      } catch {
-        const gw = getAny(pipeline, ['orderGateway', 'getOrderGateway']);
-        if (gw && typeof gw.getOrders === 'function') orders = gw.getOrders();
-      }
-    }
     ok(res, { orders: orders.slice(-limit).reverse() });
   } catch (e: any) {
     fail(res, 500, e?.message || 'order-history failed');
@@ -431,6 +371,7 @@ app.get('/api/protected/order-history', requireAuth, async (req: Request, res: R
 
 app.post('/api/protected/manual-order', requireAuth, async (req: Request, res: Response) => {
   try {
+    if (!requireCloudStorage(res)) return;
     const { symbol, side, type, quantity, price } = req.body || {};
     if (typeof symbol !== 'string' || (side !== 'BUY' && side !== 'SELL')) {
       return fail(res, 400, 'Body requires { symbol, side: BUY|SELL, quantity, [price] }');
@@ -447,22 +388,10 @@ app.post('/api/protected/manual-order', requireAuth, async (req: Request, res: R
         quantity: qty,
         ...(price !== undefined ? { price: Number(price) } : {}),
       });
-      try {
-        const store = cloudDb || (localDb as any);
-        await store.saveTrade?.({ symbol, side, price: Number(price) || 0, quantity: qty, status: 'SUBMITTED', strategyId: 'MANUAL_UI' } as any);
-      } catch {
-        /* best effort */
-      }
+      await cloudDb?.saveTrade({ symbol, side, price: Number(price) || 0, quantity: qty, status: 'SUBMITTED', strategyId: 'MANUAL_UI' } as any);
       return ok(res, { order, executed: true });
     }
-    // Engine gateway unavailable (booting): record intent externally, execute on next cycle.
-    try {
-      const store = cloudDb || (localDb as any);
-      await store.saveSignal?.({ symbol, action: `MANUAL_${side}`, price: Number(price) || 0, confidence: 1 } as any);
-    } catch {
-      /* best effort */
-    }
-    return ok(res, { executed: false, recorded: true, note: 'Gateway unavailable — intent stored externally.' });
+    return fail(res, 503, 'Order gateway unavailable');
   } catch (e: any) {
     fail(res, 500, e?.message || 'manual-order failed');
   }
@@ -520,9 +449,7 @@ app.post('/api/protected/killswitch/trigger', requireAuth, async (req: Request, 
 app.post('/api/trades/reset-and-realign', requireAuth, async (_req: Request, res: Response) => {
   const r = await callAny(pipeline, ['resetAndRealignTrades', 'realignTrades', 'syncTradesWithExchange']);
   if (r.called) return ok(res, { result: r.value ?? null });
-  const sub = getAny(pipeline, ['subWalletManager', 'getSubWalletManager']);
-  const s2 = await callAny(sub, ['syncWithTrades'], [[]]);
-  ok(res, { realigned: s2.called });
+  ok(res, { realigned: false });
 });
 
 app.post('/api/backtest/run', requireAuth, async (req: Request, res: Response) => {
@@ -535,25 +462,14 @@ app.post('/api/backtest/run', requireAuth, async (req: Request, res: Response) =
   }
 });
 
-// Sub-wallet state (read-only; reset is protected below).
-app.get('/api/sub-wallet', async (_req: Request, res: Response) => {
-  const sub = getAny(pipeline, ['subWalletManager', 'getSubWalletManager']);
-  const state = await callAny(sub, ['getState', 'getSubWalletState']);
-  ok(res, { wallet: state.called ? state.value : null });
-});
 
-app.post('/api/protected/sub-wallet/reset', requireAuth, async (req: Request, res: Response) => {
-  const sub = getAny(pipeline, ['subWalletManager', 'getSubWalletManager']);
-  const r = await callAny(sub, ['resetSubWallet', 'reset'], [Number(req.body?.amount) || 25]);
-  ok(res, { wallet: r.called ? r.value : null });
-});
 
 // JSON snapshot export (lightweight — no zip dep on free tier).
 app.get('/api/download-zip', async (_req: Request, res: Response) => {
   try {
     const payload = {
       exportedAt: new Date().toISOString(),
-      status: await quantumStatusPayload().catch(() => null),
+      status: null,
     };
     res.header('Content-Disposition', 'attachment; filename="quantum-backup.json"');
     res.json(payload);
@@ -613,7 +529,7 @@ app.use('/api/', (_req: Request, res: Response) => fail(res, 404, 'unknown api r
 
 app.listen(PORT, '0.0.0.0', async () => {
   console.log(`🚀 Quantum Bot server listening on 0.0.0.0:${PORT}`);
-  console.log(`   storage=${cloudStorageOk && (process.env.STORAGE_BACKEND?.trim().toLowerCase() === 'd1' || !!process.env.D1_API_URL) ? 'cloudflare-d1' : cloudStorageOk ? 'cloud (firestore+sql)' : 'LOCAL-FALLBACK'} autostart=${AUTOSTART}`);
+  console.log(`   storage=${cloudStorageOk ? 'cloudflare-d1' : 'UNAVAILABLE'} autostart=${AUTOSTART}`);
   if (!AUTOSTART) {
     console.log('⏸ Trading NOT autostarted (set AUTOSTART_TRADING=true to enable). API + UI live.');
     return;

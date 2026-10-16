@@ -46,12 +46,10 @@ const HolographicTradeHistory = lazy(() => import('./components/HolographicTrade
 const HolographicPerformanceHeatmap = lazy(() => import('./components/HolographicPerformanceHeatmap').then((module) => ({ default: module.HolographicPerformanceHeatmap })));
 import type { RealChartPoint } from './components/HolographicDataVizChart';
 import type { HolographicAsset } from './components/HolographicPairSelector';
-import { SubWalletModal } from './components/SubWalletModal';
 import { TelegramNotificationModal } from './components/TelegramNotificationModal';
 import { KeepAliveGuideModal } from './components/KeepAliveGuideModal';
-import { QuantumTrainingModal } from './components/QuantumTrainingModal';
 const BoardOfDirectorsTab = lazy(() => import('./components/BoardOfDirectorsTab').then((module) => ({ default: module.BoardOfDirectorsTab })));
-import { SubWalletState } from './risk/SubWalletManager';
+import type { SubWalletState } from './risk/SubWalletManager';
 import { useAuth } from './contexts/AuthContext.tsx';
 import { LoginView } from './components/LoginView.tsx';
 import { fetchWithAuth } from './lib/api.ts';
@@ -1343,44 +1341,6 @@ export default function CyberPulseNexusApp() {
         BASEL QUANTUM QUANTITATIVE TERMINAL · 100% REAL-TIME BINANCE WEBSOCKET
       </footer>
 
-      {/* MODALS */}
-      <SubWalletModal
-        isOpen={showSubWalletModal}
-        onClose={() => setShowSubWalletModal(false)}
-        subWallet={subWalletState}
-        masterBalance={accountState.totalEquity}
-        lang={lang}
-        onRealignAllTrades={async () => {
-          try {
-            const data = await fetchWithAuth('/api/trades/reset-and-realign', {
-              method: 'POST',
-            });
-            if (data.success) {
-              setAccountState((prev) => ({ ...prev, unrealizedPnl: 0, openPositionsCount: 0 }));
-              setSubWalletState((prev) => prev ? ({ ...prev, currentEquity: 25.0, availableMargin: 25.0, usedMargin: 0, unrealizedPnl: 0 }) : prev);
-            }
-          } catch (e) {
-            console.error('Failed to realign trades:', e);
-          }
-        }}
-        onResetSubWallet={async () => {
-          try {
-            const data = await fetchWithAuth('/api/sub-wallet/reset', {
-              method: 'POST',
-              body: JSON.stringify({ amount: 25.0 })
-            });
-            if (data.boardOfDirectors) {
-              setBoardData(data.boardOfDirectors);
-            }
-            if (data.subWallet) {
-              setSubWalletState(data.subWallet);
-            }
-          } catch (e) {
-            console.error('Failed to reset sub-wallet:', e);
-          }
-        }}
-      />
-
       <TelegramNotificationModal
         isOpen={showTelegramModal}
         onClose={() => setShowTelegramModal(false)}
@@ -1395,14 +1355,6 @@ export default function CyberPulseNexusApp() {
         playTone={playHoloTone}
       />
 
-      {/* 🎓 Quantum Board of Directors $200 Training Simulator Modal */}
-      <QuantumTrainingModal
-        isOpen={showQuantumTrainingModal}
-        onClose={() => setShowQuantumTrainingModal(false)}
-        lang={lang}
-        playTone={playHoloTone}
-        onRefreshBoard={fetchLiveServerStatus}
-      />
     </div>
   );
 }

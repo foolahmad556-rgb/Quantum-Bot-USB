@@ -53,9 +53,9 @@ export const NexusHUD: React.FC<NexusHUDProps> = React.memo(({
   const [showWalletModal, setShowWalletModal] = useState<boolean>(false);
   const [showPnlModal, setShowPnlModal] = useState<boolean>(false);
 
-  const walletVal = balance?.totalEquity || 114820.45;
-  const pnlPct = balance?.dailyPnlPct || 14.82;
-  const dailyPnl = balance?.dailyPnl || 1702.40;
+  const walletVal = balance?.totalEquity ?? 0;
+  const pnlPct = balance?.dailyPnlPct ?? 0;
+  const dailyPnl = balance?.dailyPnl ?? 0;
   const isPnlPositive = dailyPnl >= 0;
 
   const tierInfo = getAccountTier(walletVal, isAr);
@@ -66,12 +66,12 @@ export const NexusHUD: React.FC<NexusHUDProps> = React.memo(({
 
   return (
     <>
-      <header 
+      <header
         className="sticky top-0 z-40 px-3 sm:px-6 py-2.5 sm:py-3 bg-[#04060c]/90 backdrop-blur-xl border-b border-[var(--stroke)] shadow-2xl"
         dir={isAr ? 'rtl' : 'ltr'}
       >
         <div className="max-w-[1720px] mx-auto grid grid-cols-1 md:grid-cols-[auto_1fr_auto] gap-3 md:gap-6 items-center">
-          
+
           {/* 1. Brand Logo with Kinetic Orbit (BASEL ALGOCORE_) */}
           <div className="flex items-center justify-between md:justify-start gap-3">
             <div className="flex items-center gap-3">
@@ -105,13 +105,13 @@ export const NexusHUD: React.FC<NexusHUDProps> = React.memo(({
             </div>
           </div>
 
-          {/* 2. Top Tri-Core Vault Metrics: 
+          {/* 2. Top Tri-Core Vault Metrics:
                  Card 1: Wallet Balance + Account Tier Badge (Clickable)
                  Card 2: Profit & Loss (PnL) (Clickable - Adjacent to Wallet)
                  Card 3: Loss Margin / Risk Cushion
           */}
           <div className="grid grid-cols-3 gap-2 sm:gap-3 max-w-[800px] mx-auto w-full">
-            
+
             {/* Vault Card 1: Wallet Balance & Account Tier */}
             <button
               type="button"
@@ -123,9 +123,9 @@ export const NexusHUD: React.FC<NexusHUDProps> = React.memo(({
                   <span className="w-1 h-1 rounded-full bg-[var(--cyan)] shadow-[0_0_6px_var(--cyan)]" />
                   <span>{isAr ? 'المحفظة' : 'WALLET'}</span>
                 </div>
-                
+
                 {/* Account Tier Badge */}
-                <span 
+                <span
                   className="px-1.5 py-0.5 rounded text-[7.5px] sm:text-[8.5px] font-mono font-bold uppercase truncate max-w-[85px] sm:max-w-[110px]"
                   style={{ backgroundColor: tierInfo.bg, color: tierInfo.color, border: `1px solid ${tierInfo.border}` }}
                 >
@@ -146,9 +146,9 @@ export const NexusHUD: React.FC<NexusHUDProps> = React.memo(({
               </div>
 
               <div className="h-[2px] sm:h-[3px] mt-1.5 bg-white/5 rounded-full overflow-hidden">
-                <div 
-                  className="h-full bg-[var(--cyan)] shadow-[0_0_8px_var(--cyan)] transition-all duration-700" 
-                  style={{ width: `${walletBarWidth}%` }} 
+                <div
+                  className="h-full bg-[var(--cyan)] shadow-[0_0_8px_var(--cyan)] transition-all duration-700"
+                  style={{ width: `${walletBarWidth}%` }}
                 />
               </div>
             </button>
@@ -184,9 +184,9 @@ export const NexusHUD: React.FC<NexusHUDProps> = React.memo(({
               </div>
 
               <div className="h-[2px] sm:h-[3px] mt-1.5 bg-white/5 rounded-full overflow-hidden">
-                <div 
+                <div
                   className={`h-full shadow-[0_0_8px_currentColor] transition-all duration-700 ${isPnlPositive ? 'bg-[var(--lime)] text-[var(--lime)]' : 'bg-[var(--magenta)] text-[var(--magenta)]'}`}
-                  style={{ width: `${profitMarginWidth}%` }} 
+                  style={{ width: `${profitMarginWidth}%` }}
                 />
               </div>
             </button>
@@ -197,7 +197,7 @@ export const NexusHUD: React.FC<NexusHUDProps> = React.memo(({
                 <span className="w-1 h-1 rounded-full bg-[var(--magenta)] shadow-[0_0_6px_var(--magenta)]" />
                 <span>{isAr ? 'هامش الخسارة' : 'LOSS MARGIN'}</span>
               </div>
-              
+
               <div className="font-mono font-bold text-xs sm:text-base text-[var(--magenta)] leading-tight flex items-baseline gap-0.5">
                 <span className="text-[0.85em]">▼</span>
                 <span>{drawdownPct.toFixed(2)}</span>
@@ -209,9 +209,9 @@ export const NexusHUD: React.FC<NexusHUDProps> = React.memo(({
               </div>
 
               <div className="h-[2px] sm:h-[3px] mt-1.5 bg-white/5 rounded-full overflow-hidden">
-                <div 
-                  className="h-full bg-[var(--magenta)] shadow-[0_0_8px_var(--magenta)] transition-all duration-700" 
-                  style={{ width: `${lossBarWidth}%` }} 
+                <div
+                  className="h-full bg-[var(--magenta)] shadow-[0_0_8px_var(--magenta)] transition-all duration-700"
+                  style={{ width: `${lossBarWidth}%` }}
                 />
               </div>
             </div>
@@ -220,10 +220,10 @@ export const NexusHUD: React.FC<NexusHUDProps> = React.memo(({
 
           {/* 3. Controls (Theme, Motion, Lang, Master Bot & Halt) */}
           <div className="flex items-center justify-between md:justify-end gap-2 sm:gap-3">
-            
+
             {/* Control Capsule */}
             <div className="flex items-center gap-1 p-1 rounded-full border border-[var(--stroke)] bg-[var(--panel-bg)]">
-              
+
               {/* Theme Cycle Button */}
               <button
                 type="button"

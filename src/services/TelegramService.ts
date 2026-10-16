@@ -37,8 +37,15 @@ export class TelegramService {
     private backoffUntil: number = 0;
     private lastSendTime: number = 0;
     private recentMessageHashes = new Map<string, number>();
+    private categoryLastSent = new Map<string, number>();
     private readonly MIN_INTERVAL_MS = 1250; // Respect Telegram's 1 msg/sec limit
     private readonly MAX_QUEUE_SIZE = 35;
+    private readonly CATEGORY_COOLDOWNS_MS: Record<string, number> = {
+        market: 30 * 60_000,
+        system: 5 * 60_000,
+        heartbeat: 25 * 60_000,
+        info: 60_000
+    };
 
     constructor() {
         this.loadPersistedConfig();
@@ -147,6 +154,15 @@ export class TelegramService {
      */
     public notify(text: string): void {
         void this.enqueueMessage(text);
+    }
+
+    public notifyCategory(category: 'critical' | 'trade' | 'protection' | 'system' | 'market' | 'heartbeat' | 'info', text: string): void {
+        const now = Date.now();
+        const cooldown = this.CATEGORY_COOLDOWNS_MS[category] || 0;
+        const last = this.categoryLastSent.get(category) || 0;
+        if (cooldown > 0 && now - last < cooldown) return;
+        this.categoryLastSent.set(category, now);
+        this.notify(text);
     }
 
     /**

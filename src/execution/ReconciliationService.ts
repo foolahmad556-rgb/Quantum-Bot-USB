@@ -26,7 +26,10 @@ export class ReconciliationService {
     this.userDataStream = userDataStream;
   }
 
-  public runReconciliation(mockExchangePositions?: Map<AssetSymbol, number>): ReconciliationReport {
+  public runReconciliation(exchangePositions: Map<AssetSymbol, number>): ReconciliationReport {
+    if (!(exchangePositions instanceof Map)) {
+      throw new Error('Authoritative exchange positions required for reconciliation');
+    }
     const internalPositions = this.userDataStream.getPositions();
     const discrepancies: ReconciliationReport['discrepancies'] = [];
     let isBalanced = true;
@@ -34,7 +37,7 @@ export class ReconciliationService {
     const checkedSymbols = new Set<AssetSymbol>();
     for (const pos of internalPositions) {
       checkedSymbols.add(pos.symbol);
-      const exchangeSize = mockExchangePositions?.get(pos.symbol) ?? pos.size;
+      const exchangeSize = exchangePositions.get(pos.symbol) ?? 0;
       const drift = Number((pos.size - exchangeSize).toFixed(4));
 
       if (Math.abs(drift) > 0.0001) {
@@ -49,7 +52,7 @@ export class ReconciliationService {
       }
     }
 
-    for (const [symbol, exchangeSize] of mockExchangePositions ?? []) {
+    for (const [symbol, exchangeSize] of exchangePositions) {
       if (checkedSymbols.has(symbol) || Math.abs(exchangeSize) <= 0.0001) continue;
       isBalanced = false;
       discrepancies.push({

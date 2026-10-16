@@ -24,7 +24,6 @@ import {
   ArrowDownRight
 } from 'lucide-react';
 import { QuantumBoardNodeGraph } from './QuantumBoardNodeGraph';
-import { QuantumTrainingModal } from './QuantumTrainingModal';
 import {
   useBoardLearningSync,
   BoardStatusReport,
@@ -50,7 +49,6 @@ export const BoardOfDirectorsTab: React.FC<BoardOfDirectorsTabProps> = ({
   const [activeSubTab, setActiveSubTab] = useState<'node_graph' | 'overview' | 'decision_makers' | 'guards' | 'learning_log' | 'history'>('node_graph');
   const [isConvening, setIsConvening] = useState(false);
   const [simPnlInput, setSimPnlInput] = useState<string>('15.5');
-  const [showTrainingModal, setShowTrainingModal] = useState<boolean>(false);
 
   // React state with full `learn_from_outcome` logic and real-time shifts
   const {
@@ -151,19 +149,8 @@ export const BoardOfDirectorsTab: React.FC<BoardOfDirectorsTabProps> = ({
             </div>
           </div>
 
-          {/* Quick Simulation & Deliberation Controls */}
+          {/* Deliberation controls */}
           <div className="flex flex-wrap items-center gap-2 w-full lg:w-auto justify-end">
-            <button
-              onClick={() => {
-                if (playTone) playTone(1150, 0.08);
-                setShowTrainingModal(true);
-              }}
-              className="px-3.5 py-2 rounded-xl bg-gradient-to-r from-purple-500/20 to-cyan-500/20 hover:from-purple-500/30 hover:to-cyan-500/30 border border-purple-400/40 text-purple-200 text-xs font-mono font-bold transition flex items-center gap-2 cursor-pointer shadow-[0_0_15px_rgba(168,85,247,0.2)]"
-            >
-              <Brain className="w-4 h-4 text-purple-400" />
-              <span>{isAr ? '🎓 محاكي التدريب وتكرار الصفقات (200$ Sandbox)' : '🎓 Open Quant Simulator ($200)'}</span>
-            </button>
-
             <button
               onClick={() => handleSimulateTradeOutcome(12.8, selectedSymbol, 'Manual Dashboard Profit Test')}
               className="px-3 py-2 rounded-xl bg-emerald-500/20 hover:bg-emerald-500/30 border border-emerald-500/40 text-emerald-300 text-xs font-mono font-bold transition flex items-center gap-1.5 cursor-pointer shadow-[0_0_12px_rgba(16,185,129,0.2)]"
@@ -563,14 +550,6 @@ export const BoardOfDirectorsTab: React.FC<BoardOfDirectorsTabProps> = ({
         </div>
       )}
 
-      {/* 🎓 Quantum Board $200 Training Simulator Modal */}
-      <QuantumTrainingModal
-        isOpen={showTrainingModal}
-        onClose={() => setShowTrainingModal(false)}
-        lang={isAr ? 'ar' : 'en'}
-        playTone={playTone}
-        onRefreshBoard={onRefresh}
-      />
     </div>
   );
 };

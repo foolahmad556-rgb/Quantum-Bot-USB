@@ -46,7 +46,6 @@ import { TelegramService } from '../services/TelegramService';
 import { DynamicRiskManager } from '../risk/DynamicRiskManager';
 import { RegimeDetector, RegimeAnalysis } from '../risk/RegimeDetector';
 import { PortfolioSizer } from '../risk/PortfolioSizer';
-import { SubWalletManager, SubWalletState } from '../risk/SubWalletManager';
 import { PartialProfitManager } from '../execution/PartialProfitManager';
 import { ScaleInManager } from '../execution/ScaleInManager';
 import { failClosedOnInvalidEquity, restorePersistentKillSwitch, watchdogMayRestart } from '../execution/ReconciliationSafety';
@@ -80,7 +79,6 @@ export class TradingPipeline {
   private regimeDetector: RegimeDetector;
   private regimeDetectors: Map<AssetSymbol, RegimeDetector> = new Map();
   private portfolioSizer: PortfolioSizer;
-  private subWalletManager: SubWalletManager;
   private partialProfitManager: PartialProfitManager;
   private scaleInManager: ScaleInManager;
   private lastSnapshotTime: number = 0;
@@ -128,7 +126,7 @@ export class TradingPipeline {
 
   constructor(telegramService?: TelegramService) {
     this.config = { ...INITIAL_RUNTIME_CONFIG };
-    
+
     // Read environment configuration
     const rawMode = process.env.EXECUTION_MODE;
     const apiKey = process.env.EXCHANGE_API_KEY || process.env.BINANCE_API_KEY || '';
@@ -144,7 +142,7 @@ export class TradingPipeline {
     this.featureEngine = new FeatureEngine();
     // Never seed balances. Account equity must come from Binance REST/WebSocket only.
     this.userDataStream = new UserDataStream(0);
-    
+
     this.orderGateway = new OrderGateway(this.userDataStream, this.orderBookBuilder, {
       executionMode,
       apiKey,
@@ -205,8 +203,6 @@ export class TradingPipeline {
     );
     this.dynamicRiskManager = new DynamicRiskManager({ zScoreThreshold: -1.6, halfLifeMax: 30 });
     this.regimeDetector = new RegimeDetector();
-    // Sub-wallet equity must be derived from Binance account data, never seeded.
-    this.subWalletManager = new SubWalletManager(0);
     this.portfolioSizer = new PortfolioSizer(this.assetScreener);
     this.partialProfitManager = new PartialProfitManager(this.orderGateway);
     this.scaleInManager = new ScaleInManager(this.orderGateway);
@@ -255,25 +251,25 @@ export class TradingPipeline {
       await this.telegramService.sendMessage(`🚨 <b>تنبيه إدارة المخاطر المتقدمة</b>\n\n⚡ الإجراء المتخذ: <b>${actionAr}</b>\n⚖️ الرافعة المالية المسموحة: <b>${(decision.leverageMultiplier * 100).toFixed(0)}%</b>\n📦 نسبة حجم المركز: <b>${(decision.positionSizeMultiplier * 100).toFixed(0)}%</b>\n\n📋 أسباب التقييم:\n${decision.reasons.map((r: string) => `• ${r}`).join('\n')}`);
     });
 
-    
+
     this.userDataStream.subscribeFills((fill) => {
       // Calculate approximate realized pnl if closing
       if (fill.realizedPnl && fill.realizedPnl !== 0) {
-        this.subWalletManager.recordTradeResult(fill.realizedPnl, fill.commission || 0);
+
       }
     });
 
     this.setupEventForwarding();
     this.initHeartbeatTimer();
     this.db.getAllTrades().then((trades) => {
-      this.subWalletManager.syncWithTrades(trades);
+
     }).catch(() => {});
   }
 
   public async start() {
     if (this.isRunning) return;
     this.isRunning = true;
-    
+
     console.log('🚀 Starting Basel AlgoCore Autonomous Trading System...');
 
     try {
@@ -284,21 +280,13 @@ export class TradingPipeline {
         this.orderGateway.setSymbolFilter(asset.symbol, asset.stepSize, asset.tickSize, asset.minQuantity, asset.minNotional);
       }
 
-      // Synchronize Sub-Wallet with all closed trades recorded in persistent DB
-      try {
-        const allDbTrades = await this.db.getAllTrades();
-        this.subWalletManager.syncWithTrades(allDbTrades);
-      } catch (err) {
-        console.warn('⚠️ Could not sync sub-wallet with DB trades on boot:', err);
-      }
-
       // 1. Load authoritative account state before any trading loop or entry.
       console.log('🌐 Connecting to Market Data & User Data Streams...');
       await this.userDataStream.start();
       await this.reconcileState();
       this.portfolioSizer.updateBalance(this.userDataStream.getBalance().totalEquity);
       this.config.activeSymbols = this.portfolioSizer.getAllowedSymbols();
-      
+
       // 2. Start Market Data Stream
       try {
         await this.marketData.backfillRealCandles(this.config.activeSymbols);
@@ -314,7 +302,7 @@ export class TradingPipeline {
       this.setupIntervals();
 
       console.log('✅ Autonomous System is fully operational!');
-      
+
       // Send a "System Init" signal for immediate UI feedback
       const initSignal: TradingSignal = {
         id: `INIT-${Date.now().toString(36)}`,
@@ -404,7 +392,7 @@ export class TradingPipeline {
           }
 
           // Live Sub-Wallet Floating Equity update
-          this.subWalletManager.updateUnrealizedPnl(totalUnrealizedPnl, totalUsedMargin);
+
         }
       } catch (err) {
         // Silent catch
@@ -452,7 +440,12 @@ export class TradingPipeline {
         }
 
         if (staleCount > 0) {
-          await this.marketData.fetchLiveRestPrices();
+          this.killSwitch.trigger(
+            'HARD_HALT',
+            `Real-time market data stale or unavailable for ${staleCount} active symbol(s)`,
+            'HEALTH_HEARTBEAT_LOSS'
+          );
+          return;
         }
       } catch (e) {
         // Watchdog resilience
@@ -534,7 +527,7 @@ export class TradingPipeline {
           await this.db.closeTrade(t.id, netPnl, exitPrice);
         }
 
-        this.subWalletManager.recordTradeResult(totalPnl);
+
         this.recordTradeReturn(totalPnl);
         this.boardOfDirectors.learnFromOutcome(totalPnl, closedSymbol);
 
@@ -563,13 +556,13 @@ export class TradingPipeline {
       );
 
       const levelAr = evt.toLevel === 'NORMAL' ? 'عادي (مستقر ومفعّل)' : evt.toLevel === 'SOFT_HALT' ? 'توقف وقائي ناعم (إيقاف الأوامر الجديدة)' : 'توقف طارئ كامل (Hard Halt)';
-      this.telegramService.sendMessage(`
+      this.telegramService.notifyCategory(evt.toLevel === 'NORMAL' ? 'info' : 'critical', `
 ⚠️ <b>تنبيه صمام الأمان (KillSwitch)</b>
 ━━━━━━━━━━━━━━━━
 🛡️ الحالة الجديدة: <b>${levelAr}</b>
 📝 السبب: <b>${evt.reason}</b>
 ━━━━━━━━━━━━━━━━
-      `).catch(() => {});
+      `);
 
       // Persist killswitch state to DB
       this.db.saveState('killswitch_state', {
@@ -591,13 +584,13 @@ export class TradingPipeline {
       this.healthMonitor.recordOrder();
       if (ord.status === 'FILLED' || ord.status === 'PARTIALLY_FILLED') {
         this.eventJournal.record('FILL', 'ORDER_GATEWAY', `Order ${ord.id} ${ord.status}: ${ord.side} ${ord.filledQuantity} ${ord.symbol} @ $${ord.avgFillPrice}`);
-        
+
         // Telegram trade fill notification in Arabic
         if (!ord.strategyId?.startsWith('PROTECT')) {
           const sideText = ord.side === 'BUY' ? '🟢 شراء (LONG)' : '🔴 بيع (SHORT)';
           const fillPrice = ord.avgFillPrice || ord.price;
-          this.telegramService.sendMessage(`
-⚡ <b>تم تنفيذ صفقة تداول جديدة</b>
+          this.telegramService.notifyCategory('trade', `
+          ⚡ <b>تم تنفيذ صفقة تداول جديدة</b>
 ━━━━━━━━━━━━━━━━
 🪙 الزوج: <b>${ord.symbol}</b>
 📋 الاتجاه: <b>${sideText}</b>
@@ -606,7 +599,7 @@ export class TradingPipeline {
 🏷️ الاستراتيجية: <b>${ord.strategyId || 'تداول خوارزمي متكيف'}</b>
 ━━━━━━━━━━━━━━━━
 🛡️ جارٍ تثبيت أوامر الحماية — سيصلك تأكيد منفصل بنتيجة التثبيت.
-          `).catch(() => {});
+          `);
         }
 
         // Item 23: Send protection from fill handler using actual fill price
@@ -664,7 +657,7 @@ export class TradingPipeline {
     );
 
     if (prot.slOk) {
-      this.telegramService.sendMessage(`🛡️ <b>تم تثبيت وقف الخسارة</b> على ${ord.symbol} عند $${Number(sl).toFixed(4)}${prot.tpId ? ' + هدف الربح' : ' (بدون هدف ربح)'}`).catch(() => {});
+      this.telegramService.notifyCategory('protection', `🛡️ <b>تم تثبيت وقف الخسارة</b> على ${ord.symbol} عند $${Number(sl).toFixed(4)}${prot.tpId ? ' + هدف الربح' : ' (بدون هدف ربح)'}`);
       return true;
     }
 
@@ -684,7 +677,7 @@ export class TradingPipeline {
 
   /** Feeds the RiskEngine (VaR / Sharpe / Sortino) with the real return of a settled trade. */
   private recordTradeReturn(netPnl: number): void {
-    const equity = this.subWalletManager.getCurrentEquity() - netPnl; // equity before this trade settled
+    const equity = this.userDataStream.getBalance().totalEquity - netPnl; // equity before this trade settled
     if (equity > 0) this.riskEngine.recordReturn(netPnl / equity);
   }
 
@@ -829,10 +822,10 @@ export class TradingPipeline {
     // 1. Evaluate Multi-Agent Quant Engine first if active
     const candles = this.marketData.getCandles(symbol) || [];
     const multiAgentRes = this.strategyManager.getMultiAgentEngine().evaluate(features, regime, candles);
-    
+
     // Fall back to OU Decision Engine
-    const decision = multiAgentRes?.signal 
-      ? { signal: multiAgentRes.signal } 
+    const decision = multiAgentRes?.signal
+      ? { signal: multiAgentRes.signal }
       : this.decisionEngine.decide(symbol, features, tier, regime);
 
     if (!decision.signal || decision.signal.type === 'NEUTRAL' || decision.signal.strength < 0.5) {
@@ -855,7 +848,7 @@ export class TradingPipeline {
       signals: [sig],
       features,
       regime,
-      capital: this.subWalletManager.getCurrentEquity(),
+      capital: this.userDataStream.getBalance().totalEquity,
       latencyMs: 15
     });
 
@@ -887,7 +880,7 @@ export class TradingPipeline {
 
       // 3. Portfolio Sizer calculation with 1% Risk-Based Sizing (البند 6 و 8)
       const balance = this.userDataStream.getBalance();
-      const subEquity = this.subWalletManager.getCurrentEquity();
+      const subEquity = this.userDataStream.getBalance().totalEquity;
       const positionSizing = this.portfolioSizer.calculatePositionSize(
         features.currentPrice,
         sig.stopLoss,
@@ -927,7 +920,7 @@ export class TradingPipeline {
         }
       }
 
-      const subAvailableMargin = this.subWalletManager.getAvailableMargin();
+      const subAvailableMargin = balance.freeMargin;
       const requiredLev = positionSizing.leverage || 5;
       const notionalVal = qty * features.currentPrice;
       const requiredMargin = notionalVal / requiredLev;
@@ -1135,7 +1128,7 @@ export class TradingPipeline {
 
   private async reconcileState() {
     console.log('🔄 Starting State Reconciliation...');
-    
+
     try {
       // Restore persistent KillSwitch state if previously triggered
       const savedKs = await this.db.getState<{ level: KillSwitchLevel; active: boolean; reason: string }>('killswitch_state');
@@ -1308,8 +1301,6 @@ export class TradingPipeline {
     return this.correlationRiskManager.getCorrelationReport(this.config.activeSymbols);
   }
 
-  public getSubWallet(): SubWalletManager { return this.subWalletManager; }
-
   public getPortfolioSizer(): PortfolioSizer { return this.portfolioSizer; }
   public getPartialProfitManager(): PartialProfitManager { return this.partialProfitManager; }
   public getScaleInManager(): ScaleInManager { return this.scaleInManager; }
@@ -1366,7 +1357,6 @@ export class TradingPipeline {
 
   public async sendHeartbeatNotification(isManual: boolean = false): Promise<{ success: boolean; isRunning: boolean; message: string }> {
     const isBotRunning = this.isRunning && !this.killSwitch.isActive();
-    const subWallet = this.subWalletManager.getState();
     const balance = this.userDataStream.getBalance();
     const positions = this.userDataStream.getPositions();
     const killSwitchActive = this.killSwitch.isActive();
@@ -1390,10 +1380,9 @@ export class TradingPipeline {
         `🎯 <b>وضع التنفيذ:</b> <b>${executionMode}</b>\n` +
         `🛡️ <b>درع الأمان (Kill-Switch):</b> 🟢 في أمان تام (طبيعي)\n\n` +
         `💼 <b>حالة المحفظة والأرباح:</b>\n` +
-        `• المحفظة الثانوية ($25): <b>$${subWallet.currentEquity.toFixed(2)}</b> (${subWallet.growthPct >= 0 ? '+' : ''}${subWallet.growthPct.toFixed(1)}% ROI)\n` +
-        `• الأرباح المحققة: <b>${subWallet.realizedProfit >= 0 ? '🟢 +' : '🔴 '}$${subWallet.realizedProfit.toFixed(2)} USDT</b>\n` +
+        `• الرصيد الموحد: <b>$${balance.totalEquity.toFixed(2)} USDT</b>\n` +
         `• الخزينة المركزية المحمية: <b>$${balance.totalEquity.toFixed(2)} USDT</b>\n` +
-        `• الصفقات المنفذة: <b>${subWallet.totalTrades}</b> (${subWallet.winningTrades} رابحة / ${subWallet.losingTrades} خاسرة - ${subWallet.winRate.toFixed(0)}%)\n` +
+
         `• المراكز المفتوحة حالياً: <b>${positions.length} مركز نشط</b>\n\n` +
         `📊 <b>أسعار السوق اللحظية:</b>\n` +
         `• BTC: <b>$${btcPrice > 0 ? btcPrice.toLocaleString(undefined, { minimumFractionDigits: 1 }) : '---'}</b>\n` +
@@ -1410,8 +1399,7 @@ export class TradingPipeline {
         `📝 <b>السبب:</b> ${killSwitchActive ? 'تم تفعيل درع الطوارئ (Kill-Switch)' : 'البوت في وضع الإيقاف المؤقت بواسطة المشغل'}\n` +
         `🛡️ <b>حالة رأس المال:</b> محفوظ في أمان تام بنسبة 100%\n\n` +
         `💼 <b>حالة المحفظة:</b>\n` +
-        `• المحفظة الثانوية ($25): <b>$${subWallet.currentEquity.toFixed(2)}</b>\n` +
-        `• الأرباح المحققة السابقة: <b>${subWallet.realizedProfit >= 0 ? '+' : ''}$${subWallet.realizedProfit.toFixed(2)} USDT</b>\n` +
+        `• الرصيد الموحد: <b>$${balance.totalEquity.toFixed(2)} USDT</b>\n` +
         `• الخزينة المركزية المحمية: <b>$${balance.totalEquity.toFixed(2)} USDT</b>\n` +
         `• المراكز المفتوحة: <b>${positions.length} مركز</b>\n\n` +
         `🕒 <b>توقيت الإشعار:</b> ${nowStr} (${dateStr})\n` +
@@ -1493,14 +1481,14 @@ export class TradingPipeline {
     }
 
     const balance = this.userDataStream.getBalance();
-    const currentTier = this.portfolioSizer.updateBalance(this.subWalletManager.getCurrentEquity());
+    const currentTier = this.portfolioSizer.updateBalance(this.userDataStream.getBalance().totalEquity);
     this.config.activeSymbols = this.portfolioSizer.getAllowedSymbols();
 
     this.scaleInManager.updateTier(currentTier);
 
     const metrics = this.db.getPerformanceMetrics();
     const winRate = metrics && metrics.totalTrades > 0 ? (metrics.winningTrades / metrics.totalTrades) : 0.6;
-    
+
     // Calculate dynamic Sharpe from trade history if available, else standard baseline
     const fills = this.userDataStream.getFills();
     let sharpe = 1.2;
@@ -1513,7 +1501,7 @@ export class TradingPipeline {
         sharpe = Number(((mean / std) * Math.sqrt(252)).toFixed(2));
       }
     }
-    
+
     this.peakEquityObserved = Math.max(this.peakEquityObserved, balance.totalEquity);
     const drawdown = this.peakEquityObserved > 0
       ? Math.max(0, (this.peakEquityObserved - balance.totalEquity) / this.peakEquityObserved)
@@ -1546,9 +1534,9 @@ export class TradingPipeline {
       if (this.previousTradingAllowed !== regime.tradingAllowed) {
         this.previousTradingAllowed = regime.tradingAllowed;
         if (!regime.tradingAllowed) {
-          await this.telegramService.sendMessage(`🔄 <b>تغير نظام السوق: اتجاه قوي (TRENDING)</b>\n\nنظام السوق: <b>اتجاهي (حركة قوية)</b>\nمؤشر هيرست: <b>${regime.hurstExponent.toFixed(3)}</b>\nمؤشر ADX: <b>${regime.adx.toFixed(1)}</b>\n\nالإجراء: <b>تم التحول تلقائياً لاستراتيجية كسر الاتجاه (Trend Breakout)</b>\nالمحرك: التداول مستمر بدون توقف (Zero-Halt) مع تفعيل وقف الخسارة المتحرك.`);
+          this.telegramService.notifyCategory('market', `🔄 <b>تغير نظام السوق: اتجاه قوي (TRENDING)</b>\n\nنظام السوق: <b>اتجاهي (حركة قوية)</b>\nمؤشر هيرست: <b>${regime.hurstExponent.toFixed(3)}</b>\nمؤشر ADX: <b>${regime.adx.toFixed(1)}</b>\n\nالإجراء: <b>تم التحول تلقائياً لاستراتيجية كسر الاتجاه (Trend Breakout)</b>\nالمحرك: التداول مستمر بدون توقف (Zero-Halt) مع تفعيل وقف الخسارة المتحرك.`);
         } else {
-          await this.telegramService.sendMessage(`✅ <b>استقرار نظام السوق: حركة عرضية (RANGING)</b>\n\nنظام السوق: <b>${regime.marketRegime === 'RANGING' ? 'عرضي متذبذب' : 'معتدل'}</b>\nمؤشر هيرست: <b>${regime.hurstExponent.toFixed(3)}</b>\nمؤشر ADX: <b>${regime.adx.toFixed(1)}</b>\n\nالإجراء: <b>تم التحول تلقائياً لاستراتيجية الارتداد للمتوسط (Ornstein-Uhlenbeck)</b>\nالمحرك: استهداف مراجحة الانحرافات الإحصائية مع مسار التعادل.`);
+          this.telegramService.notifyCategory('market', `✅ <b>استقرار نظام السوق: حركة عرضية (RANGING)</b>\n\nنظام السوق: <b>${regime.marketRegime === 'RANGING' ? 'عرضي متذبذب' : 'معتدل'}</b>\nمؤشر هيرست: <b>${regime.hurstExponent.toFixed(3)}</b>\nمؤشر ADX: <b>${regime.adx.toFixed(1)}</b>\n\nالإجراء: <b>تم التحول تلقائياً لاستراتيجية الارتداد للمتوسط (Ornstein-Uhlenbeck)</b>\nالمحرك: استهداف مراجحة الانحرافات الإحصائية مع مسار التعادل.`);
         }
       }
     }
@@ -1631,10 +1619,10 @@ export class TradingPipeline {
       }
 
       if (pos) {
-        this.subWalletManager.recordTradeResult(totalPnl);
+
         this.recordTradeReturn(totalPnl);
       }
-      this.portfolioSizer.updateBalance(this.subWalletManager.getCurrentEquity());
+      this.portfolioSizer.updateBalance(this.userDataStream.getBalance().totalEquity);
 
       // Live/testnet: the position disappears via ACCOUNT_UPDATE (confirmed by the exchange). Paper: remove it here, after settlement.
       if (isPaperMode) this.userDataStream.removePosition(symbol);
@@ -1745,7 +1733,7 @@ export class TradingPipeline {
         }
         totalMargin += p.marginUsed || 0;
       }
-      this.subWalletManager.updateUnrealizedPnl(totalUnrealized, totalMargin);
+
     }, 1500);
 
     return {
@@ -1756,7 +1744,7 @@ export class TradingPipeline {
   }
 
   public async liquidateAndResetForNewWallet(): Promise<void> {
-    console.log('🔄 [REALIGNMENT] Closing and resetting all trades to match new 5 Sub-Wallet...');
+    console.log('🔄 [REALIGNMENT] Closing and resetting all trades...');
     const currentPositions = this.userDataStream.getPositions();
     const liq = await this.orderGateway.closeAllPositionsOnExchange(currentPositions);
     if (liq.failed.length > 0) {
@@ -1765,9 +1753,8 @@ export class TradingPipeline {
     this.orderGateway.cancelAllOrders('Full realignment for 5 micro-wallet');
     this.userDataStream.closeAllPositions();
     await this.db.resetAllTrades();
-    this.subWalletManager.resetSubWallet(25.0);
-    this.portfolioSizer.updateBalance(25.0);
-    this.eventJournal.record('INFO', 'ORDER_GATEWAY', 'Liquidated all legacy positions on exchange and strictly enforced 1 concurrent position max for 5 Sub-Wallet');
+    this.portfolioSizer.updateBalance(this.userDataStream.getBalance().totalEquity);
+    this.eventJournal.record('INFO', 'ORDER_GATEWAY', 'Liquidated all legacy positions on exchange and reset local trade state');
   }
 
   public async closeAllPositions(): Promise<{ success: boolean; closed: number; failed: string[]; message: string }> {
@@ -1802,7 +1789,7 @@ export class TradingPipeline {
   }
 
   public getStrategies(): BotStrategy[] {
-    const totalEquity = this.userDataStream.getBalance().totalEquity || 10000;
+    const totalEquity = this.userDataStream.getBalance().totalEquity;
     const strats = this.strategyManager.getStrategies();
     // Dynamically calculate allocated capital
     for (const s of strats) {
@@ -1843,7 +1830,7 @@ export class TradingPipeline {
   }
 
   public rebalanceStrategies(allocations: Record<string, number>): BotStrategy[] {
-    const totalEquity = this.userDataStream.getBalance().totalEquity || 10000;
+    const totalEquity = this.userDataStream.getBalance().totalEquity;
     const updated = this.strategyManager.updateAllocations(allocations, totalEquity);
     this.eventJournal.record('INFO', 'STRATEGY', 'Rebalanced portfolio strategy allocation weights');
     return updated;
@@ -1890,7 +1877,7 @@ export class TradingPipeline {
       if (fs.existsSync(configPath)) {
         const data = JSON.parse(fs.readFileSync(configPath, 'utf8'));
         console.log('✅ Loaded optimized parameters:', data);
-        
+
         if (data.zScore) {
             this.dynamicRiskManager.updateThresholds({
                 sharpePoor: 0.5,

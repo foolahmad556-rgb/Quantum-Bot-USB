@@ -94,6 +94,7 @@ export class MultiAgentQuantEngine {
   ): MultiAgentSignalResult | null {
     const { symbol, currentPrice, zScore, rsi14, hurstExponent } = features;
     if (!currentPrice || currentPrice <= 0) return null;
+    if (candles.length < 14) return null;
 
     // 1. Calculate Real ATR
     const atrDollar = this.calculateRealAtr(candles, currentPrice);
@@ -353,7 +354,7 @@ export class MultiAgentQuantEngine {
 
   private calculateRealAtr(candles: Array<{ high: number; low: number; close: number }>, currentPrice: number): number {
     if (!candles || candles.length < 14) {
-      return currentPrice * 0.018; // 1.8% standard crypto ATR fallback
+      return Number.NaN;
     }
     let sumTr = 0;
     const slice = candles.slice(-14);
@@ -365,7 +366,7 @@ export class MultiAgentQuantEngine {
       sumTr += tr;
     }
     const atr = sumTr / (slice.length - 1 || 1);
-    return atr > 0 ? atr : currentPrice * 0.018;
+    return atr > 0 ? atr : Number.NaN;
   }
 
   private calculateEmaFromCandles(candles: Array<{ close: number }>, span: number, currentPrice: number): number {

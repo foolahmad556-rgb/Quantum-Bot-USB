@@ -938,10 +938,10 @@ export const SubconsciousMindDashboard: React.FC<SubconsciousMindDashboardProps>
   const lifeProgress = clamp(lifeAge / settings.lifespan, 0, 1);
   const strokeDashoffset = circumference * lifeProgress;
 
-  const totalWalletVal = balance?.totalEquity || 114820.45;
-  const profitVal = balance?.realizedPnl || 8420.00;
-  const lossVal = Math.abs((balance?.unrealizedPnl && balance.unrealizedPnl < 0) ? balance.unrealizedPnl : 412.30);
-  const profitPct = balance?.dailyPnlPct || 14.82;
+  const totalWalletVal = balance?.totalEquity ?? 0;
+  const profitVal = balance?.realizedPnl ?? 0;
+  const lossVal = Math.abs(balance?.unrealizedPnl ?? 0);
+  const profitPct = balance?.dailyPnlPct ?? 0;
 
   const tabs = [
     { id: 'core', labelEn: 'Subconscious Core', labelAr: 'عقل اللاوعي الكمي', icon: Sparkles },

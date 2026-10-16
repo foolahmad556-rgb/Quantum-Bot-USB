@@ -7,7 +7,8 @@ import { EventEmitter } from 'events';
 import WebSocket from 'ws';
 import { AssetSymbol, Candle, ExecutionMode, Tick, getBinanceWsUrl, normalizeExecutionMode } from '../domain/types';
 import { OrderBookBuilder } from './OrderBookBuilder';
-import { mulberry32, secureUUID } from '../utils/seededRng';
+import { mulberry32 } from '../utils/seededRng';
+
 
 export function buildFuturesCombinedStreamUrl(symbols: AssetSymbol[]): string {
   const streams = symbols.filter(s => s.endsWith('/USDT')).map(s => `${s.replace('/', '').toLowerCase()}@aggTrade`).join('/');
@@ -20,10 +21,6 @@ export function getReconnectDelay(attempt: number): number {
 
 export interface SymbolConfig {
   symbol: AssetSymbol;
-  basePrice: number;
-  volatilityDaily: number;
-  meanReversionSpeed: number; // Ornstein-Uhlenbeck theta
-  equilibriumMean: number;
   tickSize: number;
   lotSize: number;
 }
@@ -31,136 +28,81 @@ export interface SymbolConfig {
 export const DEFAULT_SYMBOLS: Record<AssetSymbol, SymbolConfig> = {
   'BTC/USDT': {
     symbol: 'BTC/USDT',
-    basePrice: 91250.0,
-    volatilityDaily: 0.045,
-    meanReversionSpeed: 0.18,
-    equilibriumMean: 91250.0,
+
     tickSize: 0.1,
     lotSize: 0.001,
   },
   'ETH/USDT': {
     symbol: 'ETH/USDT',
-    basePrice: 3420.0,
-    volatilityDaily: 0.055,
-    meanReversionSpeed: 0.22,
-    equilibriumMean: 3420.0,
+
     tickSize: 0.01,
     lotSize: 0.01,
   },
   'SOL/USDT': {
     symbol: 'SOL/USDT',
-    basePrice: 216.5,
-    volatilityDaily: 0.075,
-    meanReversionSpeed: 0.30,
-    equilibriumMean: 216.5,
+
     tickSize: 0.01,
     lotSize: 0.1,
   },
   'XRP/USDT': {
     symbol: 'XRP/USDT' as AssetSymbol,
-    basePrice: 1.88,
-    volatilityDaily: 0.080,
-    meanReversionSpeed: 0.25,
-    equilibriumMean: 1.88,
+
     tickSize: 0.0001,
     lotSize: 1,
   },
   'AVAX/USDT': {
     symbol: 'AVAX/USDT' as AssetSymbol,
-    basePrice: 38.4,
-    volatilityDaily: 0.070,
-    meanReversionSpeed: 0.28,
-    equilibriumMean: 38.4,
+
     tickSize: 0.01,
     lotSize: 0.1,
   },
   'ADA/USDT': {
     symbol: 'ADA/USDT' as AssetSymbol,
-    basePrice: 0.86,
-    volatilityDaily: 0.065,
-    meanReversionSpeed: 0.24,
-    equilibriumMean: 0.86,
     tickSize: 0.0001,
     lotSize: 1,
   },
   'BNB/USDT': {
     symbol: 'BNB/USDT' as AssetSymbol,
-    basePrice: 658.0,
-    volatilityDaily: 0.040,
-    meanReversionSpeed: 0.20,
-    equilibriumMean: 658.0,
     tickSize: 0.01,
     lotSize: 0.01,
   },
   'DOGE/USDT': {
     symbol: 'DOGE/USDT' as AssetSymbol,
-    basePrice: 0.36,
-    volatilityDaily: 0.085,
-    meanReversionSpeed: 0.32,
-    equilibriumMean: 0.36,
     tickSize: 0.0001,
     lotSize: 1,
   },
   'QNT/USDT': {
     symbol: 'QNT/USDT',
-    basePrice: 94.0,
-    volatilityDaily: 0.060,
-    meanReversionSpeed: 0.25,
-    equilibriumMean: 94.0,
     tickSize: 0.01,
     lotSize: 0.1,
   },
   'NVDA/USD': {
     symbol: 'NVDA/USD',
-    basePrice: 138.7,
-    volatilityDaily: 0.040,
-    meanReversionSpeed: 0.15,
-    equilibriumMean: 137.5,
     tickSize: 0.01,
     lotSize: 1,
   },
   'AAPL/USD': {
     symbol: 'AAPL/USD',
-    basePrice: 228.6,
-    volatilityDaily: 0.025,
-    meanReversionSpeed: 0.12,
-    equilibriumMean: 227.0,
     tickSize: 0.01,
     lotSize: 1,
   },
   'PEPE/USDT': {
     symbol: 'PEPE/USDT',
-    basePrice: 0.0000215,
-    volatilityDaily: 0.095,
-    meanReversionSpeed: 0.35,
-    equilibriumMean: 0.0000215,
     tickSize: 0.00000001,
     lotSize: 1000,
   },
   'SUI/USDT': {
     symbol: 'SUI/USDT',
-    basePrice: 3.45,
-    volatilityDaily: 0.080,
-    meanReversionSpeed: 0.28,
-    equilibriumMean: 3.45,
     tickSize: 0.0001,
     lotSize: 1,
   },
   'NEAR/USDT': {
     symbol: 'NEAR/USDT',
-    basePrice: 6.85,
-    volatilityDaily: 0.070,
-    meanReversionSpeed: 0.25,
-    equilibriumMean: 6.85,
     tickSize: 0.001,
     lotSize: 0.1,
   },
   'RENDER/USDT': {
     symbol: 'RENDER/USDT',
-    basePrice: 8.40,
-    volatilityDaily: 0.075,
-    meanReversionSpeed: 0.27,
-    equilibriumMean: 8.40,
     tickSize: 0.001,
     lotSize: 0.1,
   },
@@ -174,7 +116,7 @@ export class ExchangeMarketData extends EventEmitter {
   private orderBookBuilder: OrderBookBuilder;
   private tickListeners: Set<(tick: Tick) => void> = new Set();
 
-  // Simulated streaming timer fallback
+  // Health heartbeat only; never creates market data.
   private intervalId: any = null;
   private isRunning: boolean = false;
   private tradeCounter: number = 0;
@@ -234,7 +176,7 @@ export class ExchangeMarketData extends EventEmitter {
   }
 
   public getLastUpdateTime(symbol: AssetSymbol): number {
-    return this.lastUpdateTimes.get(symbol) || Date.now();
+    return this.lastUpdateTimes.get(symbol) || 0;
   }
 
   public getAllPrices(): Record<AssetSymbol, number> {
