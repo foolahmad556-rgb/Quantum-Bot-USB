@@ -36,6 +36,7 @@ import { BoardOfDirectorsEngine } from './src/strategies/BoardOfDirectorsEngine.
 import { TelegramService } from './src/services/TelegramService.ts';
 import { D1DatabaseService } from './src/storage/D1DatabaseService.ts';
 import { BacktestEngine } from './src/backtest/BacktestEngine.ts';
+import { generateToken, verifyToken, hashPassword, comparePassword } from './src/lib/jwt-auth.ts';
 
 const PORT = Number(process.env.PORT || process.env.SERVER_PORT || 3000);
 const OPERATOR_SECRET = (process.env.OPERATOR_SECRET || process.env.ADMIN_API_KEY || '').trim();
@@ -133,22 +134,18 @@ function requireCloudStorage(res: Response): boolean {
 }
 
 /* ----------------------------- auth -------------------------------- */
-// Protected routes: OPERATOR_SECRET match (VPS/headless) OR Firebase ID token.
-// When no OPERATOR_SECRET is configured the server fails OPEN only in
-// non-production (dev); in production it fails CLOSED.
+// Protected routes: OPERATOR_SECRET match (VPS/headless) OR valid JWT token.
 async function requireAuth(req: Request, res: Response, next: NextFunction) {
   const header = req.header('authorization') || '';
   const token = header.startsWith('Bearer ') ? header.slice(7).trim() : '';
   if (OPERATOR_SECRET && token === OPERATOR_SECRET) return next();
-  if (token && !OPERATOR_SECRET && process.env.NODE_ENV !== 'production') return next();
   if (token) {
     try {
-      const { adminAuth } = await import('./src/lib/firebase-admin.ts');
-      const decoded = await adminAuth.verifyIdToken(token);
-      (req as any).uid = decoded.uid;
+      const decoded = verifyToken(token);
+      (req as any).user = decoded;
       return next();
-    } catch {
-      /* fall through to 401 */
+    } catch (e: any) {
+      return fail(res, 401, 'Invalid or expired token');
     }
   }
   return fail(res, 401, 'Unauthorized: valid Bearer token required.');
@@ -159,6 +156,111 @@ async function requireAuth(req: Request, res: Response, next: NextFunction) {
 /* ------------------------------------------------------------------ */
 
 const bootTime = Date.now();
+
+/* ------------------------------------------------------------------ */
+/* auth endpoints (public)                                             */
+/* ------------------------------------------------------------------ */
+
+app.post('/api/auth/register', async (req: Request, res: Response) => {
+  try {
+    if (!requireCloudStorage(res)) return;
+    const { email, password } = req.body || {};
+    
+    if (typeof email !== 'string' || !email.includes('@')) {
+      return fail(res, 400, 'Valid email required');
+    }
+    if (typeof password !== 'string' || password.length < 6) {
+      return fail(res, 400, 'Password must be at least 6 characters');
+    }
+
+    // Check if user already exists
+    const existing = await (cloudDb as any).query(
+      `SELECT id FROM users WHERE email = ?`,
+      [email]
+    );
+    if (existing && existing.length > 0) {
+      return fail(res, 409, 'Email already registered');
+    }
+
+    // Hash password
+    const passwordHash = await hashPassword(password);
+
+    // Save to D1
+    const result = await (cloudDb as any).query(
+      `INSERT INTO users (email, password_hash, created_at) VALUES (?, ?, ?)`,
+      [email, passwordHash, new Date().toISOString()]
+    );
+
+    const userId = result?.lastID || 1;
+    const token = generateToken({ id: userId, email });
+
+    ok(res, {
+      token,
+      user: { id: userId, email }
+    });
+  } catch (e: any) {
+    console.error('register failed:', e);
+    fail(res, 500, e?.message || 'Registration failed');
+  }
+});
+
+app.post('/api/auth/login', async (req: Request, res: Response) => {
+  try {
+    if (!requireCloudStorage(res)) return;
+    const { email, password } = req.body || {};
+
+    if (typeof email !== 'string' || typeof password !== 'string') {
+      return fail(res, 400, 'Email and password required');
+    }
+
+    // Query user from D1
+    const users = await (cloudDb as any).query(
+      `SELECT id, email, password_hash FROM users WHERE email = ?`,
+      [email]
+    );
+
+    if (!users || users.length === 0) {
+      return fail(res, 401, 'Invalid email or password');
+    }
+
+    const user = users[0];
+    const passwordMatch = await comparePassword(password, user.password_hash);
+
+    if (!passwordMatch) {
+      return fail(res, 401, 'Invalid email or password');
+    }
+
+    const token = generateToken({ id: user.id, email: user.email });
+
+    ok(res, {
+      token,
+      user: { id: user.id, email: user.email }
+    });
+  } catch (e: any) {
+    console.error('login failed:', e);
+    fail(res, 500, e?.message || 'Login failed');
+  }
+});
+
+app.get('/api/auth/validate', async (req: Request, res: Response) => {
+  try {
+    const header = req.header('authorization') || '';
+    const token = header.startsWith('Bearer ') ? header.slice(7).trim() : '';
+
+    if (!token) {
+      return fail(res, 401, 'No token provided');
+    }
+
+    const decoded = verifyToken(token);
+    ok(res, { id: decoded.id, email: decoded.email });
+  } catch (e: any) {
+    fail(res, 401, 'Invalid or expired token');
+  }
+});
+
+/* ------------------------------------------------------------------ */
+/* public: health / status                                             */
+/* ------------------------------------------------------------------ */
 
 app.get('/api/health', (_req: Request, res: Response) => {
   ok(res, {
