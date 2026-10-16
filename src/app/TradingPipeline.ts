@@ -1362,10 +1362,19 @@ export class TradingPipeline {
     const killSwitchActive = this.killSwitch.isActive();
     const executionMode = this.config.executionMode || 'TESTNET';
 
-    // Snapshot of major prices
-    const btcPrice = this.marketData.getPrice('BTC/USDT');
-    const ethPrice = this.marketData.getPrice('ETH/USDT');
-    const solPrice = this.marketData.getPrice('SOL/USDT');
+    // Snapshot of major prices. Heartbeat must remain deliverable while a symbol feed reconnects.
+    const readLivePrice = (symbol: AssetSymbol): number | null => {
+      try {
+        const price = this.marketData.getPrice(symbol);
+        return Number.isFinite(price) && price > 0 ? price : null;
+      } catch (error) {
+        console.warn(`⚠️ [TELEGRAM-HEARTBEAT] Live price unavailable for ${symbol}:`, error);
+        return null;
+      }
+    };
+    const btcPrice = readLivePrice('BTC/USDT');
+    const ethPrice = readLivePrice('ETH/USDT');
+    const solPrice = readLivePrice('SOL/USDT');
 
     const nowStr = new Date().toLocaleTimeString('ar-EG', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
     const dateStr = new Date().toLocaleDateString('ar-EG', { year: 'numeric', month: 'short', day: 'numeric' });
@@ -1385,9 +1394,9 @@ export class TradingPipeline {
 
         `• المراكز المفتوحة حالياً: <b>${positions.length} مركز نشط</b>\n\n` +
         `📊 <b>أسعار السوق اللحظية:</b>\n` +
-        `• BTC: <b>$${btcPrice > 0 ? btcPrice.toLocaleString(undefined, { minimumFractionDigits: 1 }) : '---'}</b>\n` +
-        `• ETH: <b>$${ethPrice > 0 ? ethPrice.toLocaleString(undefined, { minimumFractionDigits: 1 }) : '---'}</b>\n` +
-        `• SOL: <b>$${solPrice > 0 ? solPrice.toFixed(2) : '---'}</b>\n\n` +
+        `• BTC: <b>$${btcPrice !== null ? btcPrice.toLocaleString(undefined, { minimumFractionDigits: 1 }) : '---'}</b>\n` +
+        `• ETH: <b>$${ethPrice !== null ? ethPrice.toLocaleString(undefined, { minimumFractionDigits: 1 }) : '---'}</b>\n` +
+        `• SOL: <b>$${solPrice !== null ? solPrice.toFixed(2) : '---'}</b>\n\n` +
         `🕒 <b>توقيت الإشعار:</b> ${nowStr} (${dateStr})\n` +
         `━━━━━━━━━━━━━━━━━━━━━━\n` +
         `✅ المحرك يعمل باستمرار ويراقب سيولة وعمق السوق. الإشعار القادم بعد ${intervalMins} دقيقة.`;
