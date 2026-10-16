@@ -3,85 +3,30 @@
 import { db as pgDb } from '../db/index.ts';
 import { trades, balanceHistory, users } from '../db/schema.ts';
 import { eq, desc, and } from 'drizzle-orm';
-import { initializeApp, getApps, App } from 'firebase-admin/app';
-import { getFirestore, Firestore, QueryDocumentSnapshot } from 'firebase-admin/firestore';
-
-// Load Firebase config from environment variable (encrypted at rest, never committed).
-// Set FIREBASE_CREDENTIALS_JSON as a secret or in your environment.
-const firebaseConfigStr = process.env.FIREBASE_CREDENTIALS_JSON || '{}';
-let firebaseConfig: any;
-try {
-  firebaseConfig = JSON.parse(firebaseConfigStr);
-} catch {
-  console.error('FIREBASE_CREDENTIALS_JSON is missing or invalid.');
-  firebaseConfig = {};
-}
 import { TradeRecord, SignalRecord, BalanceSnapshot, PriceRecord } from './DatabaseService.ts';
 
+// Stub: Firebase not used. Uses PostgreSQL (Drizzle ORM) + local SQLite for auth.
+
 export class CloudDatabaseService {
-  private firestore: Firestore;
   private userId: number | null = null;
-  private userUid: string | null = null;
+  private userEmail: string | null = null;
 
-  constructor(userUid?: string) {
-    let app: App;
-    if (!getApps().length) {
-      app = initializeApp({
-        projectId: firebaseConfig.projectId,
-      });
-    } else {
-      app = getApps()[0];
-    }
-    this.firestore = getFirestore(app, firebaseConfig.firestoreDatabaseId);
-    if (userUid) {
-      this.userUid = userUid;
-    }
+  constructor(userEmail?: string) {
+    this.userEmail = userEmail || null;
   }
 
-  public async setUserId(id: number, uid: string) {
+  public async setUserId(id: number, email?: string) {
     this.userId = id;
-    this.userUid = uid;
+    if (email) this.userEmail = email;
   }
 
-  // --- Prices (Firestore for speed/live feed) ---
+  // --- Prices (no persistence in this version) ---
   public async savePrice(symbol: string, price: number) {
-    if (!this.userUid) return;
-    const priceRef = this.firestore
-      .collection('users')
-      .doc(this.userUid)
-      .collection('prices')
-      .doc(symbol.replace('/', '_'));
-    
-    await priceRef.set({
-      timestamp: Date.now(),
-      symbol,
-      price
-    });
-
-    // Also store history in a subcollection if needed for optimization
-    await priceRef.collection('history').add({
-      timestamp: Date.now(),
-      price
-    });
+    // No-op: prices not persisted
   }
 
   public async getPriceHistory(symbol: string, limit: number = 100): Promise<PriceRecord[]> {
-    if (!this.userUid) return [];
-    const snapshot = await this.firestore
-      .collection('users')
-      .doc(this.userUid)
-      .collection('prices')
-      .doc(symbol.replace('/', '_'))
-      .collection('history')
-      .orderBy('timestamp', 'desc')
-      .limit(limit)
-      .get();
-    
-    return snapshot.docs.map((doc: QueryDocumentSnapshot) => ({
-      timestamp: doc.data().timestamp,
-      symbol,
-      price: doc.data().price
-    })).reverse();
+    return [];
   }
 
   // --- Trades (Cloud SQL for durability/audit) ---
@@ -144,17 +89,9 @@ export class CloudDatabaseService {
       .where(and(eq(trades.id, parseInt(id)), eq(trades.userId, this.userId)));
   }
 
-  // --- Signals (Firestore for real-time UI) ---
+  // --- Signals (no persistence in this version) ---
   public async saveSignal(signal: SignalRecord) {
-    if (!this.userUid) return;
-    await this.firestore
-      .collection('users')
-      .doc(this.userUid)
-      .collection('signals')
-      .add({
-        ...signal,
-        timestamp: Date.now()
-      });
+    // No-op: signals not persisted
   }
 
   // --- Balance Snapshots (Cloud SQL) ---
@@ -168,28 +105,16 @@ export class CloudDatabaseService {
     });
   }
 
-  // --- Bot State (Firestore) ---
+  // --- Bot State (no persistence in this version) ---
   public async saveState(key: string, value: any) {
-    if (!this.userUid) return;
-    await this.firestore
-      .collection('users')
-      .doc(this.userUid)
-      .collection('state')
-      .doc(key)
-      .set({ value, updatedAt: Date.now() });
+    // No-op: state not persisted
   }
 
   public async getState<T>(key: string): Promise<T | null> {
-    if (!this.userUid) return null;
-    const doc = await this.firestore
-      .collection('users')
-      .doc(this.userUid)
-      .collection('state')
-      .doc(key)
-      .get();
-    return doc.exists ? (doc.data()?.value as T) : null;
+    return null;
   }
 
+  // --- Performance Metrics ---
   public async getPerformanceMetrics() {
     if (!this.userId) return null;
     const tradesList = await pgDb.select().from(trades).where(
@@ -200,11 +125,12 @@ export class CloudDatabaseService {
     );
     
     const totalTrades = tradesList.length;
-    // PnL calculation would require exit prices in the schema, for now simplified
+    const winningTrades = (tradesList as any[]).filter(t => (t.pnl ?? 0) > 0).length;
+    const totalPnl = (tradesList as any[]).reduce((sum, t) => sum + (t.pnl ?? 0), 0);
+    
     return {
       totalTrades,
-      winRate: 0, 
-      totalPnl: 0
+      winRate: totalTrades > 0 ? (winningTrades / totalTrades) * 100 : 0, 
+      totalPnl
     };
   }
-}

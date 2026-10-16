@@ -179,7 +179,7 @@ async function requireAuth(req: Request, res: Response, next: NextFunction) {
   if (OPERATOR_SECRET && token === OPERATOR_SECRET) return next();
   if (token) {
     try {
-      const decoded = verifyToken(token);
+      const decoded = verifyToken(token, JWT_SECRET);
       (req as any).user = decoded;
       return next();
     } catch (e: any) {

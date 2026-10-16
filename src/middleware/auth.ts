@@ -1,20 +1,18 @@
 import { Request, Response, NextFunction } from 'express';
-import { adminAuth } from '../lib/firebase-admin.ts';
-import { DecodedIdToken } from 'firebase-admin/auth';
+import { verifyToken } from '../lib/jwt-auth.ts';
 
 export interface AuthRequest extends Request {
-  user?: DecodedIdToken | { uid: string; email: string; isOperatorSecret?: boolean };
+  user?: { userId: string; email: string; isOperatorSecret?: boolean };
 }
 
 /**
- * Strict Fail-Closed Operator Authentication Middleware
+ * JWT Token-based Authentication Middleware
  * 
  * Rules:
  * 1. Missing or invalid Authorization header -> 401 Unauthorized
  * 2. Invalid or expired token -> 401 Unauthorized
- * 3. User email not in ADMIN_EMAILS (if allowlist configured) -> 403 Forbidden
- * 4. Supports OPERATOR_SECRET / ADMIN_API_KEY environment variables for VPS / headless operations
- * 5. NO bypasses, NO fallback to unauthenticated mock sessions
+ * 3. Supports OPERATOR_SECRET for VPS / headless operations
+ * 4. Strict fail-closed: no unauthenticated mock sessions
  */
 export const requireAuth = async (
   req: AuthRequest,
@@ -24,12 +22,13 @@ export const requireAuth = async (
   const authHeader = req.headers.authorization;
   const secretHeader = req.headers['x-operator-secret'] as string | undefined;
   const configuredSecret = (process.env.OPERATOR_SECRET || process.env.ADMIN_API_KEY || '').trim();
+  const JWT_SECRET = process.env.JWT_SECRET || 'dev-secret-change-in-prod';
 
   // 1. Check for configured Operator Secret (for headless / VPS / Botkeep.cloud deployments)
   if (configuredSecret.length > 0) {
     if (secretHeader && secretHeader === configuredSecret) {
       req.user = {
-        uid: 'operator-system',
+        userId: 'operator-system',
         email: process.env.ADMIN_EMAILS?.split(',')[0]?.trim() || 'operator@botkeep.cloud',
         isOperatorSecret: true,
       };
@@ -39,7 +38,7 @@ export const requireAuth = async (
       const rawToken = authHeader.substring(7).trim();
       if (rawToken === configuredSecret) {
         req.user = {
-          uid: 'operator-system',
+          userId: 'operator-system',
           email: process.env.ADMIN_EMAILS?.split(',')[0]?.trim() || 'operator@botkeep.cloud',
           isOperatorSecret: true,
         };
@@ -66,9 +65,9 @@ export const requireAuth = async (
     });
   }
 
-  // 3. Strict Cryptographic Verification via Firebase Admin SDK
+  // 3. Verify JWT Token
   try {
-    const decodedToken = await adminAuth.verifyIdToken(token);
+    const decodedToken = verifyToken(token, JWT_SECRET);
     req.user = decodedToken;
 
     // 🔒 Enforce Admin Allowlist if configured in server environment
@@ -95,7 +94,7 @@ export const requireAuth = async (
     return res.status(401).json({
       success: false,
       error: 'Unauthorized: Invalid, expired, or rejected authentication token.',
-      code: error?.code || 'auth/invalid-token',
+      code: 'auth/invalid-token',
     });
   }
 };
