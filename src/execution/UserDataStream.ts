@@ -74,11 +74,13 @@ export class UserDataStream {
     if (this.isRunning) return;
     this.isRunning = true;
     
-    if (this.executionMode === 'PAPER') {
-      throw new Error('PAPER mode disabled: account data must come from Binance API.');
+    if (!this.apiKey || !this.apiSecret) {
+      this.isRunning = false;
+      throw new Error('Binance account credentials missing for account-data sync.');
     }
 
-    console.log(`🌐 UserDataStream: Starting connection to Binance Futures (${this.executionMode})...`);
+    // PAPER keeps order execution simulated, but account data remains read-only and real.
+    console.log(`🌐 UserDataStream: Starting read-only Binance account sync (${this.executionMode})...`);
     try {
       // Fetch initial account balance & positions from Binance REST API on startup
       await this.fetchInitialAccountData();
