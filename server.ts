@@ -131,9 +131,23 @@ const initDb = (): Promise<void> => {
 
 // Manual CORS (no extra dep — free-tier image stays small).
 app.use((req: Request, res: Response, next: NextFunction) => {
-  res.header('Access-Control-Allow-Origin', process.env.APP_URL || '*');
+  const allowedOrigins = [
+    'https://quantumbot-dashboard.pages.dev',
+    'http://localhost:3000',
+    'http://localhost:5173',
+    process.env.APP_URL,
+  ].filter(Boolean);
+  
+  const origin = req.headers.origin;
+  if (origin && allowedOrigins.includes(origin)) {
+    res.header('Access-Control-Allow-Origin', origin);
+  } else if (process.env.NODE_ENV === 'development') {
+    res.header('Access-Control-Allow-Origin', '*');
+  }
+  
   res.header('Access-Control-Allow-Headers', 'Authorization, Content-Type, x-telegram-bot-api-secret-token');
   res.header('Access-Control-Allow-Methods', 'GET,POST,PUT,DELETE,OPTIONS');
+  res.header('Access-Control-Allow-Credentials', 'true');
   if (req.method === 'OPTIONS') return res.sendStatus(204);
   next();
 });
