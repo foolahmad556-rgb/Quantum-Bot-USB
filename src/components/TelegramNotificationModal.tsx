@@ -72,13 +72,20 @@ export const TelegramNotificationModal: React.FC<TelegramNotificationModalProps>
     setIsLoading(true);
     try {
       const res = await fetch('/api/telegram/status');
-      if (res.ok) {
-        const data = await res.json();
-        setStatus(data);
-        setIsEnabled(data.isEnabled || false);
-        setHeartbeatEnabled(data.heartbeat?.enabled ?? true);
-        setIntervalMinutes(data.heartbeat?.intervalMinutes || 30);
+      if (!res.ok) {
+        console.warn('Telegram status error:', res.status);
+        return;
       }
+      const text = await res.text();
+      if (!text) {
+        console.warn('Empty response from /api/telegram/status');
+        return;
+      }
+      const data = JSON.parse(text);
+      setStatus(data);
+      setIsEnabled(data.isEnabled || false);
+      setHeartbeatEnabled(data.heartbeat?.enabled ?? true);
+      setIntervalMinutes(data.heartbeat?.intervalMinutes || 30);
     } catch (err) {
       console.warn('Failed to fetch Telegram status:', err);
     } finally {
@@ -112,7 +119,24 @@ export const TelegramNotificationModal: React.FC<TelegramNotificationModalProps>
         })
       });
 
-      const data = await res.json();
+      if (!res.ok) {
+        setActionFeedback({
+          type: 'error',
+          message: `HTTP ${res.status}: Failed to save configuration`
+        });
+        return;
+      }
+
+      const text = await res.text();
+      if (!text) {
+        setActionFeedback({
+          type: 'error',
+          message: isAr ? 'خادم لم يرد' : 'Server returned empty response'
+        });
+        return;
+      }
+
+      const data = JSON.parse(text);
       if (data.success) {
         setStatus({
           ...data.status,
@@ -151,7 +175,24 @@ export const TelegramNotificationModal: React.FC<TelegramNotificationModalProps>
         headers: { 'Content-Type': 'application/json' }
       });
 
-      const data = await res.json();
+      if (!res.ok) {
+        setActionFeedback({
+          type: 'error',
+          message: `HTTP ${res.status}: Failed to send heartbeat`
+        });
+        return;
+      }
+
+      const text = await res.text();
+      if (!text) {
+        setActionFeedback({
+          type: 'error',
+          message: isAr ? 'خادم لم يرد' : 'Server returned empty response'
+        });
+        return;
+      }
+
+      const data = JSON.parse(text);
       if (data.success) {
         setActionFeedback({
           type: 'success',

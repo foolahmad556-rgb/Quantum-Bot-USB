@@ -98,18 +98,24 @@ export const HolographicPerformanceHeatmap: React.FC<HolographicPerformanceHeatm
       ]);
 
       if (orderRes.ok) {
-        const orderData = await orderRes.json();
-        if (orderData.success && Array.isArray(orderData.orders)) {
-          setOrders(orderData.orders);
-        } else if (Array.isArray(orderData)) {
-          setOrders(orderData);
+        const orderText = await orderRes.text();
+        if (orderText) {
+          const orderData = JSON.parse(orderText);
+          if (orderData.success && Array.isArray(orderData.orders)) {
+            setOrders(orderData.orders);
+          } else if (Array.isArray(orderData)) {
+            setOrders(orderData);
+          }
         }
       }
 
       if (statusRes.ok) {
-        const statusData = await statusRes.json();
-        if (Array.isArray(statusData.positions)) {
-          setPositions(statusData.positions);
+        const statusText = await statusRes.text();
+        if (statusText) {
+          const statusData = JSON.parse(statusText);
+          if (Array.isArray(statusData.positions)) {
+            setPositions(statusData.positions);
+          }
         }
       }
     } catch (err) {

@@ -82,21 +82,27 @@ export const HolographicTradeHistory: React.FC<HolographicTradeHistoryProps> = (
       ]);
 
       if (orderRes.ok) {
-        const orderData = await orderRes.json();
-        if (orderData.success && Array.isArray(orderData.orders)) {
-          setOrders(orderData.orders);
-        } else if (Array.isArray(orderData)) {
-          setOrders(orderData);
+        const orderText = await orderRes.text();
+        if (orderText) {
+          const orderData = JSON.parse(orderText);
+          if (orderData.success && Array.isArray(orderData.orders)) {
+            setOrders(orderData.orders);
+          } else if (Array.isArray(orderData)) {
+            setOrders(orderData);
+          }
         }
       }
 
       if (statusRes.ok) {
-        const statusData = await statusRes.json();
-        if (Array.isArray(statusData.positions)) {
-          setPositions(statusData.positions);
-          // If positions exist and user hasn't explicitly chosen orders, default to positions
-          if (statusData.positions.length > 0 && orders.length === 0) {
-            setViewTab('positions');
+        const statusText = await statusRes.text();
+        if (statusText) {
+          const statusData = JSON.parse(statusText);
+          if (Array.isArray(statusData.positions)) {
+            setPositions(statusData.positions);
+            // If positions exist and user hasn't explicitly chosen orders, default to positions
+            if (statusData.positions.length > 0 && orders.length === 0) {
+              setViewTab('positions');
+            }
           }
         }
       }
