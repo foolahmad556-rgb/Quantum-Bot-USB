@@ -250,6 +250,13 @@ export class ExchangeMarketData extends EventEmitter {
 
     console.log(`🌐 ExchangeMarketData: Starting live Binance real-time data engine for ${this.activeCryptoSymbols.join(', ')}...`);
 
+    // Initialize lastUpdateTimes for all active symbols with current timestamp
+    // This prevents false stale-data warnings before streams come online
+    const now = Date.now();
+    for (const sym of this.activeCryptoSymbols) {
+      this.lastUpdateTimes.set(sym, now);
+    }
+
     // 1. Initial backfill of real klines and live price pull
     this.backfillRealCandles().catch(() => {});
 
