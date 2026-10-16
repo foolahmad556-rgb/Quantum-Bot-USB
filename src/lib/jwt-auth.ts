@@ -1,26 +1,25 @@
 import jwt from 'jsonwebtoken';
 import bcrypt from 'bcryptjs';
 
-const JWT_SECRET = process.env.JWT_SECRET || 'dev-secret-change-in-prod';
 const JWT_EXPIRES_IN = '7d';
 
 export interface JWTPayload {
-  id: number;
+  userId: string;
   email: string;
 }
 
 /**
  * Generate JWT token.
  */
-export function generateToken(user: JWTPayload): string {
-  return jwt.sign(user, JWT_SECRET, { expiresIn: JWT_EXPIRES_IN });
+export function generateToken(payload: JWTPayload, secret: string): string {
+  return jwt.sign(payload, secret, { expiresIn: JWT_EXPIRES_IN });
 }
 
 /**
  * Verify JWT token. Throws if invalid/expired.
  */
-export function verifyToken(token: string): JWTPayload {
-  return jwt.verify(token, JWT_SECRET) as JWTPayload;
+export function verifyToken(token: string, secret: string): JWTPayload {
+  return jwt.verify(token, secret) as JWTPayload;
 }
 
 /**
