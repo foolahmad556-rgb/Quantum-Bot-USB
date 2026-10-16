@@ -212,33 +212,37 @@ app.post('/api/auth/register', async (req: Request, res: Response) => {
     }
 
     // Check if user already exists
-    userDb.get('SELECT id FROM users WHERE email = ?', [email], async (err: any, row: any) => {
-      if (err) {
-        return fail(res, 500, err.message);
-      }
-      if (row) {
-        return fail(res, 409, 'Email already registered');
-      }
+    const existingUser = await new Promise<any>((resolve, reject) => {
+      userDb!.get('SELECT id FROM users WHERE email = ?', [email], (err: any, row: any) => {
+        if (err) reject(err);
+        else resolve(row);
+      });
+    });
 
-      // Hash password and insert
-      const passwordHash = await hashPassword(password);
-      const userId = `user_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`;
-      
+    if (existingUser) {
+      return fail(res, 409, 'Email already registered');
+    }
+
+    // Hash password and insert
+    const passwordHash = await hashPassword(password);
+    const userId = `user_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`;
+    
+    await new Promise<void>((resolve, reject) => {
       userDb!.run(
         `INSERT INTO users (id, email, password_hash, created_at) VALUES (?, ?, ?, ?)`,
         [userId, email, passwordHash, Date.now()],
-        function(err: any) {
-          if (err) {
-            return fail(res, 500, err.message);
-          }
-          const token = generateToken({ userId, email }, JWT_SECRET);
-          return ok(res, { 
-            token, 
-            user: { userId, email },
-            message: 'Registration successful'
-          });
+        (err: any) => {
+          if (err) reject(err);
+          else resolve();
         }
       );
+    });
+
+    const token = generateToken({ userId, email }, JWT_SECRET);
+    return ok(res, { 
+      token, 
+      user: { userId, email },
+      message: 'Registration successful'
     });
   } catch (err: any) {
     console.error('Register error:', err.message);
