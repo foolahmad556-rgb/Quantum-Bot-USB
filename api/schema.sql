@@ -27,6 +27,13 @@ CREATE TABLE IF NOT EXISTS prices (
 );
 CREATE INDEX IF NOT EXISTS idx_prices_symbol_created_at ON prices(symbol, created_at);
 
+CREATE TABLE IF NOT EXISTS council_shadow (
+  id TEXT PRIMARY KEY,
+  payload TEXT NOT NULL,
+  created_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_council_shadow_created_at ON council_shadow(created_at);
+
 CREATE TABLE IF NOT EXISTS bot_state (
   key TEXT PRIMARY KEY,
   payload TEXT NOT NULL,

@@ -133,6 +133,26 @@ export interface TradeLearningEvent {
   shifts: Record<string, { deltaConf: number; deltaAcc: number; newConf: number; newAcc: number }>;
 }
 
+export interface CouncilMemberDefinition {
+  id: string;
+  name: string;
+  primaryFile: string;
+  secondaryFile: string;
+  legacyAgentIds: string[];
+  hasVeto: boolean;
+  canExecute: boolean;
+}
+
+export const SEVEN_MEMBER_COUNCIL: CouncilMemberDefinition[] = [
+  { id: 'market-regime', name: 'Market Regime', primaryFile: 'market-regime-main.html', secondaryFile: 'market-regime-detailed.html', legacyAgentIds: ['market', 'regime'], hasVeto: false, canExecute: false },
+  { id: 'trend-structure', name: 'Trend Structure', primaryFile: 'trend-structure-main.html', secondaryFile: 'trend-structure-detailed.html', legacyAgentIds: ['algo', 'tf'], hasVeto: false, canExecute: false },
+  { id: 'momentum', name: 'Momentum', primaryFile: 'momentum-main.html', secondaryFile: 'momentum-detailed.html', legacyAgentIds: ['trading', 'quant'], hasVeto: false, canExecute: false },
+  { id: 'volume-liquidity', name: 'Volume & Liquidity', primaryFile: 'volume-main.html', secondaryFile: 'liquidity-detailed.html', legacyAgentIds: ['scout', 'cross'], hasVeto: false, canExecute: false },
+  { id: 'reversion-timing', name: 'Reversion & Timing', primaryFile: 'reversion-main.html', secondaryFile: 'timing-detailed.html', legacyAgentIds: ['sens', 'oos'], hasVeto: false, canExecute: false },
+  { id: 'risk-sentinel', name: 'Risk Sentinel', primaryFile: 'risk-main.html', secondaryFile: 'risk-detailed.html', legacyAgentIds: ['risk', 'stress', 'boot'], hasVeto: true, canExecute: false },
+  { id: 'execution-arbiter', name: 'Execution Arbiter', primaryFile: 'execution-main.html', secondaryFile: 'execution-detailed.html', legacyAgentIds: ['wf'], hasVeto: false, canExecute: true }
+];
+
 export interface BoardMeetingDecision {
   id: string;
   round: number;
@@ -799,6 +819,123 @@ export class BoardOfDirectorsEngine {
     };
 
     this.loadState();
+  }
+
+  public getCouncilStructure(): CouncilMemberDefinition[] {
+    return SEVEN_MEMBER_COUNCIL.map((member) => ({ ...member, legacyAgentIds: [...member.legacyAgentIds] }));
+  }
+
+  public getShadowModeSnapshot(): {
+    mode: 'SHADOW';
+    executionEnabled: false;
+    members: number;
+    legacyAgents: number;
+    mappedLegacyAgents: number;
+  } {
+    const mappedLegacyAgents = new Set(SEVEN_MEMBER_COUNCIL.flatMap((member) => member.legacyAgentIds));
+    return {
+      mode: 'SHADOW',
+      executionEnabled: false,
+      members: SEVEN_MEMBER_COUNCIL.length,
+      legacyAgents: Object.keys(this.agents).length,
+      mappedLegacyAgents: mappedLegacyAgents.size
+    };
+  }
+
+  public compareShadowDecision(params: {
+    symbol: string;
+    incumbent: { verdict: BoardMeetingDecision['verdict']; action: string; approvalRatio: number };
+    shadow: { verdict: BoardMeetingDecision['verdict']; action: string; approvalRatio: number };
+    veto: boolean;
+    confidence: number;
+  }): {
+    symbol: string;
+    incumbentAction: string;
+    shadowAction: string;
+    actionMatch: boolean;
+    verdictMatch: boolean;
+    approvalRatioDelta: number;
+    veto: boolean;
+    confidence: number;
+    executionEnabled: false;
+  } {
+    return {
+      symbol: params.symbol,
+      incumbentAction: params.incumbent.action,
+      shadowAction: params.shadow.action,
+      actionMatch: params.incumbent.action === params.shadow.action,
+      verdictMatch: params.incumbent.verdict === params.shadow.verdict,
+      approvalRatioDelta: Number((params.shadow.approvalRatio - params.incumbent.approvalRatio).toFixed(4)),
+      veto: params.veto,
+      confidence: params.confidence,
+      executionEnabled: false
+    };
+  }
+
+  public buildShadowReport(comparisons: Array<{
+    actionMatch: boolean;
+    verdictMatch: boolean;
+    veto: boolean;
+    confidence: number;
+  }>): {
+    total: number;
+    actionMatches: number;
+    verdictMatches: number;
+    vetoes: number;
+    averageConfidence: number;
+    actionMatchRate: number;
+    executionEnabled: false;
+  } {
+    const total = comparisons.length;
+    const actionMatches = comparisons.filter((item) => item.actionMatch).length;
+    const verdictMatches = comparisons.filter((item) => item.verdictMatch).length;
+    const vetoes = comparisons.filter((item) => item.veto).length;
+    const averageConfidence = total === 0 ? 0 : Number((comparisons.reduce((sum, item) => sum + item.confidence, 0) / total).toFixed(4));
+    return {
+      total,
+      actionMatches,
+      verdictMatches,
+      vetoes,
+      averageConfidence,
+      actionMatchRate: total === 0 ? 0 : Number((actionMatches / total).toFixed(4)),
+      executionEnabled: false
+    };
+  }
+
+  public evaluateSevenMemberCouncil(params: {
+    symbol: string;
+    candles: Array<{ close: number; high?: number; low?: number; volume?: number }>;
+    signal: 'BUY' | 'SELL';
+  }): {
+    symbol: string;
+    action: 'BUY' | 'SELL' | 'HOLD';
+    confidence: number;
+    veto: boolean;
+    executionEnabled: false;
+    members: Array<{ id: string; action: 'BUY' | 'SELL' | 'HOLD'; confidence: number; veto: boolean }>;
+  } {
+    const prices = params.candles.map((candle) => candle.close).filter((price) => Number.isFinite(price));
+    const first = prices[0] ?? 0;
+    const last = prices[prices.length - 1] ?? 0;
+    const trend = first > 0 ? (last - first) / first : 0;
+    const volumes = params.candles.map((candle) => candle.volume ?? 0);
+    const averageVolume = volumes.length ? volumes.reduce((sum, value) => sum + value, 0) / volumes.length : 0;
+    const latestVolume = volumes[volumes.length - 1] ?? 0;
+    const bullish = trend > 0;
+    const bearish = trend < 0;
+    const baseAction = bullish ? 'BUY' : bearish ? 'SELL' : 'HOLD';
+    const confidence = Math.min(1, Math.max(0.1, Math.abs(trend) * 10));
+    const members = SEVEN_MEMBER_COUNCIL.map((member) => {
+      const action: 'BUY' | 'SELL' | 'HOLD' = member.id === 'risk-sentinel'
+        ? (Math.abs(trend) > 0.25 ? 'HOLD' : baseAction)
+        : member.id === 'volume-liquidity' && latestVolume < averageVolume * 0.5
+          ? 'HOLD'
+          : baseAction;
+      return { id: member.id, action, confidence: Number(confidence.toFixed(4)), veto: member.id === 'risk-sentinel' && action === 'HOLD' && Math.abs(trend) > 0.25 };
+    });
+    const veto = members.some((member) => member.veto);
+    const action = veto ? 'HOLD' : params.signal === baseAction ? baseAction : 'HOLD';
+    return { symbol: params.symbol, action, confidence: Number(confidence.toFixed(4)), veto, executionEnabled: false, members };
   }
 
   public static getInstance(config?: Partial<BoardConfig>): BoardOfDirectorsEngine {

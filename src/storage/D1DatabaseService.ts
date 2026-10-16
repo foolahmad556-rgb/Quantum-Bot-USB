@@ -30,5 +30,9 @@ export class D1DatabaseService extends DatabaseService {
   async getState<T>(key: string) { const r = await this.call<{ value?: T }>(`/d1/state/${encodeURIComponent(key)}`); return r.value ?? null; }
   async savePrice(symbol: string, price: number) { await this.call('/d1/prices', { method: 'POST', body: JSON.stringify({ symbol, price }) }); }
   async getPriceHistory(symbol: string, limit = 100) { return (await this.call<{ items: PriceRecord[] }>(`/d1/prices/${encodeURIComponent(symbol)}?limit=${limit}`)).items; }
+  async saveShadowComparison(comparison: any) { await this.call('/d1/council/shadow', { method: 'POST', body: JSON.stringify(comparison) }); }
+  async getShadowComparisons(limit = 100) {
+    return (await this.call<{ items: any[] }>(`/d1/council/shadow?limit=${Math.max(1, Math.min(1000, limit))}`)).items;
+  }
   close() { /* remote service has no local handle */ }
 }

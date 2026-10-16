@@ -852,6 +852,36 @@ export class TradingPipeline {
       latencyMs: 15
     });
 
+    // Seven-member council runs in SHADOW mode: observe same signal, never execute.
+    const shadowSnapshot = this.boardOfDirectors.getShadowModeSnapshot();
+    const shadowDecision = this.boardOfDirectors.evaluateSevenMemberCouncil({
+      symbol,
+      candles,
+      signal: signalType
+    });
+    const shadowComparison = this.boardOfDirectors.compareShadowDecision({
+      symbol,
+      incumbent: { verdict: boardDecision.verdict, action: boardDecision.action, approvalRatio: boardDecision.approvalRatio },
+      shadow: {
+        verdict: shadowDecision.veto ? 'REJECTED' : shadowDecision.action === 'HOLD' ? 'CONDITIONAL' : 'APPROVED',
+        action: shadowDecision.action,
+        approvalRatio: shadowDecision.confidence
+      },
+      veto: shadowDecision.veto,
+      confidence: shadowDecision.confidence
+    });
+    this.eventJournal.record(
+      'INFO',
+      'STRATEGY',
+      `[COUNCIL_SHADOW] ${symbol} incumbent=${shadowComparison.incumbentAction} shadow=${shadowComparison.shadowAction} actionMatch=${shadowComparison.actionMatch} verdictMatch=${shadowComparison.verdictMatch} ratioDelta=${shadowComparison.approvalRatioDelta} mode=${shadowSnapshot.mode} members=${shadowSnapshot.members} mappedLegacy=${shadowSnapshot.mappedLegacyAgents} executionEnabled=${shadowComparison.executionEnabled}`
+    );
+    const saveShadowComparison = (this.db as DatabaseService & { saveShadowComparison?: (value: unknown) => Promise<void> }).saveShadowComparison;
+    if (saveShadowComparison) {
+      void saveShadowComparison.call(this.db, { ...shadowComparison, mode: shadowSnapshot.mode, members: shadowSnapshot.members, mappedLegacyAgents: shadowSnapshot.mappedLegacyAgents, createdAt: Date.now() }).catch(() => {
+        /* Shadow persistence must never alter incumbent trading path. */
+      });
+    }
+
     if (boardDecision.verdict === 'REJECTED') {
       console.log('🏛️ [BOARD REJECTED] ' + symbol + ' signal blocked by Board of Directors: ' + boardDecision.action + ' (Guards: ' + boardDecision.guardsPassed + '/8)');
       this.eventJournal.record('WARN', 'STRATEGY', 'Signal blocked for ' + symbol + ': ' + boardDecision.action);

@@ -284,6 +284,18 @@ app.post('/api/board/learn', async (req: Request, res: Response) => {
   }
 });
 
+app.get('/api/council/shadow-report', async (req: Request, res: Response) => {
+  try {
+    if (!cloudDb) return fail(res, 503, 'Persistent D1 storage unavailable');
+    const limit = typeof req.query.limit === 'string' ? Number(req.query.limit) : 100;
+    const comparisons = await cloudDb.getShadowComparisons(Number.isFinite(limit) ? limit : 100);
+    const report = board.buildShadowReport(comparisons);
+    ok(res, { report, comparisons });
+  } catch (e: any) {
+    fail(res, 500, e?.message || 'shadow report failed');
+  }
+});
+
 app.get('/api/board/sessions', async (_req: Request, res: Response) => {
   const s = await callAny(board, ['getDeliberationSessions', 'getSessions', 'getHistory']);
   ok(res, { sessions: s.called ? s.value : [] });
