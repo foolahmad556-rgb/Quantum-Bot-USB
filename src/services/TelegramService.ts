@@ -207,6 +207,7 @@ export class TelegramService {
         // Limit queue size to avoid stale backlog
         if (this.queue.length >= this.MAX_QUEUE_SIZE) {
             const dropped = this.queue.shift();
+            console.warn(`⚠️ [TELEGRAM] Queue full (${this.MAX_QUEUE_SIZE}). Dropped oldest message: "${dropped?.text?.slice(0, 50)}..."`);
             if (dropped?.resolve) dropped.resolve(false);
         }
 

@@ -84,6 +84,30 @@ const ok = (res: Response, data: Record<string, any> = {}) =>
 const fail = (res: Response, code: number, error: string, extra: Record<string, any> = {}) =>
   res.status(code).json({ success: false, error, ...extra });
 
+/**
+ * Retry helper with exponential backoff for DB operations
+ */
+async function retryWithBackoff<T>(
+  operation: () => Promise<T>,
+  maxAttempts: number = 3,
+  initialDelayMs: number = 100
+): Promise<T> {
+  let lastError: Error | null = null;
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      return await operation();
+    } catch (err) {
+      lastError = err as Error;
+      if (attempt < maxAttempts) {
+        const delayMs = initialDelayMs * Math.pow(2, attempt - 1);
+        console.warn(`⚠️ DB operation failed (attempt ${attempt}/${maxAttempts}). Retrying in ${delayMs}ms...`, (err as any)?.message);
+        await new Promise(r => setTimeout(r, delayMs));
+      }
+    }
+  }
+  throw lastError || new Error('Max retry attempts exceeded');
+}
+
 /* ------------------------------------------------------------------ */
 /* app bootstrap                                                       */
 /* ------------------------------------------------------------------ */
@@ -225,32 +249,36 @@ app.post('/api/auth/register', async (req: Request, res: Response) => {
       return fail(res, 400, 'Password must be at least 6 characters');
     }
 
-    // Check if user already exists
-    const existingUser = await new Promise<any>((resolve, reject) => {
-      userDb!.get('SELECT id FROM users WHERE email = ?', [email], (err: any, row: any) => {
-        if (err) reject(err);
-        else resolve(row);
-      });
-    });
+    // Check if user already exists (with retry)
+    const existingUser = await retryWithBackoff(() => 
+      new Promise<any>((resolve, reject) => {
+        userDb!.get('SELECT id FROM users WHERE email = ?', [email], (err: any, row: any) => {
+          if (err) reject(err);
+          else resolve(row);
+        });
+      })
+    );
 
     if (existingUser) {
       return fail(res, 409, 'Email already registered');
     }
 
-    // Hash password and insert
+    // Hash password and insert (with retry)
     const passwordHash = await hashPassword(password);
     const userId = `user_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`;
     
-    await new Promise<void>((resolve, reject) => {
-      userDb!.run(
-        `INSERT INTO users (id, email, password_hash, created_at) VALUES (?, ?, ?, ?)`,
-        [userId, email, passwordHash, Date.now()],
-        (err: any) => {
-          if (err) reject(err);
-          else resolve();
-        }
-      );
-    });
+    await retryWithBackoff(() =>
+      new Promise<void>((resolve, reject) => {
+        userDb!.run(
+          `INSERT INTO users (id, email, password_hash, created_at) VALUES (?, ?, ?, ?)`,
+          [userId, email, passwordHash, Date.now()],
+          (err: any) => {
+            if (err) reject(err);
+            else resolve();
+          }
+        );
+      })
+    );
 
     const token = generateToken({ userId, email }, JWT_SECRET);
     return ok(res, { 
@@ -322,13 +350,18 @@ app.get('/api/auth/validate', async (req: Request, res: Response) => {
 /* ------------------------------------------------------------------ */
 
 app.get('/api/health', (_req: Request, res: Response) => {
-  ok(res, {
-    status: 'ok',
+  const pipelineRunning = typeof pipeline.isRunning === 'function' ? pipeline.isRunning() : !!pipeline.isRunning;
+  const status = pipelineRunning && cloudStorageOk ? 'healthy' : (pipelineRunning ? 'degraded' : 'ready');
+  const statusCode = status === 'healthy' ? 200 : (status === 'degraded' ? 200 : 200);
+  
+  res.status(statusCode).json({
+    status,
     uptimeSec: Math.floor((Date.now() - bootTime) / 1000),
     version: process.env.npm_package_version || '1.0.0',
-    tradingRunning: !!pipeline.isRunning,
+    tradingRunning: pipelineRunning,
     storage: cloudStorageOk ? 'cloudflare-d1' : 'unavailable',
     autostart: AUTOSTART,
+    timestamp: new Date().toISOString(),
   });
 });
 
@@ -726,6 +759,11 @@ app.listen(PORT, '0.0.0.0', async () => {
   console.log(`🚀 Quantum Bot server listening on 0.0.0.0:${PORT}`);
   console.log(`   storage=${cloudStorageOk ? 'cloudflare-d1' : 'UNAVAILABLE'} autostart=${AUTOSTART}`);
   
+  // Security check: warn if JWT_SECRET is using default
+  if (JWT_SECRET === 'dev-secret-change-in-production') {
+    console.warn('⚠️  [SECURITY] JWT_SECRET is using default value. Set JWT_SECRET env var for production!');
+  }
+  
   // Initialize SQLite users DB
   try {
     await initDb();
@@ -744,6 +782,20 @@ app.listen(PORT, '0.0.0.0', async () => {
   } catch (e: any) {
     console.error('❌ Pipeline start failed (API still live):', e?.message || e);
   }
+});
+
+// Global error handlers
+process.on('unhandledRejection', (reason: any, promise: Promise<any>) => {
+  console.error('❌ [CRITICAL] Unhandled Promise Rejection:', reason);
+  console.error('Promise:', promise);
+  // Don't exit - allow server to continue, but log for debugging
+});
+
+process.on('uncaughtException', (error: Error) => {
+  console.error('❌ [CRITICAL] Uncaught Exception:', error.message);
+  console.error('Stack:', error.stack);
+  // Log then exit - uncaught sync errors are unrecoverable
+  process.exit(1);
 });
 
 process.on('SIGTERM', () => process.exit(0));
