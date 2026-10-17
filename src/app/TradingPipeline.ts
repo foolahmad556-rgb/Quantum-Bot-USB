@@ -1160,6 +1160,24 @@ export class TradingPipeline {
       const savedKs = await this.db.getState<{ level: KillSwitchLevel; active: boolean; reason: string }>('killswitch_state');
       if (savedKs && restorePersistentKillSwitch(savedKs, this.killSwitch)) {
         console.warn(`🚨 Restoring persisted KillSwitch state: [${savedKs.level}] - ${savedKs.reason}`);
+        
+        // Auto-recovery: if KillSwitch was triggered due to D1 quota (old issue), check if it's resolved
+        if (savedKs.reason?.includes('quota') || savedKs.reason?.includes('D1') || savedKs.reason?.includes('storage')) {
+          console.log('ℹ️ KillSwitch was triggered for storage/quota issue. Checking if resolved via Hybrid Storage...');
+          
+          // Check current storage quota status
+          try {
+            const quotaStatus = await this.db.getState<{ used: number; limit: number }>('storage_quota_status');
+            if (quotaStatus && quotaStatus.used < quotaStatus.limit * 0.8) {
+              // Quota now healthy - auto-recover KillSwitch
+              console.log(`✅ Storage quota recovered (${quotaStatus.used}/${quotaStatus.limit} bytes). Auto-resetting KillSwitch...`);
+              this.killSwitch.reset('Auto-recovery: Storage quota issue resolved via Hybrid Storage');
+              await this.db.updateState('killswitch_state', { level: 'NORMAL', active: false, reason: 'Auto-recovered' });
+            }
+          } catch (e) {
+            console.warn('⚠️ Could not verify quota status, keeping KillSwitch as-is:', (e as any)?.message);
+          }
+        }
       }
 
       const apiKey = this.orderGateway.getApiKey();

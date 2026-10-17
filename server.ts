@@ -662,6 +662,30 @@ app.post('/api/protected/positions/close-all', requireAuth, async (_req: Request
   }
 });
 
+app.post('/api/emergency/killswitch/reset', async (req: Request, res: Response) => {
+  // Emergency bypass: check webhook token instead of JWT
+  const token = req.headers.authorization?.replace('Bearer ', '');
+  const webhookSecret = process.env.WEBHOOK_SECRET || 'dev-webhook-secret';
+  
+  if (token !== webhookSecret) {
+    return fail(res, 401, 'Invalid webhook token');
+  }
+  
+  try {
+    const ks = getAny(pipeline, ['killSwitch', 'getKillSwitch']);
+    const r = await callAny(ks, ['reset', 'resetKillSwitch', 'clear']);
+    
+    console.warn(`⚠️ Emergency KillSwitch reset executed via /api/emergency/killswitch/reset`);
+    ok(res, { 
+      success: true,
+      message: 'KillSwitch reset via emergency endpoint',
+      reset: r.called 
+    });
+  } catch (e: any) {
+    fail(res, 500, `Emergency reset failed: ${e?.message}`);
+  }
+});
+
 app.post('/api/protected/killswitch/reset', requireAuth, async (_req: Request, res: Response) => {
   const ks = getAny(pipeline, ['killSwitch', 'getKillSwitch']);
   const r = await callAny(ks, ['reset', 'resetKillSwitch', 'clear']);
