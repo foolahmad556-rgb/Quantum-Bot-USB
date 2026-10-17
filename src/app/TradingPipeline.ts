@@ -48,6 +48,7 @@ import { DynamicRiskManager } from '../risk/DynamicRiskManager';
 import { RegimeDetector, RegimeAnalysis } from '../risk/RegimeDetector';
 import { PortfolioSizer } from '../risk/PortfolioSizer';
 import { PartialProfitManager } from '../execution/PartialProfitManager';
+import { HybridReconciliationManager } from '../exchange/HybridReconciliationManager';
 import { ScaleInManager } from '../execution/ScaleInManager';
 import { failClosedOnInvalidEquity, restorePersistentKillSwitch, watchdogMayRestart } from '../execution/ReconciliationSafety';
 import { AssetScreener } from '../market-data/AssetScreener';
@@ -124,6 +125,8 @@ export class TradingPipeline {
     'NVDA/USD': 0.110,
     'AAPL/USD': 0.075,
   };
+
+  private hybridReconciliationManager: HybridReconciliationManager | null = null;
 
   constructor(telegramService?: TelegramService) {
     this.config = { ...INITIAL_RUNTIME_CONFIG };
@@ -1194,85 +1197,61 @@ export class TradingPipeline {
 
       const timestamp = Date.now();
       const recvWindow = 5000;
-      const query = `recvWindow=${recvWindow}&timestamp=${timestamp}`;
-      const signature = crypto.createHmac('sha256', apiSecret).update(query).digest('hex');
-      const headers = { 'X-MBX-APIKEY': apiKey };
-
-      // Rate limiter: max 1 reconciliation per 30 seconds (60 requests/hour vs 1200 limit)
-      const lastReconciliation = await this.db.getState<{ timestamp: number }>('last_reconciliation_time');
-      const now = Date.now();
-      if (lastReconciliation && (now - lastReconciliation.timestamp) < 30000) {
-        console.log(`⏳ Rate limiting reconciliation (${Math.round((30000 - (now - lastReconciliation.timestamp)) / 1000)}s cooldown remaining)`);
-        return;
-      }
-
-      // Retry logic with exponential backoff on 418/429 errors
-      let accountRes, positionsRes;
-      let retryCount = 0;
-      const maxRetries = 2;
-
-      while (retryCount < maxRetries) {
+      // Initialize Hybrid Manager on first reconciliation
+      if (!this.hybridReconciliationManager) {
+        this.hybridReconciliationManager = new HybridReconciliationManager(
+          apiKey,
+          apiSecret,
+          baseUrl
+        );
         try {
-          [accountRes, positionsRes] = await Promise.all([
-            fetch(`${baseUrl}/fapi/v2/account?${query}&signature=${signature}`, { headers }),
-            fetch(`${baseUrl}/fapi/v2/positionRisk?${query}&signature=${signature}`, { headers })
-          ]);
-
-          // Check for rate limit (418, 429)
-          if (accountRes.status === 418 || accountRes.status === 429 || positionsRes.status === 418 || positionsRes.status === 429) {
-            retryCount++;
-            const backoffMs = Math.pow(2, retryCount) * 5000; // 10s, 20s
-            console.warn(`⚠️ Rate limited (HTTP ${accountRes.status || positionsRes.status}). Backoff: ${backoffMs}ms, Retry: ${retryCount}/${maxRetries}`);
-            
-            if (retryCount < maxRetries) {
-              await new Promise(r => setTimeout(r, backoffMs));
-              continue;
-            }
-          }
-          break;
-        } catch (e) {
-          retryCount++;
-          if (retryCount < maxRetries) {
-            await new Promise(r => setTimeout(r, Math.pow(2, retryCount) * 5000));
-            continue;
-          }
-          throw e;
+          await this.hybridReconciliationManager.start();
+          console.log(`✅ Hybrid Reconciliation started (WebSocket + REST fallback)`);
+        } catch (e: any) {
+          console.error(`⚠️ Hybrid manager startup failed: ${e.message}`);
+          this.killSwitch.trigger('HARD_HALT', `Hybrid reconciliation startup failed: ${e.message}`, 'AUTO_RISK_ENGINE');
+          return;
         }
       }
 
-      if (!accountRes.ok || !positionsRes.ok) {
-        const accErr = !accountRes.ok ? await accountRes.text().catch(() => '') : 'OK';
-        const posErr = !positionsRes.ok ? await positionsRes.text().catch(() => '') : 'OK';
-        const reason = `Exchange reconciliation failed (Account HTTP ${accountRes.status}: ${accErr} | Positions HTTP ${positionsRes.status}: ${posErr})`;
-        console.error(`🚨 ${reason}`);
-        this.killSwitch.trigger('HARD_HALT', reason, 'AUTO_RISK_ENGINE');
-        return;
-      }
+      // Get reconciliation data (WebSocket first, REST fallback if needed)
+      try {
+        const reconciliation = await this.hybridReconciliationManager.getReconciliation();
+        const { account, positions, source } = reconciliation;
 
-      // Update last reconciliation time
-      await this.db.updateState('last_reconciliation_time', { timestamp: now });
+        if (!account || positions === null) {
+          console.warn(`⚠️ No reconciliation data available (source: ${source})`);
+          return;
+        }
 
-      const accountData = await accountRes.json();
-      const positionsData = await positionsRes.json();
+        console.log(`📊 Reconciliation via ${source}: $${account.totalWalletBalance.toFixed(2)} | ${positions.length} positions`);
 
-      const realEquity = parseFloat(accountData.totalWalletBalance);
-      if (!failClosedOnInvalidEquity(realEquity, this.killSwitch)) {
-        return;
-      }
+        // Store reconciliation time for monitoring
+        await this.db.updateState('last_reconciliation_time', { 
+          timestamp: Date.now(),
+          source,
+          accountBalance: account.totalWalletBalance,
+          positionCount: positions.length
+        });
 
-      // Keep portfolio sizer synced with real exchange equity
-      this.portfolioSizer.updateBalance(realEquity);
+        const realEquity = account.totalWalletBalance;
+        if (!failClosedOnInvalidEquity(realEquity, this.killSwitch)) {
+          return;
+        }
 
-      const dbState = await this.db.getState<{ equity: number; timestamp: number }>('last_balance');
-      if (dbState && Math.abs(realEquity - dbState.equity) > 1) {
-        console.log(`📊 Balance reconciled: Real: $${realEquity.toFixed(2)}, DB: $${dbState.equity.toFixed(2)}. Updating state.`);
-      }
-      // 🔥 Update DurableStateManager instead of D1
-      durableStateManager.updateBalance(realEquity, 0, 0);
+        // Keep portfolio sizer synced with real exchange equity
+        this.portfolioSizer.updateBalance(realEquity);
 
-      if (Array.isArray(positionsData)) {
-        const realOpenPositions = positionsData.filter((p: any) => parseFloat(p.positionAmt) !== 0);
-        const realOpenKeys = new Set(realOpenPositions.map((p: any) => `${p.symbol}:${p.positionSide || 'BOTH'}`));
+        const dbState = await this.db.getState<{ equity: number; timestamp: number }>('last_balance');
+        if (dbState && Math.abs(realEquity - dbState.equity) > 1) {
+          console.log(`📊 Balance reconciled: Real: $${realEquity.toFixed(2)}, DB: $${dbState.equity.toFixed(2)}. Updating state.`);
+        }
+        // 🔥 Update DurableStateManager instead of D1
+        durableStateManager.updateBalance(realEquity, 0, 0);
+
+        if (Array.isArray(positions)) {
+          const realOpenPositions = positions.filter((p: any) => p.positionAmt !== 0);
+          const realOpenKeys = new Set(realOpenPositions.map((p: any) => `${p.symbol}:${p.positionSide || 'BOTH'}`));
 
         // 1. Reconcile DB open trades: if a trade in DB is not on exchange, mark it CLOSED
         const dbOpenTrades = await this.db.getOpenTrades();
