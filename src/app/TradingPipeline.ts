@@ -1198,10 +1198,47 @@ export class TradingPipeline {
       const signature = crypto.createHmac('sha256', apiSecret).update(query).digest('hex');
       const headers = { 'X-MBX-APIKEY': apiKey };
 
-      const [accountRes, positionsRes] = await Promise.all([
-        fetch(`${baseUrl}/fapi/v2/account?${query}&signature=${signature}`, { headers }),
-        fetch(`${baseUrl}/fapi/v2/positionRisk?${query}&signature=${signature}`, { headers })
-      ]);
+      // Rate limiter: max 1 reconciliation per 30 seconds (60 requests/hour vs 1200 limit)
+      const lastReconciliation = await this.db.getState<{ timestamp: number }>('last_reconciliation_time');
+      const now = Date.now();
+      if (lastReconciliation && (now - lastReconciliation.timestamp) < 30000) {
+        console.log(`⏳ Rate limiting reconciliation (${Math.round((30000 - (now - lastReconciliation.timestamp)) / 1000)}s cooldown remaining)`);
+        return;
+      }
+
+      // Retry logic with exponential backoff on 418/429 errors
+      let accountRes, positionsRes;
+      let retryCount = 0;
+      const maxRetries = 2;
+
+      while (retryCount < maxRetries) {
+        try {
+          [accountRes, positionsRes] = await Promise.all([
+            fetch(`${baseUrl}/fapi/v2/account?${query}&signature=${signature}`, { headers }),
+            fetch(`${baseUrl}/fapi/v2/positionRisk?${query}&signature=${signature}`, { headers })
+          ]);
+
+          // Check for rate limit (418, 429)
+          if (accountRes.status === 418 || accountRes.status === 429 || positionsRes.status === 418 || positionsRes.status === 429) {
+            retryCount++;
+            const backoffMs = Math.pow(2, retryCount) * 5000; // 10s, 20s
+            console.warn(`⚠️ Rate limited (HTTP ${accountRes.status || positionsRes.status}). Backoff: ${backoffMs}ms, Retry: ${retryCount}/${maxRetries}`);
+            
+            if (retryCount < maxRetries) {
+              await new Promise(r => setTimeout(r, backoffMs));
+              continue;
+            }
+          }
+          break;
+        } catch (e) {
+          retryCount++;
+          if (retryCount < maxRetries) {
+            await new Promise(r => setTimeout(r, Math.pow(2, retryCount) * 5000));
+            continue;
+          }
+          throw e;
+        }
+      }
 
       if (!accountRes.ok || !positionsRes.ok) {
         const accErr = !accountRes.ok ? await accountRes.text().catch(() => '') : 'OK';
@@ -1211,6 +1248,9 @@ export class TradingPipeline {
         this.killSwitch.trigger('HARD_HALT', reason, 'AUTO_RISK_ENGINE');
         return;
       }
+
+      // Update last reconciliation time
+      await this.db.updateState('last_reconciliation_time', { timestamp: now });
 
       const accountData = await accountRes.json();
       const positionsData = await positionsRes.json();
