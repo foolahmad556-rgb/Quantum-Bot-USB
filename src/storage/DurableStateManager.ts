@@ -202,13 +202,14 @@ export class DurableStateManager {
   /**
    * Archive to D1 (call once per hour)
    * BATCH: 1 write per hour
+   * @param forceArchive - Skip hour check (for testing)
    */
-  public async archiveDaily() {
+  public async archiveDaily(forceArchive = false) {
     const now = Date.now();
     const hourInMs = 3600000;
 
-    // Only archive if 1+ hour has passed since last archive
-    if (now - this.state.lastArchiveTime < hourInMs) {
+    // Only archive if 1+ hour has passed since last archive (unless forced)
+    if (!forceArchive && now - this.state.lastArchiveTime < hourInMs) {
       return;
     }
 
