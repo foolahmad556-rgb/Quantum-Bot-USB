@@ -6,6 +6,8 @@
 import { IntegrationBootstrap } from './IntegrationBootstrap';
 import { TradingPipeline } from './TradingPipeline';
 import { TelegramService } from '../services/TelegramService';
+import { initArchiver } from '../storage/HourlyArchiver';
+import { CloudDatabaseService } from '../storage/CloudDatabaseService';
 
 export async function runHeadlessDemo() {
   console.log('====================================================');
@@ -22,6 +24,12 @@ export async function runHeadlessDemo() {
   const telegramService = new TelegramService();
   const pipeline = new TradingPipeline(telegramService);
   pipeline.start();
+
+  // 🔥 Initialize HourlyArchiver
+  console.log('\n[2b] Initializing Hourly Archiver...');
+  const dbService = new CloudDatabaseService();
+  const archiver = initArchiver(dbService);
+  archiver.start();
 
   console.log('\n[3] Solving Initial QUBO Allocation (Quantum Annealing)...');
   const solution = pipeline.runQuantumOptimization();

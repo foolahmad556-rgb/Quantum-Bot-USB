@@ -23,6 +23,7 @@ import {
   isLiveTradingConfirmed,
   normalizeExecutionMode,
 } from '../domain/types';
+import { DurableStateManager, durableStateManager } from '../storage/DurableStateManager';
 import crypto from 'crypto';
 import { OrderGateway } from '../execution/OrderGateway';
 import { UserDataStream } from '../execution/UserDataStream';
@@ -405,7 +406,8 @@ export class TradingPipeline {
         if (this.isRunning) {
           this.correlationRiskManager.calculateCorrelationMatrix();
           const balance = this.userDataStream.getBalance();
-          await this.db.saveBalanceSnapshot(balance.totalEquity, balance.freeMargin, balance.unrealizedPnl);
+          // 🔥 Use DurableStateManager (HOT) instead of D1 (COLD)
+          durableStateManager.updateBalance(balance.totalEquity, balance.freeMargin, balance.unrealizedPnl);
           // Continuous inventory & orphan position reconciliation
           await this.reconcileState();
         }
@@ -564,13 +566,8 @@ export class TradingPipeline {
 ━━━━━━━━━━━━━━━━
       `);
 
-      // Persist killswitch state to DB
-      this.db.saveState('killswitch_state', {
-        level: evt.toLevel,
-        active: evt.toLevel !== 'NORMAL',
-        reason: evt.reason,
-        timestamp: evt.timestamp,
-      }).catch((e) => console.warn('Failed to save killswitch state to DB:', e));
+      // 🔥 Persist killswitch state to DurableStateManager (HOT)
+      durableStateManager.updateKillSwitchState(evt.toLevel, evt.toLevel !== 'NORMAL', evt.reason);
 
       // Auto cancel active orders on non-normal states
       if (evt.toLevel !== 'NORMAL') {
@@ -610,14 +607,14 @@ export class TradingPipeline {
             const protectedOk = await this.applyProtection(ord, pending);
             if (protectedOk) {
               const fillPrice = ord.avgFillPrice || ord.price;
-              await this.db.saveTrade({
+              // 🔥 Use DurableStateManager instead of D1
+              durableStateManager.recordTrade({
                 id: ord.id,
                 timestamp: Date.now(),
                 symbol: ord.symbol,
                 side: ord.side,
                 quantity: ord.filledQuantity,
                 price: fillPrice,
-                strategy: ord.strategyId || 'OU-DECISION-ENGINE',
                 status: 'OPEN',
               });
               this.partialProfitManager.registerPosition(
@@ -757,7 +754,8 @@ export class TradingPipeline {
     const nowMs = Date.now();
     if (nowMs - this.lastSnapshotTime > 5 * 60 * 1000) {
       this.lastSnapshotTime = nowMs;
-      this.db.saveBalanceSnapshot(balance.totalEquity, balance.freeMargin, balance.unrealizedPnl);
+      // 🔥 Use DurableStateManager instead of D1
+      durableStateManager.updateBalance(balance.totalEquity, balance.freeMargin, balance.unrealizedPnl);
     }
 
     // 3. Automated Strategy Evaluation & Partial Profit Management
@@ -969,15 +967,13 @@ export class TradingPipeline {
           book ? (book.spread / book.midPrice) * 100 : 0.02
         );
 
-        // 💾 Save Signal to database
-        await this.db.saveSignal({
+        // 🔥 Record Signal to DurableStateManager (HOT)
+        durableStateManager.recordSignal({
           id: sig.id,
           timestamp: sig.timestamp,
           symbol,
           type: signalType,
-          strength,
-          zScore: sig.zScore,
-          executed: val.allowed,
+          confidence: strength,
         });
 
         if (val.allowed) {
@@ -1211,9 +1207,10 @@ export class TradingPipeline {
 
       const dbState = await this.db.getState<{ equity: number; timestamp: number }>('last_balance');
       if (dbState && Math.abs(realEquity - dbState.equity) > 1) {
-        console.log(`📊 Balance reconciled: Real: $${realEquity.toFixed(2)}, DB: $${dbState.equity.toFixed(2)}. Updating DB.`);
+        console.log(`📊 Balance reconciled: Real: $${realEquity.toFixed(2)}, DB: $${dbState.equity.toFixed(2)}. Updating state.`);
       }
-      await this.db.saveState('last_balance', { equity: realEquity, timestamp: Date.now() });
+      // 🔥 Update DurableStateManager instead of D1
+      durableStateManager.updateBalance(realEquity, 0, 0);
 
       if (Array.isArray(positionsData)) {
         const realOpenPositions = positionsData.filter((p: any) => parseFloat(p.positionAmt) !== 0);
@@ -1260,16 +1257,15 @@ export class TradingPipeline {
             });
 
             // تسجيل الصفقة اليتيمة في قاعدة البيانات
-            await this.db.saveTrade({
+            // 🔥 Record orphan position to DurableStateManager (HOT)
+            durableStateManager.recordTrade({
               id: orphanOrderId,
               symbol: formattedSymbol,
               side: side,
               quantity: qty,
               price: entryPrice,
               timestamp: Date.now(),
-              strategy: 'Orphan-Adopted-Protective-Manager',
               status: 'OPEN',
-              pnl: 0,
             });
 
             // تسجيلها في مدير الأرباح الجزئية والوقف المتحرك
