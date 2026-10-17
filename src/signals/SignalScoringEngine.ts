@@ -39,7 +39,13 @@ export class SignalScoringEngine {
 
     if (side === 'BUY') {
       // For longs, want RSI bouncing from oversold
-      if (rsi < 30) {
+      if (rsi < 15) {
+        score = 25; // Extreme oversold panic
+        reason = `Extreme Oversold (RSI=${rsi.toFixed(0)})`;
+      } else if (rsi < 25) {
+        score = 23; // Very strong oversold
+        reason = `Extreme Oversold (RSI=${rsi.toFixed(0)})`;
+      } else if (rsi < 30) {
         score = 22; // Strong oversold, high reversal probability
         reason = `Extreme Oversold (RSI=${rsi.toFixed(0)})`;
       } else if (rsi < 40) {
@@ -51,7 +57,13 @@ export class SignalScoringEngine {
       }
     } else {
       // For shorts, want RSI falling from overbought
-      if (rsi > 70) {
+      if (rsi > 85) {
+        score = 25; // Extreme overbought panic
+        reason = `Extreme Overbought (RSI=${rsi.toFixed(0)})`;
+      } else if (rsi > 75) {
+        score = 23; // Very strong overbought
+        reason = `Extreme Overbought (RSI=${rsi.toFixed(0)})`;
+      } else if (rsi > 70) {
         score = 22;
         reason = `Extreme Overbought (RSI=${rsi.toFixed(0)})`;
       } else if (rsi > 60) {
@@ -81,25 +93,32 @@ export class SignalScoringEngine {
 
     // Z-score indicates mean-reversion strength
     const zAbs = Math.abs(zScore);
-    const zStrength = Math.min(25, zAbs * 8); // Scale z-score
+    // Scale: 0σ=0pts, 1σ=8pts, 2σ=16pts, 3σ=24pts (capped at 25)
+    const zStrength = Math.min(25, zAbs * 8);
 
     // Hurst exponent: > 0.5 = trending, < 0.5 = mean-reverting
     let hurstBoost = 0;
     if (hurstExponent > 0.6) {
       hurstBoost = 8; // Strong trend
-      reason += `Hurst=${hurstExponent.toFixed(2)} (trending) `;
+      reason += `Hurst=${hurstExponent.toFixed(2)} (strong trend) `;
     } else if (hurstExponent > 0.55) {
       hurstBoost = 5;
       reason += `Hurst=${hurstExponent.toFixed(2)} (weak trend) `;
+    } else if (hurstExponent < 0.45) {
+      hurstBoost = 10; // Mean reverting = good for reversion trades
+      reason += `Hurst=${hurstExponent.toFixed(2)} (mean-reverting) `;
+    } else {
+      hurstBoost = 3;
+      reason += `Hurst=${hurstExponent.toFixed(2)} (neutral) `;
     }
 
-    // Stationarity check: mean-reverting pairs safer
+    // Stationarity check: mean-reverting pairs safer & higher reward
     if (isStationary) {
-      score = Math.min(25, zStrength + hurstBoost + 5);
-      reason += `Stationary (ADF test passed)`;
+      score = Math.min(25, zStrength + hurstBoost + 8); // +8 stationarity bonus
+      reason += `| Stationary (ADF passed)`;
     } else {
       score = Math.min(25, zStrength + hurstBoost);
-      reason += `Non-stationary`;
+      reason += `| Non-stationary`;
     }
 
     if (score === 0) reason = `Z-Score=${zScore.toFixed(2)}, No clear signal`;

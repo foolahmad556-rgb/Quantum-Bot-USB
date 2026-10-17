@@ -198,11 +198,11 @@ test('Regime: market regime field is set correctly', () => {
 // Edge Cases
 // ============================================================================
 
-test('Edge: extreme RSI (5) capped at 22', () => {
+test('Edge: extreme RSI (5) gives max score (25)', () => {
   const features = mockFeatures({ rsi14: 5 });
   const consensus = engine.scoreSignal(features, 'BUY', 2.0, 0.04);
   const rsiScore = consensus.signals.find(s => s.name === 'RSI14');
-  assert.equal(rsiScore?.score, 22, `RSI score ${rsiScore?.score} != 22`);
+  assert.equal(rsiScore?.score, 25, `RSI score ${rsiScore?.score} should be 25 for extreme`);
 });
 
 test('Edge: zero volume score = 0', () => {
