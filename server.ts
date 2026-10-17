@@ -13,7 +13,8 @@
  * Required env (Botkeep Environment, never committed):
  *  FIREBASE_CREDENTIALS_JSON, SQL_HOST, SQL_USER, SQL_PASSWORD, SQL_DB_NAME
  *  OPERATOR_SECRET (or ADMIN_API_KEY), TELEGRAM_BOT_TOKEN, TELEGRAM_CHANNEL_ID
- *  Optional: TELEGRAM_WEBHOOK_SECRET, EXECUTION_MODE, AUTOSTART_TRADING=true
+ *  Required: JWT_SECRET, TELEGRAM_WEBHOOK_SECRET
+ *  Optional: EXECUTION_MODE, AUTOSTART_TRADING=true
  */
 
 import dotenv from 'dotenv';
@@ -41,7 +42,11 @@ import { generateToken, verifyToken, hashPassword, comparePassword } from './src
 
 const PORT = Number(process.env.PORT || process.env.SERVER_PORT || 3000);
 const OPERATOR_SECRET = (process.env.OPERATOR_SECRET || process.env.ADMIN_API_KEY || '').trim();
-const JWT_SECRET = (process.env.JWT_SECRET || 'dev-secret-change-in-production').trim();
+const configuredJwtSecret = process.env.JWT_SECRET?.trim();
+if (!configuredJwtSecret || configuredJwtSecret === 'dev-secret-change-in-production') {
+  throw new Error('JWT_SECRET must be configured with a strong production secret');
+}
+const JWT_SECRET: string = configuredJwtSecret;
 const AUTOSTART = String(process.env.AUTOSTART_TRADING || process.env.AUTO_START_TRADING || '').toLowerCase() === 'true';
 
 /* ------------------------------------------------------------------ */
@@ -506,7 +511,7 @@ app.get('/api/telegram/status', async (_req: Request, res: Response) => {
   ok(res, { status: s.called ? s.value : { configured: !!process.env.TELEGRAM_BOT_TOKEN } });
 });
 
-app.post('/api/telegram/config', async (req: Request, res: Response) => {
+app.post('/api/telegram/config', requireAuth, async (req: Request, res: Response) => {
   try {
     const b = req.body || {};
     await (telegramService as any).updateConfig(
@@ -537,17 +542,16 @@ async function telegramHeartbeat(_req: Request, res: Response) {
     fail(res, 500, e?.message || 'heartbeat failed');
   }
 }
-app.post('/api/telegram/heartbeat/send-now', telegramHeartbeat);
-app.post('/api/telegram/test', telegramHeartbeat);
+app.post('/api/telegram/heartbeat/send-now', requireAuth, telegramHeartbeat);
+app.post('/api/telegram/test', requireAuth, telegramHeartbeat);
 
 // Telegram webhook ingress (Worker forwards here; optional shared secret).
 app.post('/webhook/telegram', async (req: Request, res: Response) => {
   try {
     const expected = (process.env.TELEGRAM_WEBHOOK_SECRET || '').trim();
-    if (expected) {
-      const got = req.header('x-telegram-bot-api-secret-token') || '';
-      if (got !== expected) return fail(res, 403, 'bad webhook secret');
-    }
+    if (!expected) return fail(res, 503, 'telegram webhook secret is not configured');
+    const got = req.header('x-telegram-bot-api-secret-token') || '';
+    if (got !== expected) return fail(res, 403, 'bad webhook secret');
     const update = req.body || {};
     const msg = update.message || update.edited_message;
     const text: string = msg?.text || '';
@@ -662,14 +666,7 @@ app.post('/api/protected/positions/close-all', requireAuth, async (_req: Request
   }
 });
 
-app.post('/api/emergency/killswitch/reset', async (req: Request, res: Response) => {
-  // Emergency bypass: check webhook token instead of JWT
-  const token = req.headers.authorization?.replace('Bearer ', '');
-  const webhookSecret = process.env.WEBHOOK_SECRET || 'dev-webhook-secret';
-  
-  if (token !== webhookSecret) {
-    return fail(res, 401, 'Invalid webhook token');
-  }
+app.post('/api/emergency/killswitch/reset', requireAuth, async (_req: Request, res: Response) => {
   
   try {
     const ks = getAny(pipeline, ['killSwitch', 'getKillSwitch']);

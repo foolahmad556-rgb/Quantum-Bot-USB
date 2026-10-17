@@ -92,18 +92,18 @@ describe('Webhook Endpoint Integration', () => {
   describe('Webhook Bearer Token Security', () => {
     it('should validate Bearer token presence', () => {
       // Simulate request with Bearer token
-      const authHeader = 'Bearer sk_test_abc123def456ghi789';
+      const authHeader = 'Bearer unit-test-token';
       const token = authHeader.replace(/^Bearer\s+/, '');
 
       // Token should not be empty
       assert.ok(token.length > 0, 'Token should be extracted');
-      assert.strictEqual(token, 'sk_test_abc123def456ghi789', 'Token should match');
+      assert.strictEqual(token, 'unit-test-token', 'Token should match');
     });
 
     it('should reject missing Bearer token', () => {
       // Simulate missing auth header
       let isValid = false;
-      const authHeader = undefined;
+      let authHeader: any = undefined;
 
       if (authHeader?.startsWith('Bearer ')) {
         isValid = true;
@@ -114,13 +114,13 @@ describe('Webhook Endpoint Integration', () => {
 
     it('should reject invalid Bearer token format', () => {
       const validTokens = [
-        'Bearer sk_test_abc123',
-        'Bearer pk_live_xyz789',
+        'Bearer unit-test-token',
+        'Bearer unit-test-token-2',
       ];
 
       const invalidTokens = [
         'Basic dXNlcjpwYXNz',
-        'sk_test_abc123', // Missing Bearer prefix
+        'unit-test-token', // Missing Bearer prefix
         'Bearer', // No token value
         '', // Empty
       ];
@@ -209,13 +209,13 @@ describe('Webhook Endpoint Integration', () => {
     });
 
     it('should handle missing required fields in signal', () => {
-      const incompleteSignal = {
+      const incompleteSignal: any = {
         // Missing: id, symbol, type, confidence, timestamp
         someField: 'value',
       };
 
       // Validation should fail
-      const isValid: any =
+      const isValid: boolean =
         incompleteSignal.id &&
         incompleteSignal.symbol &&
         incompleteSignal.type &&

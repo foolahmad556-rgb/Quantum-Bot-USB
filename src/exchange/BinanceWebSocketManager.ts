@@ -47,7 +47,10 @@ export class BinanceWebSocketManager extends EventEmitter {
       console.log(`✅ WebSocket Listen Key obtained`);
 
       // 2. Connect to WebSocket stream
-      const wsUrl = `wss://stream.binance.com:9443/ws/${this.listenKey}`;
+      const wsBaseUrl = this.baseUrl.includes('testnet.binancefuture.com')
+        ? 'wss://stream.binancefuture.com/ws'
+        : 'wss://fstream.binance.com/ws';
+      const wsUrl = `${wsBaseUrl}/${this.listenKey}`;
       this.ws = new WebSocket(wsUrl);
 
       this.ws.on('open', () => {

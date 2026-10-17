@@ -45,10 +45,10 @@ describe('TradingPipeline Integration with DurableStateManager', () => {
       const tradeData = {
         id: 'ORDER_9f5e8d2b',
         symbol: 'BTC/USDT',
-        side: 'BUY',
+        side: 'BUY' as const,
         quantity: 2.5,
         price: 89500,
-        status: 'OPEN',
+        status: 'OPEN' as const,
         timestamp: Date.now(),
       };
 

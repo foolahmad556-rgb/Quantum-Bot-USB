@@ -22,8 +22,7 @@ export const requireAuth = async (
   const authHeader = req.headers.authorization;
   const secretHeader = req.headers['x-operator-secret'] as string | undefined;
   const configuredSecret = (process.env.OPERATOR_SECRET || process.env.ADMIN_API_KEY || '').trim();
-  const JWT_SECRET = process.env.JWT_SECRET || 'dev-secret-change-in-prod';
-
+  const JWT_SECRET = process.env.JWT_SECRET?.trim();
   // 1. Check for configured Operator Secret (for headless / VPS / Botkeep.cloud deployments)
   if (configuredSecret.length > 0) {
     if (secretHeader && secretHeader === configuredSecret) {
@@ -66,6 +65,13 @@ export const requireAuth = async (
   }
 
   // 3. Verify JWT Token
+  if (!JWT_SECRET || JWT_SECRET === 'dev-secret-change-in-prod' || JWT_SECRET === 'dev-secret-change-in-production') {
+    return res.status(503).json({
+      success: false,
+      error: 'Authentication is not configured securely.',
+      code: 'auth/server-misconfigured',
+    });
+  }
   try {
     const decodedToken = verifyToken(token, JWT_SECRET);
     req.user = decodedToken;

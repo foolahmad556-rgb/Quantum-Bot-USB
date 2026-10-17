@@ -1175,7 +1175,7 @@ export class TradingPipeline {
               // Quota now healthy - auto-recover KillSwitch
               console.log(`✅ Storage quota recovered (${quotaStatus.used}/${quotaStatus.limit} bytes). Auto-resetting KillSwitch...`);
               this.killSwitch.reset('Auto-recovery: Storage quota issue resolved via Hybrid Storage');
-              await this.db.updateState('killswitch_state', { level: 'NORMAL', active: false, reason: 'Auto-recovered' });
+              await this.db.saveState('killswitch_state', { level: 'NORMAL', active: false, reason: 'Auto-recovered' });
             }
           } catch (e) {
             console.warn('⚠️ Could not verify quota status, keeping KillSwitch as-is:', (e as any)?.message);
@@ -1227,7 +1227,7 @@ export class TradingPipeline {
         console.log(`📊 Reconciliation via ${source}: $${account.totalWalletBalance.toFixed(2)} | ${positions.length} positions`);
 
         // Store reconciliation time for monitoring
-        await this.db.updateState('last_reconciliation_time', { 
+        await this.db.saveState('last_reconciliation_time', {
           timestamp: Date.now(),
           source,
           accountBalance: account.totalWalletBalance,
@@ -1253,78 +1253,78 @@ export class TradingPipeline {
           const realOpenPositions = positions.filter((p: any) => p.positionAmt !== 0);
           const realOpenKeys = new Set(realOpenPositions.map((p: any) => `${p.symbol}:${p.positionSide || 'BOTH'}`));
 
-        // 1. Reconcile DB open trades: if a trade in DB is not on exchange, mark it CLOSED
-        const dbOpenTrades = await this.db.getOpenTrades();
-        for (const trade of dbOpenTrades) {
-          const cleanSym = trade.symbol.replace('/', '');
-          if (!realOpenKeys.has(`${cleanSym}:${(trade as any).positionSide || 'BOTH'}`)) {
-            console.log(`🔄 Reconciled: Trade ${trade.id} (${trade.symbol}) is closed on exchange. Syncing DB status to CLOSED.`);
-            await this.db.closeTrade(trade.id, 0);
+          // 1. Reconcile DB open trades: if a trade in DB is not on exchange, mark it CLOSED
+          const dbOpenTrades = await this.db.getOpenTrades();
+          for (const trade of dbOpenTrades) {
+            const cleanSym = trade.symbol.replace('/', '');
+            if (!realOpenKeys.has(`${cleanSym}:${(trade as any).positionSide || 'BOTH'}`)) {
+              console.log(`🔄 Reconciled: Trade ${trade.id} (${trade.symbol}) is closed on exchange. Syncing DB status to CLOSED.`);
+              await this.db.closeTrade(trade.id, 0);
+            }
           }
-        }
 
-        // 2. Detect & Adopt Orphan Positions (صفقات يتيمة):
-        // إذا كان هناك مركز مفتوح على بايننس غير مسجل في قاعدة البيانات أو إدارة المخاطر
-        // يقوم البوت بتبنيه فوراً، وإدراجه تحت نظام التتبع ووقف الخسارة وجني الأرباح التلقائي!
-        const knownDbSymbols = new Set(dbOpenTrades.map((t) => `${t.symbol.replace('/', '')}:${(t as any).positionSide || 'BOTH'}`));
-        for (const p of realOpenPositions) {
-          const rawSymbol = p.symbol;
-          const posAmt = parseFloat(p.positionAmt);
-          if (posAmt === 0) continue;
+          // 2. Detect & Adopt Orphan Positions (صفقات يتيمة):
+          // إذا كان هناك مركز مفتوح على بايننس غير مسجل في قاعدة البيانات أو إدارة المخاطر
+          // يقوم البوت بتبنيه فوراً، وإدراجه تحت نظام التتبع ووقف الخسارة وجني الأرباح التلقائي!
+          const knownDbSymbols = new Set(dbOpenTrades.map((t) => `${t.symbol.replace('/', '')}:${(t as any).positionSide || 'BOTH'}`));
+          for (const p of realOpenPositions) {
+            const rawSymbol = p.symbol;
+            const posAmt = typeof p.positionAmt === 'string' ? parseFloat(p.positionAmt) : p.positionAmt;
+            if (posAmt === 0) continue;
 
-          if (!knownDbSymbols.has(`${rawSymbol}:${p.positionSide || 'BOTH'}`)) {
-            const baseAsset = rawSymbol.replace('USDT', '');
-            const formattedSymbol = `${baseAsset}/USDT` as AssetSymbol;
-            const side = posAmt > 0 ? 'BUY' : 'SELL';
-            const qty = Math.abs(posAmt);
-            const entryPrice = parseFloat(p.entryPrice) || this.marketData.getPrice(formattedSymbol) || 1;
-            const currentPrice = parseFloat(p.markPrice) || this.marketData.getPrice(formattedSymbol) || entryPrice;
-            const orphanOrderId = `ADOPTED-${Date.now().toString(36)}-${rawSymbol}`;
+            if (!knownDbSymbols.has(`${rawSymbol}:${p.positionSide || 'BOTH'}`)) {
+              const baseAsset = rawSymbol.replace('USDT', '');
+              const formattedSymbol = `${baseAsset}/USDT` as AssetSymbol;
+              const side = posAmt > 0 ? 'BUY' : 'SELL';
+              const qty = Math.abs(posAmt);
+              const entryPrice = typeof p.entryPrice === 'string' ? parseFloat(p.entryPrice) : (p.entryPrice || (this.marketData.getPrice(formattedSymbol) || 1));
+              const currentPrice = typeof p.markPrice === 'string' ? parseFloat(p.markPrice) : (p.markPrice || (this.marketData.getPrice(formattedSymbol) || entryPrice));
+              const orphanOrderId = `ADOPTED-${Date.now().toString(36)}-${rawSymbol}`;
 
-            console.log(`🛡️ Orphan Position Detected for ${rawSymbol} (${side} ${qty} @ $${entryPrice}). Adopting under algorithmic management...`);
+              console.log(`🛡️ Orphan Position Detected for ${rawSymbol} (${side} ${qty} @ $${entryPrice}). Adopting under algorithmic management...`);
 
-            this.userDataStream.adoptPosition({
-              symbol: formattedSymbol, positionSide: p.positionSide === 'LONG' || p.positionSide === 'SHORT' ? p.positionSide : 'BOTH',
-              size: posAmt, entryPrice, currentPrice,
-              unrealizedPnl: parseFloat(p.unRealizedProfit || p.unrealizedProfit || '0') || 0,
-              unrealizedPnlPct: 0, realizedPnl: 0,
-              marginUsed: Math.abs(posAmt * entryPrice) / (parseFloat(p.leverage) || 1),
-              liquidationPrice: parseFloat(p.liquidationPrice || '0') || 0,
-              leverage: parseFloat(p.leverage) || 1, updatedAt: Date.now(),
-            });
+              this.userDataStream.adoptPosition({
+                symbol: formattedSymbol, positionSide: p.positionSide === 'LONG' || p.positionSide === 'SHORT' ? p.positionSide : 'BOTH',
+                size: posAmt, entryPrice, currentPrice,
+                unrealizedPnl: typeof p.unRealizedProfit === 'string' ? parseFloat(p.unRealizedProfit) : (p.unRealizedProfit || 0),
+                unrealizedPnlPct: 0, realizedPnl: 0,
+                marginUsed: Math.abs(posAmt * entryPrice) / 1,
+                liquidationPrice: 0,
+                leverage: 1, updatedAt: Date.now(),
+              });
 
-            // تسجيل الصفقة اليتيمة في قاعدة البيانات
-            // 🔥 Record orphan position to DurableStateManager (HOT)
-            durableStateManager.recordTrade({
-              id: orphanOrderId,
-              symbol: formattedSymbol,
-              side: side,
-              quantity: qty,
-              price: entryPrice,
-              timestamp: Date.now(),
-              status: 'OPEN',
-            });
+              // تسجيل الصفقة اليتيمة في قاعدة البيانات
+              // 🔥 Record orphan position to DurableStateManager (HOT)
+              durableStateManager.recordTrade({
+                id: orphanOrderId,
+                symbol: formattedSymbol,
+                side: side,
+                quantity: qty,
+                price: entryPrice,
+                timestamp: Date.now(),
+                status: 'OPEN',
+              });
 
-            // تسجيلها في مدير الأرباح الجزئية والوقف المتحرك
-            this.partialProfitManager.registerPosition(
-              orphanOrderId,
-              formattedSymbol,
-              side,
-              entryPrice,
-              qty
-            );
+              // تسجيلها في مدير الأرباح الجزئية والوقف المتحرك
+              this.partialProfitManager.registerPosition(
+                orphanOrderId,
+                formattedSymbol,
+                side,
+                entryPrice,
+                qty
+              );
 
-            // تسجيلها في مدير التعزيز
-            this.scaleInManager.registerOriginalPosition(
-              orphanOrderId,
-              formattedSymbol,
-              side,
-              entryPrice,
-              qty
-            );
+              // تسجيلها في مدير التعزيز
+              this.scaleInManager.registerOriginalPosition(
+                orphanOrderId,
+                formattedSymbol,
+                side,
+                entryPrice,
+                qty
+              );
 
-            // إرسال تنبيه بالعربية عبر تليجرام لإبلاغ المتداول
-            await this.telegramService.sendMessage(`
+              // إرسال تنبيه بالعربية عبر تليجرام لإبلاغ المتداول
+              await this.telegramService.sendMessage(`
 🛡️ <b>تم رصد وتبني صفقة يتيمة (Orphan Position Adopted)</b>
 ━━━━━━━━━━━━━━━━
 🪙 الزوج: <b>${formattedSymbol}</b>
@@ -1334,16 +1334,20 @@ export class TradingPipeline {
 🏷️ الحالة: <b>تم الإلحاق بنظام الحماية وإدارة المخاطر</b>
 ━━━━━━━━━━━━━━━━
 ✅ تم تبني المركز المفتوح بنجاح، وربطه بمحرك جني الأرباح الجزئية ووقف الخسارة التلقائي لحمايته من أي انعكاسات.
-            `).catch(() => {});
+              `).catch(() => {});
+            }
           }
-        }
 
-        console.log(`✅ State Reconciliation complete. In sync with Binance Futures (${executionMode}). Equity: $${realEquity.toFixed(2)}, Open positions: ${realOpenPositions.length}`);
+          console.log(`✅ State Reconciliation complete. In sync with Binance Futures (${executionMode}). Equity: $${realEquity.toFixed(2)}, Open positions: ${realOpenPositions.length}`);
+        }
+      } catch (error) {
+        const reason = `Reconciliation failed: ${error instanceof Error ? error.message : String(error)}`;
+        console.error(`🚨 ${reason}`);
+        this.killSwitch.trigger('HARD_HALT', reason, 'AUTO_RISK_ENGINE');
       }
     } catch (error) {
-      const reason = `Reconciliation failed: ${error instanceof Error ? error.message : String(error)}`;
-      console.error(`🚨 ${reason}`);
-      this.killSwitch.trigger('HARD_HALT', reason, 'AUTO_RISK_ENGINE');
+      console.error(`🚨 Outer reconciliation error: ${error instanceof Error ? error.message : String(error)}`);
+      this.killSwitch.trigger('HARD_HALT', `Outer reconciliation failed: ${error instanceof Error ? error.message : String(error)}`, 'AUTO_RISK_ENGINE');
     }
   }
 

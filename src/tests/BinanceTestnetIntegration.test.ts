@@ -45,13 +45,13 @@ describe('Binance Testnet Integration', () => {
       ];
 
       // Extract OHLCV
-      const parsed = klines.map((k) => ({
-        timestamp: k[0],
-        open: parseFloat(k[1]),
-        high: parseFloat(k[2]),
-        low: parseFloat(k[3]),
-        close: parseFloat(k[4]),
-        volume: parseFloat(k[5]),
+      const parsed = klines.map((k: any) => ({
+        timestamp: String(k[0]),
+        open: parseFloat(String(k[1])),
+        high: parseFloat(String(k[2])),
+        low: parseFloat(String(k[3])),
+        close: parseFloat(String(k[4])),
+        volume: parseFloat(String(k[5])),
       }));
 
       assert.strictEqual(parsed.length, 2, 'Should parse 2 candles');
@@ -184,12 +184,12 @@ describe('Binance Testnet Integration', () => {
 
     it('should record executed trade to DurableStateManager', () => {
       const executedTrade = {
-        id: 'ORDER_testnet_123',
+        id: 'ORDER_test_1',
         symbol: 'BTC/USDT',
-        side: 'BUY',
-        quantity: 0.001,
+        side: 'BUY' as const,
+        quantity: 1,
         price: 91000,
-        status: 'OPEN',
+        status: 'OPEN' as const,
         timestamp: Date.now(),
       };
 

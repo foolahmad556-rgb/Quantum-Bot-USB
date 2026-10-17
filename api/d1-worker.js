@@ -1,5 +1,5 @@
 function json(data,status=200){return new Response(JSON.stringify(data),{status,headers:{'Content-Type':'application/json'}})}
-function ok(req,env){return !env.D1_API_SECRET||req.headers.get('Authorization')===`Bearer ${env.D1_API_SECRET}`}
+function ok(req,env){return typeof env.D1_API_SECRET==='string'&&env.D1_API_SECRET.length>0&&req.headers.get('Authorization')===`Bearer ${env.D1_API_SECRET}`}
 async function q(env,sql,p=[]){return env.DB.prepare(sql).bind(...p).run()}
 async function all(env,sql,p=[]){return (await env.DB.prepare(sql).bind(...p).all()).results||[]}
 const parse=r=>JSON.parse(r.payload)
