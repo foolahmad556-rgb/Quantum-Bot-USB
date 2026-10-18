@@ -82,8 +82,7 @@ export class AssetScreener {
       refreshIntervalMs: 60 * 60 * 1000, // تحديث كل ساعة
     };
 
-    // تهيئة البداية بالعملات الأساسية الافتراضية كخيار احتياطي أمني
-    this.populateDefaultFallbackAssets();
+    // Fail closed: assets remain unqualified until exchange data is fetched and validated.
   }
 
   /**
@@ -100,8 +99,11 @@ export class AssetScreener {
       const tickerData = await this.fetch24hrTicker();
 
       if (!exchangeInfo?.symbols || !Array.isArray(tickerData)) {
-        console.warn('⚠️ AssetScreener: Exchange data unavailable, using fallback verified asset set.');
-        return this.qualifiedAssets.size;
+        this.allAssets.clear();
+        this.qualifiedAssets.clear();
+        this.lastRefreshTime = 0;
+        console.warn('AssetScreener: exchange data unavailable; no assets qualified.');
+        return 0;
       }
 
       let qualifiedCount = 0;
@@ -116,22 +118,16 @@ export class AssetScreener {
         const symbol = this.toAssetSymbol(symbolInfo.symbol);
         const ticker = tickerData.find((t: any) => t.symbol === symbolInfo.symbol);
 
-        if (!ticker) continue;
+        if (!ticker || !['quoteVolume', 'priceChangePercent', 'highPrice', 'lowPrice', 'bidPrice', 'askPrice']
+          .every((key) => Number.isFinite(Number(ticker[key])) && Number(ticker[key]) > 0)) continue;
 
-        // عمق دفتر الأوامر وتقدير السبريد من بيانات التيكر اللحظية دون حظر الإقلاع
-        let spread = 0.05;
-        if (ticker.bidPrice && ticker.askPrice) {
-          const bp = parseFloat(ticker.bidPrice);
-          const ap = parseFloat(ticker.askPrice);
-          if (bp > 0 && ap >= bp) {
-            spread = ((ap - bp) / bp) * 100;
-          }
+        // Require observed book depth; ticker volume cannot stand in for order-book liquidity.
+        let depth: { bidDepth: number; askDepth: number; spread: number };
+        try {
+          depth = await this.fetchOrderBookDepth(symbolInfo.symbol);
+        } catch {
+          continue;
         }
-        const depth = {
-          bidDepth: Math.max(50000, parseFloat(ticker.quoteVolume || '1000000') * 0.02),
-          askDepth: Math.max(50000, parseFloat(ticker.quoteVolume || '1000000') * 0.02),
-          spread
-        };
 
         const metrics = this.calculateMetrics(symbolInfo, ticker, depth);
         this.applyFilters(metrics);
@@ -143,18 +139,20 @@ export class AssetScreener {
         }
       }
 
-      if (newQualifiedAssets.size > 0) {
-        this.allAssets = newAllAssets;
-        this.qualifiedAssets = newQualifiedAssets;
-      }
+      // Replace snapshot even when empty; never keep stale qualified assets after failed refresh.
+      this.allAssets = newAllAssets;
+      this.qualifiedAssets = newQualifiedAssets;
 
       this.lastRefreshTime = Date.now();
       console.log(`✅ AssetScreener: ${this.qualifiedAssets.size} qualified out of ${this.allAssets.size} total assets`);
 
       return this.qualifiedAssets.size;
     } catch (error) {
-      console.error('❌ AssetScreener: Error refreshing assets, preserving active qualified assets:', error);
-      return this.qualifiedAssets.size;
+      this.allAssets.clear();
+      this.qualifiedAssets.clear();
+      this.lastRefreshTime = 0;
+      console.error('AssetScreener: refresh failed; cleared qualified assets to avoid stale market data:', error);
+      return 0;
     }
   }
 
@@ -223,14 +221,14 @@ export class AssetScreener {
   private calculateMetrics(symbolInfo: any, ticker: any, depth: any): AssetMetrics {
     const symbol = this.toAssetSymbol(symbolInfo.symbol);
 
-    const spreadPercent = Math.max(0.01, depth.spread || 0.05);
-    const bidAskDepth = Math.min(depth.bidDepth || 100000, depth.askDepth || 100000);
-    const volume24h = parseFloat(ticker.quoteVolume) || 5000000;
+    const spreadPercent = depth.spread;
+    const bidAskDepth = Math.min(depth.bidDepth, depth.askDepth);
+    const volume24h = Number(ticker.quoteVolume);
 
-    const priceChange24h = parseFloat(ticker.priceChangePercent) || 0;
-    const highPrice = parseFloat(ticker.highPrice) || 1;
-    const lowPrice = parseFloat(ticker.lowPrice) || 1;
-    const volatility24h = highPrice > 0 ? ((highPrice - lowPrice) / lowPrice) : 0.05;
+    const priceChange24h = Number(ticker.priceChangePercent);
+    const highPrice = Number(ticker.highPrice);
+    const lowPrice = Number(ticker.lowPrice);
+    const volatility24h = ((highPrice - lowPrice) / lowPrice);
 
     const stabilityScore = Math.max(0, Math.min(1, 1 - (volatility24h / 0.20)));
 
@@ -418,56 +416,7 @@ export class AssetScreener {
     };
   }
 
-  private populateDefaultFallbackAssets(): void {
-    const defaults: Array<{ symbol: AssetSymbol; clean: string; score: number; volume: number; stepSize: number; tickSize: number }> = [
-      { symbol: 'BTC/USDT', clean: 'BTCUSDT', score: 98, volume: 3700000000, stepSize: 0.001, tickSize: 0.1 },
-      { symbol: 'ETH/USDT', clean: 'ETHUSDT', score: 96, volume: 2300000000, stepSize: 0.001, tickSize: 0.01 },
-      { symbol: 'SOL/USDT', clean: 'SOLUSDT', score: 95, volume: 830000000, stepSize: 0.01, tickSize: 0.01 },
-      { symbol: 'NEAR/USDT', clean: 'NEARUSDT', score: 93, volume: 410000000, stepSize: 0.1, tickSize: 0.001 },
-      { symbol: 'SUI/USDT', clean: 'SUIUSDT', score: 92, volume: 320000000, stepSize: 0.1, tickSize: 0.0001 },
-      { symbol: 'DOGE/USDT', clean: 'DOGEUSDT', score: 91, volume: 270000000, stepSize: 1, tickSize: 0.00001 },
-      { symbol: 'TAO/USDT', clean: 'TAOUSDT', score: 90, volume: 125000000, stepSize: 0.001, tickSize: 0.01 },
-      { symbol: '1000PEPE/USDT', clean: '1000PEPEUSDT', score: 89, volume: 85000000, stepSize: 100, tickSize: 0.0000001 },
-      { symbol: 'FET/USDT', clean: 'FETUSDT', score: 88, volume: 82000000, stepSize: 1, tickSize: 0.0001 },
-      { symbol: 'AVAX/USDT', clean: 'AVAXUSDT', score: 87, volume: 68000000, stepSize: 1, tickSize: 0.001 },
-      { symbol: 'INJ/USDT', clean: 'INJUSDT', score: 86, volume: 30000000, stepSize: 0.1, tickSize: 0.001 },
-      { symbol: 'APT/USDT', clean: 'APTUSDT', score: 85, volume: 29000000, stepSize: 0.1, tickSize: 0.001 },
-      { symbol: 'TIA/USDT', clean: 'TIAUSDT', score: 84, volume: 26000000, stepSize: 1, tickSize: 0.0001 },
-      { symbol: 'RENDER/USDT', clean: 'RENDERUSDT', score: 83, volume: 15000000, stepSize: 0.1, tickSize: 0.001 },
-      { symbol: 'WIF/USDT', clean: 'WIFUSDT', score: 82, volume: 12000000, stepSize: 1, tickSize: 0.0001 },
-      { symbol: 'BNB/USDT', clean: 'BNBUSDT', score: 92, volume: 200000000, stepSize: 0.01, tickSize: 0.01 },
-      { symbol: 'XRP/USDT', clean: 'XRPUSDT', score: 89, volume: 180000000, stepSize: 0.1, tickSize: 0.0001 },
-      { symbol: 'LINK/USDT', clean: 'LINKUSDT', score: 88, volume: 90000000, stepSize: 0.01, tickSize: 0.001 },
-      { symbol: 'ADA/USDT', clean: 'ADAUSDT', score: 86, volume: 80000000, stepSize: 1, tickSize: 0.0001 },
-    ];
-
-    for (const d of defaults) {
-      const metric: AssetMetrics = {
-        symbol: d.symbol,
-        cleanSymbol: d.clean,
-        spreadPercent: 0.02,
-        bidAskDepth: 500000,
-        volume24h: d.volume,
-        priceChange24h: 1.5,
-        volatility24h: 0.04,
-        stabilityScore: 0.85,
-        makerFee: 0.0002,
-        takerFee: 0.0004,
-        minNotional: 5,
-        minQuantity: d.stepSize,
-        stepSize: d.stepSize,
-        tickSize: d.tickSize,
-        maxLeverage: 20,
-        minLeverage: 10,
-        liquidityScore: d.score,
-        isQualified: true,
-        disqualificationReasons: [],
-      };
-      this.allAssets.set(d.symbol, metric);
-      this.qualifiedAssets.set(d.symbol, metric);
-    }
-    this.lastRefreshTime = Date.now();
-  }
+  // No hardcoded market metrics. Screener stays empty until exchange data passes validation.
 
   private toAssetSymbol(cleanSymbol: string): AssetSymbol {
     if (cleanSymbol.endsWith('USDT')) {

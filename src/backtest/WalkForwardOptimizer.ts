@@ -140,10 +140,10 @@ export class WalkForwardOptimizer {
         console.log(`Average OOS Sharpe: ${avgSharpe.toFixed(2)}`);
         console.log(`Parameter Stability: ${(stability * 100).toFixed(0)}%`);
 
-        // Save Best Params from last segment for live trading
+        // Keep WFO candidates separate from live configuration; require independent review/holdout.
         const lastSegment = this.segments[this.segments.length - 1];
         if (lastSegment && lastSegment.bestParams) {
-            const configPath = './data/optimized_params.json';
+            const configPath = './data/wfo_candidate_params.json';
             try {
                 if (!fs.existsSync('./data')) fs.mkdirSync('./data');
                 fs.writeFileSync(configPath, JSON.stringify({

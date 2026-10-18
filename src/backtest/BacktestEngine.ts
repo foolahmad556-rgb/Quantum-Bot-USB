@@ -49,7 +49,7 @@ export class BacktestEngine {
       commission: config.commission ?? 0.0004,
       slippage: config.slippage ?? 0.0001,
       makerFeeBps: config.makerFeeBps ?? 1.0,
-      takerFeeBps: config.takerFeeBps ?? 5.0, // Binance USDS-M regular taker 0.05%
+      takerFeeBps: config.takerFeeBps ?? (config.commission != null ? config.commission * 10000 : 5.0), // explicit commission fallback when no taker rate supplied
       executionLatencyMs: config.executionLatencyMs ?? 15,
       rebalanceFrequency: config.rebalanceFrequency || '1H',
       solver: config.solver || 'QUANTUM_ANNEALING',
@@ -139,32 +139,33 @@ export class BacktestEngine {
       const candles: Candle[] = [];
       let currentStart = startTime;
 
-      let iterations = 0;
-      while (currentStart < endTime && iterations < 2) {
-        iterations++;
-        const url = `https://api.binance.com/api/v3/klines?symbol=${cleanSymbol}&interval=1h&startTime=${currentStart}&endTime=${endTime}&limit=500`;
-        const response = await binanceRateLimiter.fetch(url);
+      while (currentStart < endTime) {
+        const url = `https://api.binance.com/api/v3/klines?symbol=${cleanSymbol}&interval=1h&startTime=${currentStart}&endTime=${endTime}&limit=1000`;
+        const response = await binanceRateLimiter.fetch(url, undefined, 2);
         if (!response.ok) throw new Error(`Binance API error: ${response.statusText}`);
         const data = await response.json();
         if (!Array.isArray(data) || data.length === 0) break;
 
+        let previousTimestamp = candles.length ? candles[candles.length - 1].timestamp : -Infinity;
         for (const c of data) {
-          const open = parseFloat(c[1]);
-          const high = parseFloat(c[2]);
-          const low = parseFloat(c[3]);
-          const close = parseFloat(c[4]);
-          const volume = parseFloat(c[5]);
-          candles.push({
-            timestamp: c[0],
-            open,
-            high,
-            low,
-            close,
-            volume,
-            vwap: (open + high + low + close) / 4,
-          });
+          const timestamp = Number(c[0]);
+          const open = Number(c[1]);
+          const high = Number(c[2]);
+          const low = Number(c[3]);
+          const close = Number(c[4]);
+          const volume = Number(c[5]);
+          if (!Number.isFinite(timestamp) || timestamp <= previousTimestamp || timestamp < startTime || timestamp > endTime ||
+              ![open, high, low, close, volume].every(Number.isFinite) ||
+              open <= 0 || high <= 0 || low <= 0 || close <= 0 || volume < 0 ||
+              high < Math.max(open, close, low) || low > Math.min(open, close)) {
+            throw new Error(`Invalid or unordered Binance candle for ${cleanSymbol} at ${timestamp}`);
+          }
+          candles.push({ timestamp, open, high, low, close, volume, vwap: (open + high + low + close) / 4 });
+          previousTimestamp = timestamp;
         }
-        currentStart = data[data.length - 1][6] + 1;
+        const nextStart = Number(data[data.length - 1][6]) + 1;
+        if (!Number.isFinite(nextStart) || nextStart <= currentStart) throw new Error(`Binance pagination stalled for ${cleanSymbol}`);
+        currentStart = nextStart;
         await new Promise((r) => setTimeout(r, 80));
       }
 
@@ -175,58 +176,9 @@ export class BacktestEngine {
     return allData;
   }
 
-  /** Synthetic data is forbidden. Backtests require Binance historical candles. */
+  /** Synthetic market data is intentionally unavailable. */
   public generateDeterministicHighFidelityData(): Map<string, Candle[]> {
     throw new Error('Synthetic market data disabled; use Binance historical candles.');
-    /* istanbul ignore next */
-    const allData: Map<string, Candle[]> = new Map();
-    const startTime = new Date(this.config.startDate || '2024-01-01').getTime();
-    const endTime = new Date(this.config.endDate || '2024-07-01').getTime();
-    const hourMs = 3600000;
-    const totalSteps = Math.min(500, Math.max(120, Math.floor((endTime - startTime) / hourMs)));
-
-    const basePrices: Record<string, number> = {
-      'BTC/USDT': 91500,
-      'ETH/USDT': 3450,
-      'SOL/USDT': 195,
-      'QNT/USDT': 118,
-      'NVDA/USD': 132,
-      'AAPL/USD': 228,
-    };
-
-    for (const rawSymbol of this.config.symbols) {
-      const candles: Candle[] = [];
-      const basePrice = basePrices[rawSymbol] || 100;
-      let currentPrice = basePrice;
-      const theta = 0.08;
-      const sigma = basePrice * 0.012;
-
-      // Seeded deterministic pseudo-random sequence for reproducible results
-      let seed = 1337 + rawSymbol.charCodeAt(0) * 17 + rawSymbol.charCodeAt(1) * 31;
-      const pseudoRandom = () => {
-        seed = (seed * 9301 + 49297) % 233280;
-        return seed / 233280;
-      };
-
-      for (let i = 0; i < totalSteps; i++) {
-        const ts = startTime + i * hourMs;
-        const drift = theta * (basePrice * (1 + 0.0005 * i) - currentPrice);
-        const noise = sigma * (pseudoRandom() - 0.485);
-        currentPrice += drift + noise;
-
-        const open = currentPrice * (1 + (pseudoRandom() - 0.5) * 0.0015);
-        const close = currentPrice;
-        const high = Math.max(open, close) * (1 + pseudoRandom() * 0.0025);
-        const low = Math.min(open, close) * (1 - pseudoRandom() * 0.0025);
-        const volume = 150 + pseudoRandom() * 850;
-
-        const vwap = (open + high + low + close) / 4;
-        candles.push({ timestamp: ts, open, high, low, close, volume, vwap });
-      }
-      allData.set(rawSymbol, candles);
-    }
-
-    return allData;
   }
 
   /**
@@ -292,12 +244,7 @@ export class BacktestEngine {
     const takerFeeRate = (this.config.takerFeeBps ?? 5.0) / 10000;
     const baseSlippage = this.config.slippage ?? 0.0010; // 10 bps altcoin base (ASSUMPTION)
 
-    // Solver Quantum Advantage Multiplier
-    const isQuantumSolver =
-      solverType === 'QUANTUM_ANNEALING' ||
-      solverType === 'QAOA_CIRCUIT';
-
-    const confidenceBoost = isQuantumSolver ? 0.05 : 0.0;
+    // Solver selection does not change signal quality; no unsupported confidence bonus.
 
     for (const timestamp of sortedTimestamps) {
       // 0. Fill entries queued on the previous bar at THIS bar's open (never the signal bar's close).
@@ -314,6 +261,7 @@ export class BacktestEngine {
         const entryFee = notional * takerFeeRate;
         totalFeesPaid += entryFee;
         cash -= entryFee;
+        realizedCapital -= entryFee;
         const tradeId = `TR-${timestamp}-${order.symbol.replace('/', '')}`;
         openPositions.push({
           id: tradeId,
@@ -434,7 +382,7 @@ export class BacktestEngine {
           features,
           params: {
             ...DEFAULT_STRATEGY_PARAMS,
-            minConfidence: Math.max(0.4, (DEFAULT_STRATEGY_PARAMS.minConfidence || 0.5) - confidenceBoost),
+            minConfidence: DEFAULT_STRATEGY_PARAMS.minConfidence || 0.5,
             candleIntervalMs: 60 * 60 * 1000,
             ...(this.config.strategyParams || {}),
             ...(customParams || {}),
