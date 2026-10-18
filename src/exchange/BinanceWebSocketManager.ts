@@ -1,3 +1,4 @@
+import { binanceRateLimiter } from '../utils/RateLimiter';
 import WebSocket from 'ws';
 import crypto from 'crypto';
 import { EventEmitter } from 'events';
@@ -27,7 +28,7 @@ export class BinanceWebSocketManager extends EventEmitter {
   private reconnectAttempts = 0;
   private maxReconnectAttempts = 5;
   private reconnectDelay = 5000;
-  
+
   private lastPositionUpdate: PositionData[] = [];
   private lastAccountUpdate: AccountData | null = null;
   private isConnected = false;
@@ -115,7 +116,7 @@ export class BinanceWebSocketManager extends EventEmitter {
         positionSide: p.ps,
         timestamp: Date.now()
       })).filter((p: PositionData) => p.positionAmt !== 0);
-      
+
       this.emit('positions', this.lastPositionUpdate);
       console.log(`📊 Positions updated: ${this.lastPositionUpdate.length} open`);
     }
@@ -144,7 +145,7 @@ export class BinanceWebSocketManager extends EventEmitter {
   }
 
   private async getListenKey(): Promise<string> {
-    const res = await fetch(`${this.baseUrl}/fapi/v1/listenKey`, {
+    const res = await binanceRateLimiter.fetch(`${this.baseUrl}/fapi/v1/listenKey`, {
       method: 'POST',
       headers: { 'X-MBX-APIKEY': this.apiKey }
     });
@@ -154,7 +155,7 @@ export class BinanceWebSocketManager extends EventEmitter {
 
   private async renewListenKey(): Promise<void> {
     if (!this.listenKey) return;
-    const res = await fetch(`${this.baseUrl}/fapi/v1/listenKey`, {
+    const res = await binanceRateLimiter.fetch(`${this.baseUrl}/fapi/v1/listenKey`, {
       method: 'PUT',
       headers: { 'X-MBX-APIKEY': this.apiKey }
     });
@@ -194,7 +195,7 @@ export class BinanceWebSocketManager extends EventEmitter {
       this.ws = null;
     }
     if (this.listenKey) {
-      await fetch(`${this.baseUrl}/fapi/v1/listenKey`, {
+      await binanceRateLimiter.fetch(`${this.baseUrl}/fapi/v1/listenKey`, {
         method: 'DELETE',
         headers: { 'X-MBX-APIKEY': this.apiKey }
       }).catch(e => console.error(`Failed to delete listen key: ${e}`));

@@ -1,3 +1,4 @@
+import { binanceRateLimiter } from '../utils/RateLimiter';
 /**
  * Basel Quantum Algorithmic Trading System
  * Exchange Market Data Stream & Synthetic/Live Data Bridge
@@ -207,7 +208,7 @@ export class ExchangeMarketData extends EventEmitter {
     for (const sym of primarySymbols) {
       const binanceSym = sym.replace('/', '').toUpperCase();
       try {
-        const res = await fetch(`${baseUrl}/fapi/v1/klines?symbol=${binanceSym}&interval=1m&limit=100`);
+        const res = await binanceRateLimiter.fetch(`${baseUrl}/fapi/v1/klines?symbol=${binanceSym}&interval=1m&limit=100`);
         if (!res.ok) {
           console.warn(`⚠️ ExchangeMarketData: Could not fetch candles for ${sym}: HTTP ${res.status}`);
           return;
@@ -257,8 +258,8 @@ export class ExchangeMarketData extends EventEmitter {
       this.lastUpdateTimes.set(sym, now);
     }
 
-    // 1. Initial backfill of real klines and live price pull
-    this.backfillRealCandles().catch(() => {});
+    // Historical candles are backfilled by TradingPipeline before streaming starts.
+    // Avoid repeating REST klines requests every time the WebSocket reconnects.
 
     // Start WebSocket real-time streams
     this.startWebSocketStreaming();
@@ -290,7 +291,7 @@ export class ExchangeMarketData extends EventEmitter {
       try {
         const controller = new AbortController();
         const timeoutId = setTimeout(() => controller.abort(), 3500);
-        const res = await fetch(url, { signal: controller.signal });
+        const res = await binanceRateLimiter.fetch(url, { signal: controller.signal });
         clearTimeout(timeoutId);
 
         if (!res.ok) continue;
@@ -339,7 +340,7 @@ export class ExchangeMarketData extends EventEmitter {
       try {
         const controller = new AbortController();
         const timeoutId = setTimeout(() => controller.abort(), 3000);
-        const res = await fetch(`https://fapi.binance.com/fapi/v1/depth?symbol=${rawBinance}&limit=10`, {
+        const res = await binanceRateLimiter.fetch(`https://fapi.binance.com/fapi/v1/depth?symbol=${rawBinance}&limit=10`, {
           signal: controller.signal
         });
         clearTimeout(timeoutId);

@@ -42,6 +42,7 @@ import { RiskEngine } from '../risk/RiskEngine';
 import { EventJournal } from '../storage/EventJournal';
 import { INITIAL_RUNTIME_CONFIG, RuntimeConfigState } from './RuntimeConfig';
 import { DatabaseService } from '../storage/DatabaseService';
+import { ShadowComparisonThrottle } from '../storage/ShadowComparisonThrottle';
 import { CorrelationRiskManager } from '../risk/CorrelationRiskManager';
 import { TelegramService } from '../services/TelegramService';
 import { DynamicRiskManager } from '../risk/DynamicRiskManager';
@@ -73,6 +74,7 @@ export class TradingPipeline {
   private healthMonitor: HealthMonitor;
   private watchdog: SystemWatchdog;
   private db: DatabaseService;
+  private readonly shadowComparisonThrottle = new ShadowComparisonThrottle(15 * 60 * 1000);
   private correlationRiskManager: CorrelationRiskManager;
   private telegramService: TelegramService;
   private strategy: MeanReversionStrategy;
@@ -877,7 +879,7 @@ export class TradingPipeline {
       `[COUNCIL_SHADOW] ${symbol} incumbent=${shadowComparison.incumbentAction} shadow=${shadowComparison.shadowAction} actionMatch=${shadowComparison.actionMatch} verdictMatch=${shadowComparison.verdictMatch} ratioDelta=${shadowComparison.approvalRatioDelta} mode=${shadowSnapshot.mode} members=${shadowSnapshot.members} mappedLegacy=${shadowSnapshot.mappedLegacyAgents} executionEnabled=${shadowComparison.executionEnabled}`
     );
     const saveShadowComparison = (this.db as DatabaseService & { saveShadowComparison?: (value: unknown) => Promise<void> }).saveShadowComparison;
-    if (saveShadowComparison) {
+    if (saveShadowComparison && this.shadowComparisonThrottle.shouldPersist(symbol, Date.now())) {
       void saveShadowComparison.call(this.db, { ...shadowComparison, mode: shadowSnapshot.mode, members: shadowSnapshot.members, mappedLegacyAgents: shadowSnapshot.mappedLegacyAgents, createdAt: Date.now() }).catch(() => {
         /* Shadow persistence must never alter incumbent trading path. */
       });

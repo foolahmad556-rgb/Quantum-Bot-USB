@@ -1,3 +1,4 @@
+import { binanceRateLimiter } from '../utils/RateLimiter';
 /**
  * Basel Quantum Algorithmic Trading System
  * Binance Futures User Data Stream & Real-Time Portfolio State Engine
@@ -15,16 +16,16 @@ export class UserDataStream {
   private apiSecret: string;
   private apiBaseUrl: string;
   private wsUrl: string;
-  
+
   private ws: WebSocket | null = null;
   private listenKey: string = '';
   private listenKeyTimer: NodeJS.Timeout | null = null;
   private reconnectTimer: NodeJS.Timeout | null = null;
-  
+
   private balance: AccountBalance;
   private positions: Map<string, Position> = new Map();
   private fillsHistory: Fill[] = [];
-  
+
   private onEvent?: EventCallback;
   private isRunning: boolean = false;
   private balanceListeners: Set<(b: AccountBalance) => void> = new Set();
@@ -37,7 +38,7 @@ export class UserDataStream {
     this.apiKey = process.env.EXCHANGE_API_KEY || process.env.BINANCE_API_KEY || '';
     this.apiSecret = process.env.EXCHANGE_API_SECRET || process.env.BINANCE_API_SECRET || '';
     this.executionMode = normalizeExecutionMode(process.env.EXECUTION_MODE, !!this.apiKey);
-    
+
     // Strict real accounting: defaults to 0 and populated exclusively via Binance REST/WebSocket
     const startBalance = initialCapital > 0 ? initialCapital : 0;
 
@@ -73,7 +74,7 @@ export class UserDataStream {
   public async start() {
     if (this.isRunning) return;
     this.isRunning = true;
-    
+
     if (!this.apiKey || !this.apiSecret) {
       this.isRunning = false;
       throw new Error('Binance account credentials missing for account-data sync.');
@@ -99,7 +100,7 @@ export class UserDataStream {
     const totalEq = Number.isFinite(rawBal.totalEquity) ? rawBal.totalEquity : (Number.isFinite(rawBal.availableCash) ? rawBal.availableCash : 0);
     const availCash = Number.isFinite(rawBal.availableCash) ? rawBal.availableCash : totalEq;
     const unPnl = Number.isFinite(rawBal.unrealizedPnl) ? rawBal.unrealizedPnl : 0;
-    
+
     return {
       totalEquity: Number(totalEq.toFixed(2)),
       availableCash: Number(availCash.toFixed(2)),
@@ -173,7 +174,7 @@ export class UserDataStream {
   public processFill(fill: Fill, currentPrice: number) {
     this.fillsHistory.unshift(fill);
     if (this.fillsHistory.length > 500) this.fillsHistory.pop();
-    
+
     for (const l of this.fillListeners) l(fill);
 
     // TESTNET/LIVE: positions and balances are authoritative from ACCOUNT_UPDATE.
@@ -224,7 +225,7 @@ export class UserDataStream {
 
     this.balance.availableCash -= fill.commission;
     this.balance.totalEquity = this.balance.availableCash + this.balance.unrealizedPnl;
-    
+
     for (const l of this.balanceListeners) l(this.getBalance());
   }
 
@@ -240,7 +241,7 @@ export class UserDataStream {
       const signature = crypto.createHmac('sha256', this.apiSecret).update(query).digest('hex');
       const url = `${this.apiBaseUrl}/fapi/v2/account?${query}&signature=${signature}`;
 
-      const res = await fetch(url, {
+      const res = await binanceRateLimiter.fetch(url, {
         method: 'GET',
         headers: {
           'X-MBX-APIKEY': this.apiKey,
@@ -259,7 +260,7 @@ export class UserDataStream {
       const available = parseFloat(accountInfo.availableBalance || '0') || 0;
       const usedMargin = parseFloat(accountInfo.totalInitialMargin || '0') || 0;
       const maintMargin = parseFloat(accountInfo.totalMaintMargin || '0') || 0;
-      
+
       this.balance = {
         totalEquity: Number((wb + up).toFixed(2)),
         availableCash: Number(available.toFixed(2)),
@@ -278,10 +279,10 @@ export class UserDataStream {
           const amount = parseFloat(pos.positionAmt);
           if (amount !== 0) {
             const rawSym = pos.symbol;
-            const symbol = rawSym.endsWith('USDT') 
-              ? `${rawSym.slice(0, -4)}/USDT` 
+            const symbol = rawSym.endsWith('USDT')
+              ? `${rawSym.slice(0, -4)}/USDT`
               : (rawSym.endsWith('USD') ? `${rawSym.slice(0, -3)}/USD` : rawSym);
-            
+
             this.positions.set(symbol as AssetSymbol, {
               symbol: symbol as AssetSymbol,
               positionSide: pos.positionSide === 'LONG' || pos.positionSide === 'SHORT' ? pos.positionSide : 'BOTH',
@@ -309,7 +310,7 @@ export class UserDataStream {
 
   private async getListenKey() {
     if (!this.apiKey) throw new Error('API Key missing for UserDataStream');
-    const response = await fetch(`${this.apiBaseUrl}/fapi/v1/listenKey`, {
+    const response = await binanceRateLimiter.fetch(`${this.apiBaseUrl}/fapi/v1/listenKey`, {
       method: 'POST',
       headers: { 'X-MBX-APIKEY': this.apiKey }
     });
@@ -321,7 +322,7 @@ export class UserDataStream {
 
   private connectWebSocket() {
     if (this.ws) this.ws.close();
-    
+
     const url = `${this.wsUrl}/${this.listenKey}`;
     this.ws = new WebSocket(url);
 
@@ -403,7 +404,7 @@ export class UserDataStream {
           this.balance.totalEquity = wb + totalUnrealized;
           this.balance.marginLevel = usedMargin > 0 ? this.balance.totalEquity / usedMargin : 999;
           this.balance.freeMargin = Math.max(0, this.balance.totalEquity - usedMargin);
-          
+
           for (const l of this.balanceListeners) l(this.getBalance());
           if (this.onEvent) this.onEvent('balance_update', this.getBalance());
         }
@@ -456,7 +457,7 @@ export class UserDataStream {
   private startListenKeyKeepAlive() {
     this.listenKeyTimer = setInterval(async () => {
       try {
-        await fetch(`${this.apiBaseUrl}/fapi/v1/listenKey`, {
+        await binanceRateLimiter.fetch(`${this.apiBaseUrl}/fapi/v1/listenKey`, {
           method: 'PUT',
           headers: { 'X-MBX-APIKEY': this.apiKey }
         });

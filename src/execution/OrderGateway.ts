@@ -7,7 +7,7 @@ import { AssetSymbol, ExecutionMode, Fill, Order, OrderSide, OrderStatus, OrderT
 import { OrderBookBuilder } from '../market-data/OrderBookBuilder';
 import { OrderStateMachine } from './OrderStateMachine';
 import { UserDataStream } from './UserDataStream';
-import { RateLimiter } from '../utils/RateLimiter';
+import { binanceRateLimiter } from '../utils/RateLimiter';
 import { formatPriceToTick, formatQuantityToStep } from '../market-data/AssetScreener';
 import { EXECUTION } from '../config/execution';
 import crypto from 'crypto';
@@ -57,7 +57,7 @@ export class OrderGateway {
   private config: GatewayConfig;
   private orderCounter: number = 0;
   private listeners: Set<(order: Order) => void> = new Set();
-  private rateLimiter: RateLimiter;
+  private rateLimiter = binanceRateLimiter;
   private symbolFilters: Map<string, { stepSize: number; tickSize: number; minQty: number; minNotional: number }> = new Map();
   private currentLeverage: Map<string, number> = new Map();
   private timeOffset: number = 0;
@@ -76,7 +76,7 @@ export class OrderGateway {
     this.userDataStream = userDataStream;
     this.orderBookBuilder = orderBookBuilder;
     this.fsm = new OrderStateMachine();
-    this.rateLimiter = new RateLimiter();
+    this.rateLimiter = binanceRateLimiter;
     this.config = {
       makerFeeBps: 1.0,
       takerFeeBps: 3.5,
@@ -142,6 +142,7 @@ export class OrderGateway {
       .map(([k, v]) => `${k}=${encodeURIComponent(String(v))}`)
       .join('&');
     const signature = crypto.createHmac('sha256', this.apiSecret).update(qs).digest('hex');
+    await this.rateLimiter.acquire(path, 1);
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
     try {
@@ -154,6 +155,15 @@ export class OrderGateway {
       try { data = await res.json(); } catch { data = null; }
       const used = Number(res.headers.get('x-mbx-used-weight-1m') || 0);
       if (used) this.rateLimiter.syncUsed(used);
+      if (res.status === 429 || res.status === 418) {
+        const retryAfterRaw = res.headers.get('retry-after');
+        const retryAfterSeconds = Number(retryAfterRaw);
+        const retryAfterMs = Number.isFinite(retryAfterSeconds) && retryAfterSeconds > 0
+          ? retryAfterSeconds * 1000
+          : 60_000;
+        this.rateLimiter.blockFor(retryAfterMs);
+        return { ok: false, status: res.status, data };
+      }
       if (!res.ok && data && Number(data.code) === -1021 && !isRetry) {
         await this.syncTime();
         return this.signedRequest(method, path, params, timeoutMs, true);
@@ -169,6 +179,7 @@ export class OrderGateway {
   public async checkDualSidePosition(): Promise<boolean> {
     if (this.executionMode === 'PAPER' || !this.apiKey || !this.apiSecret) return true;
     try {
+      await this.rateLimiter.acquire('/fapi/v1/positionSide/dual', 1);
       const timestamp = this.ts();
       const q = `timestamp=${timestamp}`;
       const sig = crypto.createHmac('sha256', this.apiSecret).update(q).digest('hex');
@@ -223,7 +234,7 @@ export class OrderGateway {
     return this.symbolFilters.get(clean) || { stepSize: 0.001, tickSize: 0.01, minQty: 0.001, minNotional: 5.0 };
   }
 
-  public getRateLimiter(): RateLimiter {
+  public getRateLimiter(): typeof binanceRateLimiter {
     return this.rateLimiter;
   }
 
@@ -448,16 +459,16 @@ export class OrderGateway {
 
     try {
       const clean = symbolOrOrderId.replace('/', '');
-      
+
       // إذا كان لدينا معرفات محددة مسجلة مسبقاً لهذا الأمر أو الرمز
-      const tracked = this.protectiveOrders.get(symbolOrOrderId) || 
-                      this.protectiveOrders.get(clean) || 
+      const tracked = this.protectiveOrders.get(symbolOrOrderId) ||
+                      this.protectiveOrders.get(clean) ||
                       (secondaryKey ? this.protectiveOrders.get(secondaryKey) : undefined);
 
       if (tracked && (tracked.slId || tracked.tpId)) {
         const headers = { 'X-MBX-APIKEY': this.apiKey };
         const cancelPromises = [];
-        
+
         if (tracked.slId) {
           // Cancel via algoOrder endpoint
           const qAlgo = `algoId=${tracked.slId}&timestamp=${Date.now()}`;

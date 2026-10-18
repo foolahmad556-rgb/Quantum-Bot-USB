@@ -1,23 +1,24 @@
+import { binanceRateLimiter } from '../utils/RateLimiter';
 import { AssetSymbol } from '../domain/types';
 
 export interface AssetMetrics {
   symbol: AssetSymbol;
   cleanSymbol: string;          // BTCUSDT (بدون /)
-  
+
   // مقاييس السيولة
   spreadPercent: number;        // السبريد بالنسبة المئوية
   bidAskDepth: number;          // عمق دفتر الأوامر ($)
   volume24h: number;            // حجم التداول 24 ساعة ($)
-  
+
   // مقاييس الاستقرار
   priceChange24h: number;       // تغير السعر 24 ساعة (%)
   volatility24h: number;        // التقلب 24 ساعة
   stabilityScore: number;       // درجة الاستقرار (0-1)
-  
+
   // مقاييس التكلفة
   makerFee: number;             // رسوم Maker
   takerFee: number;             // رسوم Taker
-  
+
   // معلومات عامة
   minNotional: number;          // الحد الأدنى للصفقة ($)
   minQuantity: number;          // الحد الأدنى للكمية
@@ -25,7 +26,7 @@ export interface AssetMetrics {
   tickSize: number;             // دقة السعر (PRICE_FILTER)
   maxLeverage: number;          // الحد الأقصى للرافعة
   minLeverage: number;          // الحد الأدنى للرافعة
-  
+
   // النتيجة النهائية
   liquidityScore: number;       // درجة السيولة (0-100)
   isQualified: boolean;         // هل العملة مؤهلة؟
@@ -69,7 +70,7 @@ export class AssetScreener {
     this.apiBaseUrl = apiBaseUrl || 'https://fapi.binance.com';
     this.apiKey = apiKey || '';
     this.apiSecret = apiSecret || '';
-    
+
     // إعدادات الفلتر الافتراضية
     this.config = {
       maxSpreadPercent: 0.3,       // 0.3% كحد أقصى
@@ -90,14 +91,14 @@ export class AssetScreener {
    */
   public async refreshAllAssets(): Promise<number> {
     console.log('🔍 AssetScreener: Refreshing all assets from exchange API...');
-    
+
     try {
       // 1. جلب معلومات الأزواج من Binance Futures API
       const exchangeInfo = await this.fetchExchangeInfo();
-      
+
       // 2. جلب بيانات 24 ساعة
       const tickerData = await this.fetch24hrTicker();
-      
+
       if (!exchangeInfo?.symbols || !Array.isArray(tickerData)) {
         console.warn('⚠️ AssetScreener: Exchange data unavailable, using fallback verified asset set.');
         return this.qualifiedAssets.size;
@@ -114,7 +115,7 @@ export class AssetScreener {
 
         const symbol = this.toAssetSymbol(symbolInfo.symbol);
         const ticker = tickerData.find((t: any) => t.symbol === symbolInfo.symbol);
-        
+
         if (!ticker) continue;
 
         // عمق دفتر الأوامر وتقدير السبريد من بيانات التيكر اللحظية دون حظر الإقلاع
@@ -149,7 +150,7 @@ export class AssetScreener {
 
       this.lastRefreshTime = Date.now();
       console.log(`✅ AssetScreener: ${this.qualifiedAssets.size} qualified out of ${this.allAssets.size} total assets`);
-      
+
       return this.qualifiedAssets.size;
     } catch (error) {
       console.error('❌ AssetScreener: Error refreshing assets, preserving active qualified assets:', error);
@@ -163,7 +164,7 @@ export class AssetScreener {
   private async fetchExchangeInfo(): Promise<any> {
     try {
       const url = `${this.apiBaseUrl}/fapi/v1/exchangeInfo`;
-      const response = await fetch(url, { signal: AbortSignal.timeout(5000) });
+      const response = await binanceRateLimiter.fetch(url, { signal: AbortSignal.timeout(5000) });
       if (!response.ok) throw new Error(`HTTP error ${response.status}`);
       return await response.json();
     } catch (e) {
@@ -177,7 +178,7 @@ export class AssetScreener {
   private async fetch24hrTicker(): Promise<any[]> {
     try {
       const url = `${this.apiBaseUrl}/fapi/v1/ticker/24hr`;
-      const response = await fetch(url, { signal: AbortSignal.timeout(5000) });
+      const response = await binanceRateLimiter.fetch(url, { signal: AbortSignal.timeout(5000) });
       if (!response.ok) throw new Error(`HTTP error ${response.status}`);
       return await response.json();
     } catch (e) {
@@ -190,29 +191,29 @@ export class AssetScreener {
    */
   private async fetchOrderBookDepth(symbol: string): Promise<any> {
     const url = `${this.apiBaseUrl}/fapi/v1/depth?symbol=${symbol}&limit=20`;
-    const response = await fetch(url, { signal: AbortSignal.timeout(3000) });
+    const response = await binanceRateLimiter.fetch(url, { signal: AbortSignal.timeout(3000) });
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
     const data = await response.json();
-    
+
     let bidDepth = 0;
     let askDepth = 0;
-    
+
     if (data.bids) {
       for (const bid of data.bids) {
         bidDepth += parseFloat(bid[0]) * parseFloat(bid[1]);
       }
     }
-    
+
     if (data.asks) {
       for (const ask of data.asks) {
         askDepth += parseFloat(ask[0]) * parseFloat(ask[1]);
       }
     }
-    
+
     const bestBid = data.bids?.[0] ? parseFloat(data.bids[0][0]) : 1;
     const bestAsk = data.asks?.[0] ? parseFloat(data.asks[0][0]) : 1;
     const spread = bestBid > 0 ? ((bestAsk - bestBid) / bestBid) * 100 : 0.05;
-    
+
     return { bidDepth, askDepth, spread };
   }
 
@@ -221,26 +222,26 @@ export class AssetScreener {
    */
   private calculateMetrics(symbolInfo: any, ticker: any, depth: any): AssetMetrics {
     const symbol = this.toAssetSymbol(symbolInfo.symbol);
-    
+
     const spreadPercent = Math.max(0.01, depth.spread || 0.05);
     const bidAskDepth = Math.min(depth.bidDepth || 100000, depth.askDepth || 100000);
     const volume24h = parseFloat(ticker.quoteVolume) || 5000000;
-    
+
     const priceChange24h = parseFloat(ticker.priceChangePercent) || 0;
     const highPrice = parseFloat(ticker.highPrice) || 1;
     const lowPrice = parseFloat(ticker.lowPrice) || 1;
     const volatility24h = highPrice > 0 ? ((highPrice - lowPrice) / lowPrice) : 0.05;
-    
+
     const stabilityScore = Math.max(0, Math.min(1, 1 - (volatility24h / 0.20)));
-    
+
     const makerFee = 0.0002; // 0.02%
     const takerFee = 0.0004; // 0.04%
-    
+
     const filters = symbolInfo.filters || [];
     const minNotionalFilter = filters.find((f: any) => f.filterType === 'MIN_NOTIONAL' || f.filterType === 'NOTIONAL');
     const lotSizeFilter = filters.find((f: any) => f.filterType === 'LOT_SIZE');
     const priceFilter = filters.find((f: any) => f.filterType === 'PRICE_FILTER');
-    
+
     let minNotional = 5;
     if (minNotionalFilter) {
       const parsedNotional = parseFloat(minNotionalFilter.notional || minNotionalFilter.minNotional || '5');
@@ -253,9 +254,9 @@ export class AssetScreener {
     const tickSize = priceFilter ? (parseFloat(priceFilter.tickSize) || 0.01) : 0.01;
     const maxLeverage = 20;
     const minLeverage = 10;
-    
+
     const liquidityScore = this.calculateLiquidityScore(spreadPercent, bidAskDepth, volume24h);
-    
+
     return {
       symbol,
       cleanSymbol: symbolInfo.symbol,
@@ -284,27 +285,27 @@ export class AssetScreener {
    */
   private calculateLiquidityScore(spread: number, depth: number, volume: number): number {
     let score = 0;
-    
+
     // السبريد (40 نقطة)
     if (spread < 0.05) score += 40;
     else if (spread < 0.1) score += 30;
     else if (spread < 0.2) score += 20;
     else if (spread < 0.3) score += 10;
-    
+
     // عمق دفتر الأوامر (30 نقطة)
     if (depth > 500000) score += 30;
     else if (depth > 200000) score += 25;
     else if (depth > 100000) score += 20;
     else if (depth > 50000) score += 15;
     else if (depth > 20000) score += 10;
-    
+
     // حجم التداول (30 نقطة)
     if (volume > 10000000) score += 30;
     else if (volume > 5000000) score += 25;
     else if (volume > 1000000) score += 20;
     else if (volume > 500000) score += 15;
     else if (volume > 100000) score += 10;
-    
+
     return score;
   }
 
@@ -313,31 +314,31 @@ export class AssetScreener {
    */
   private applyFilters(metrics: AssetMetrics): void {
     const reasons: string[] = [];
-    
+
     if (metrics.spreadPercent > this.config.maxSpreadPercent) {
       reasons.push(`Spread too high: ${metrics.spreadPercent.toFixed(2)}% > ${this.config.maxSpreadPercent}%`);
     }
-    
+
     if (metrics.volume24h < this.config.minVolume24h) {
       reasons.push(`Volume too low: $${(metrics.volume24h / 1e6).toFixed(2)}M < $${(this.config.minVolume24h / 1e6).toFixed(2)}M`);
     }
-    
+
     if (metrics.bidAskDepth < this.config.minBidAskDepth) {
       reasons.push(`Depth too low: $${metrics.bidAskDepth.toFixed(0)} < $${this.config.minBidAskDepth}`);
     }
-    
+
     if (metrics.volatility24h > this.config.maxVolatility24h) {
       reasons.push(`Volatility too high: ${(metrics.volatility24h * 100).toFixed(1)}% > ${(this.config.maxVolatility24h * 100).toFixed(1)}%`);
     }
-    
+
     if (metrics.stabilityScore < this.config.minStabilityScore) {
       reasons.push(`Stability too low: ${(metrics.stabilityScore * 100).toFixed(0)}% < ${(this.config.minStabilityScore * 100).toFixed(0)}%`);
     }
-    
+
     if (metrics.takerFee > this.config.maxTakerFee) {
       reasons.push(`Fees too high: ${(metrics.takerFee * 100).toFixed(2)}% > ${(this.config.maxTakerFee * 100).toFixed(2)}%`);
     }
-    
+
     metrics.disqualificationReasons = reasons;
     metrics.isQualified = reasons.length === 0;
   }
@@ -357,7 +358,7 @@ export class AssetScreener {
       .sort((a, b) => b.liquidityScore - a.liquidityScore)
       .slice(0, maxCount)
       .map(m => m.symbol);
-    
+
     if (sorted.length === 0) {
       return ['BTC/USDT', 'ETH/USDT', 'SOL/USDT', 'QNT/USDT'];
     }
@@ -392,7 +393,7 @@ export class AssetScreener {
   public getReport(): any {
     const qualified = Array.from(this.qualifiedAssets.values())
       .sort((a, b) => b.liquidityScore - a.liquidityScore);
-    
+
     return {
       totalAssetsScanned: this.allAssets.size,
       qualifiedAssetsCount: qualified.length,

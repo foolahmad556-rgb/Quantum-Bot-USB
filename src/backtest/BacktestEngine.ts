@@ -1,9 +1,10 @@
+import { binanceRateLimiter } from '../utils/RateLimiter';
 // src/backtest/BacktestEngine.ts
 
 /**
  * Basel Quantum Algorithmic Trading System
  * Production-Grade Historical Backtesting Engine & Walk-Forward Evaluator
- * 
+ *
  * Executes real-time TradingPipeline & DecisionEngine quantitative logic
  * over multi-asset candlestick time-series with realistic microstructure modeling:
  * - FeatureEngine (Ornstein-Uhlenbeck parameters, Hurst exponent, Microprice OFI, RSI, ATR)
@@ -142,7 +143,7 @@ export class BacktestEngine {
       while (currentStart < endTime && iterations < 2) {
         iterations++;
         const url = `https://api.binance.com/api/v3/klines?symbol=${cleanSymbol}&interval=1h&startTime=${currentStart}&endTime=${endTime}&limit=500`;
-        const response = await fetch(url);
+        const response = await binanceRateLimiter.fetch(url);
         if (!response.ok) throw new Error(`Binance API error: ${response.statusText}`);
         const data = await response.json();
         if (!Array.isArray(data) || data.length === 0) break;

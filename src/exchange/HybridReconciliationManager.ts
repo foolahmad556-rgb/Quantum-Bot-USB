@@ -1,3 +1,4 @@
+import { binanceRateLimiter } from '../utils/RateLimiter';
 import { BinanceWebSocketManager, PositionData, AccountData } from './BinanceWebSocketManager';
 import crypto from 'crypto';
 
@@ -61,7 +62,7 @@ export class HybridReconciliationManager {
     if (this.wsManager.getConnectionStatus()) {
       const account = this.wsManager.getAccount();
       const positions = this.wsManager.getPositions();
-      
+
       if (account && positions.length >= 0) {
         return {
           account,
@@ -94,26 +95,26 @@ export class HybridReconciliationManager {
   }> {
     try {
       console.log(`🔄 [REST Fallback] Fetching from Binance API...`);
-      
+
       const timestamp = Date.now();
       const query = new URLSearchParams({
         recvWindow: '5000',
         timestamp: timestamp.toString()
       });
-      
+
       const signature = crypto
         .createHmac('sha256', this.apiSecret)
         .update(query.toString())
         .digest('hex');
-      
+
       query.append('signature', signature);
-      
+
       const headers = { 'X-MBX-APIKEY': this.apiKey };
 
       // Fetch account & positions
       const [accountRes, positionsRes] = await Promise.all([
-        fetch(`${this.baseUrl}/fapi/v2/account?${query}`, { headers }),
-        fetch(`${this.baseUrl}/fapi/v2/positionRisk?${query}`, { headers })
+        binanceRateLimiter.fetch(`${this.baseUrl}/fapi/v2/account?${query}`, { headers }),
+        binanceRateLimiter.fetch(`${this.baseUrl}/fapi/v2/positionRisk?${query}`, { headers })
       ]);
 
       // Check for rate limit - if hit, don't trigger HARD_HALT yet
@@ -166,7 +167,7 @@ export class HybridReconciliationManager {
     } catch (e: any) {
       console.error(`❌ [REST] Fallback failed: ${e.message}`);
       this.failureCount++;
-      
+
       // Return cached data
       return {
         account: this.wsManager.getAccount(),
