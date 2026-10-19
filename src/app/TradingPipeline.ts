@@ -58,6 +58,14 @@ import { StrategyManager } from '../strategies/StrategyManager';
 import { SystemWatchdog, WatchdogStatus } from '../monitoring/SystemWatchdog';
 import { BotStrategy, StrategyScreenerItem } from '../domain/types';
 import fs from 'fs';
+import {
+  appendUniqueFill,
+  ExecutionLedgerFill,
+  settleExecution,
+  takeFillQuantity,
+  toExecutionLedgerFill,
+} from '../execution/ExecutionLedger';
+import { settleTradeRecord } from './TradingPipelineSettlement';
 
 /** Apply a council size decision without ever increasing the risk-sized quantity. */
 export function applyBoardSizeMultiplier(quantity: number, multiplier: number): number {
@@ -102,7 +110,20 @@ export class TradingPipeline {
   private inFlightSymbols: Set<string> = new Set();
   private peakEquityObserved: number = 0;
   private lastRiskDay: string = '';
-  private pendingProtection: Map<string, { ouSigma: number; ouMu: number; side: 'BUY' | 'SELL'; symbol: AssetSymbol }> = new Map();
+  private pendingProtection: Map<string, {
+    ouSigma: number;
+    ouMu: number;
+    side: 'BUY' | 'SELL';
+    symbol: AssetSymbol;
+    decisionId: string;
+    boardVerdict: BoardMeetingDecision['verdict'];
+    boardSizeMultiplier: number;
+    entryReferencePrice: number;
+    boardVotes: Record<string, string>;
+    strategyCouncilVotes: unknown[];
+    sevenCouncilVotes: unknown[];
+  }> = new Map();
+  private executionLedger: Map<string, { entryFills: ExecutionLedgerFill[]; exitFills: ExecutionLedgerFill[] }> = new Map();
   private lastAlertState: Map<string, { value: string; ts: number }> = new Map();
   private signalHistory: TradingSignal[] = [];
   private riskInterval: NodeJS.Timeout | null = null;
@@ -533,6 +554,20 @@ export class TradingPipeline {
       this.orderGateway.applyExchangeUpdate(binanceOrder);
     });
 
+    // The fill stream is the source of truth for execution attribution. It carries
+    // actual price, quantity, commission and exchange timestamp (not candle marks).
+    this.userDataStream.subscribeFills((fill) => {
+      const mapped = toExecutionLedgerFill(fill);
+      const pending = this.pendingProtection.get(fill.orderId);
+      const ledger = this.executionLedger.get(fill.symbol) || { entryFills: [], exitFills: [] };
+      if (pending) {
+        appendUniqueFill(ledger.entryFills, mapped);
+      } else if (ledger.entryFills.length > 0) {
+        appendUniqueFill(ledger.exitFills, mapped);
+      }
+      this.executionLedger.set(fill.symbol, ledger);
+    });
+
     // 2. Position closed listener to clean up zombie positions & record trade metrics in DB (البند 4)
     this.userDataStream.onPositionClosed(async (closedSymbol) => {
       console.log(`🧹 TradingPipeline: Position for ${closedSymbol} closed on Binance. Cleaning up local tracking.`);
@@ -544,17 +579,30 @@ export class TradingPipeline {
         const openTrades = await this.db.getOpenTrades(closedSymbol);
         if (openTrades.length === 0) return; // already settled by closeSinglePositionOnExchange: do not record/learn a phantom 0-PnL trade
         const lastCandle = this.marketData.getCandles(closedSymbol).slice(-1)[0];
-        const exitPrice = lastCandle ? lastCandle.close : undefined;
+        const fallbackExitPrice = lastCandle ? lastCandle.close : undefined;
+        const ledger = this.executionLedger.get(closedSymbol) || { entryFills: [], exitFills: [] };
         let totalPnl = 0;
         let totalCommissions = 0;
+        let displayExitPrice = fallbackExitPrice;
+        const remainingExitFills = ledger.exitFills.map((fill) => ({ ...fill }));
         for (const t of openTrades) {
-          const grossPnl = exitPrice ? (t.side === 'BUY' ? (exitPrice - t.price) * t.quantity : (t.price - exitPrice) * t.quantity) : 0;
-          // Deduct round-trip taker commissions (0.05% entry + 0.05% exit = 0.10% notional)
-          const roundTripFee = (t.quantity * (exitPrice || t.price)) * 0.0010;
-          const netPnl = Number((grossPnl - roundTripFee).toFixed(4));
-          totalPnl += netPnl;
-          totalCommissions += roundTripFee;
-          await this.db.closeTrade(t.id, netPnl, exitPrice);
+          const entryFills = Array.isArray(t.entryFills) ? t.entryFills as ExecutionLedgerFill[] : ledger.entryFills;
+          const exitFills = takeFillQuantity(remainingExitFills, t.quantity);
+          const settled = settleTradeRecord({ trade: t, entryFills, exitFills, fallbackExitPrice });
+          if (!settled) continue;
+          displayExitPrice = settled.exitPrice;
+          totalPnl += settled.netPnl;
+          totalCommissions += settled.totalFees;
+          await this.db.closeTrade(t.id, settled.netPnl, settled.exitPrice, settled.totalFees, {
+            grossPnl: settled.grossPnl,
+            entryFee: settled.entryFee,
+            exitFee: settled.exitFee,
+            entrySlippageBps: settled.entrySlippageBps,
+            exitSlippageBps: settled.exitSlippageBps,
+            entryFills: settled.entryFills,
+            exitFills: settled.exitFills,
+            status: 'CLOSED',
+          });
         }
 
 
@@ -565,9 +613,9 @@ export class TradingPipeline {
 🏁 <b>تم إغلاق صفقة بالكامل (صافي بعد خصم العمولات)</b>
 ━━━━━━━━━━━━━━━━
 🪙 الزوج: <b>${closedSymbol}</b>
-💵 سعر الخروج: <b>$${exitPrice ? (exitPrice >= 100 ? exitPrice.toFixed(2) : exitPrice.toFixed(6)) : 'سعر السوق'}</b>
+💵 سعر الخروج الفعلي: <b>$${displayExitPrice ? (displayExitPrice >= 100 ? displayExitPrice.toFixed(2) : displayExitPrice.toFixed(6)) : 'غير متاح'}</b>
 💰 الربح الصافي (بعد العمولات): <b>${totalPnl >= 0 ? '🟢 +' : '🔴 '}${totalPnl.toFixed(2)} USDT</b>
-🏷️ عمولة المنصة (فتح + إغلاق): <b>-$${totalCommissions.toFixed(3)} USDT</b>
+🏷️ عمولة الـfills الفعلية (فتح + إغلاق): <b>-$${totalCommissions.toFixed(3)} USDT</b>
 ━━━━━━━━━━━━━━━━
 ✅ تم تحرير الهامش وإعادة ضبط مصفوفة الأوزان بنجاح.
         `).catch(() => {});
@@ -635,6 +683,42 @@ export class TradingPipeline {
             const protectedOk = await this.applyProtection(ord, pending);
             if (protectedOk) {
               const fillPrice = ord.avgFillPrice || ord.price;
+              const ledger = this.executionLedger.get(ord.symbol) || { entryFills: [], exitFills: [] };
+              const entryFee = Number(ord.commission || ledger.entryFills.reduce((sum, fill) => sum + fill.commission, 0));
+              const entryFills = ledger.entryFills.length > 0 ? ledger.entryFills : [{
+                fillId: `ORDER-${ord.id}`,
+                orderId: ord.id,
+                symbol: ord.symbol,
+                side: ord.side,
+                price: fillPrice,
+                quantity: ord.filledQuantity,
+                commission: entryFee,
+                commissionAsset: ord.commissionAsset || 'USDT',
+                timestamp: ord.fillTimestamp || Date.now(),
+                isMaker: Boolean(ord.isMaker),
+              }];
+              await this.db.saveTrade({
+                id: ord.id,
+                timestamp: ord.fillTimestamp || Date.now(),
+                symbol: ord.symbol,
+                side: ord.side,
+                quantity: ord.filledQuantity,
+                price: fillPrice,
+                strategy: ord.strategyId || 'OU-DECISION-ENGINE',
+                fee: entryFee,
+                entryFee,
+                status: 'OPEN',
+                decisionId: pending.decisionId,
+                councilEvaluationId: pending.decisionId,
+                boardVerdict: pending.boardVerdict,
+                boardSizeMultiplier: pending.boardSizeMultiplier,
+                boardVotes: pending.boardVotes,
+                strategyCouncilVotes: pending.strategyCouncilVotes,
+                sevenCouncilVotes: pending.sevenCouncilVotes,
+                entryReferencePrice: pending.entryReferencePrice,
+                entrySlippageBps: pending.entryReferencePrice > 0 ? Number((((ord.side === 'BUY' ? fillPrice - pending.entryReferencePrice : pending.entryReferencePrice - fillPrice) / pending.entryReferencePrice) * 10000).toFixed(3)) : 0,
+                entryFills,
+              });
               // 🔥 Use DurableStateManager instead of D1
               durableStateManager.recordTrade({
                 id: ord.id,
@@ -1063,6 +1147,13 @@ export class TradingPipeline {
             ouMu: sig.takeProfit,
             side: signalType,
             symbol,
+            decisionId: boardDecision.id,
+            boardVerdict: boardDecision.verdict,
+            boardSizeMultiplier: boardDecision.sizeMultiplier,
+            boardVotes: boardDecision.votes,
+            strategyCouncilVotes: councilVotes,
+            sevenCouncilVotes: sevenMemberDecision.members,
+            entryReferencePrice: features.currentPrice,
           });
 
           this.eventJournal.record(
@@ -1732,22 +1823,58 @@ export class TradingPipeline {
       this.scaleInManager.removeBySymbol(symbol);
       const isPaperMode = this.orderGateway.getExecutionMode() === 'PAPER';
 
+      // Direct exchange closes may not pass through the local order map. Preserve
+      // the exchange RESULT so settlement can still use the actual exit price.
+      if (closeRes.exitPrice && closeRes.exitPrice > 0) {
+        const ledger = this.executionLedger.get(symbol) || { entryFills: [], exitFills: [] };
+        if (ledger.exitFills.length === 0) {
+          const openPositionSide = pos && pos.size >= 0 ? 'BUY' : 'SELL';
+          appendUniqueFill(ledger.exitFills, {
+            fillId: `EXCHANGE-CLOSE-${closeRes.orderId || symbol}-${closeRes.timestamp || Date.now()}`,
+            orderId: closeRes.orderId || `EXCHANGE-CLOSE-${symbol}`,
+            symbol,
+            side: openPositionSide === 'BUY' ? 'SELL' : 'BUY',
+            price: closeRes.exitPrice,
+            quantity: closeRes.qty || Math.abs(pos?.size || 0),
+            commission: closeRes.commission || 0,
+            commissionAsset: 'USDT',
+            timestamp: closeRes.timestamp || Date.now(),
+            isMaker: false,
+          });
+        }
+        this.executionLedger.set(symbol, ledger);
+      }
+
       const openTrades = await this.db.getOpenTrades(symbol);
       if (openTrades.length === 0) {
         if (isPaperMode) this.userDataStream.removePosition(symbol);
         return { success: true, message: `${symbol} already closed; nothing left to settle`, symbol };
       }
       const lastCandle = this.marketData.getCandles(symbol).slice(-1)[0];
-      const exitPrice = lastCandle ? lastCandle.close : (pos?.currentPrice || pos?.entryPrice);
+      const fallbackExitPrice = lastCandle ? lastCandle.close : (pos?.currentPrice || pos?.entryPrice);
+      const ledger = this.executionLedger.get(symbol) || { entryFills: [], exitFills: [] };
       let totalPnl = 0;
       let totalFees = 0;
+      let exitPrice = fallbackExitPrice;
+      const remainingExitFills = ledger.exitFills.map((fill) => ({ ...fill }));
       for (const t of openTrades) {
-        const grossPnl = exitPrice ? (t.side === "BUY" ? (exitPrice - t.price) * t.quantity : (t.price - exitPrice) * t.quantity) : 0;
-        const roundTripFee = (t.quantity * (exitPrice || t.price)) * 0.0010;
-        const netPnl = Number((grossPnl - roundTripFee).toFixed(4));
-        totalPnl += netPnl;
-        totalFees += roundTripFee;
-        await this.db.closeTrade(t.id, netPnl, exitPrice);
+        const entryFills = Array.isArray(t.entryFills) ? t.entryFills as ExecutionLedgerFill[] : ledger.entryFills;
+        const exitFills = takeFillQuantity(remainingExitFills, t.quantity);
+        const settled = settleTradeRecord({ trade: t, entryFills, exitFills, fallbackExitPrice });
+        if (!settled) continue;
+        exitPrice = settled.exitPrice;
+        totalPnl += settled.netPnl;
+        totalFees += settled.totalFees;
+        await this.db.closeTrade(t.id, settled.netPnl, settled.exitPrice, settled.totalFees, {
+          grossPnl: settled.grossPnl,
+          entryFee: settled.entryFee,
+          exitFee: settled.exitFee,
+          entrySlippageBps: settled.entrySlippageBps,
+          exitSlippageBps: settled.exitSlippageBps,
+          entryFills: settled.entryFills,
+          exitFills: settled.exitFills,
+          status: 'CLOSED',
+        });
       }
 
       if (pos) {

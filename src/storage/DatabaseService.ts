@@ -16,6 +16,22 @@ export interface TradeRecord {
     closedAt?: number;
     fee?: number;
     status: 'OPEN' | 'CLOSED' | 'CANCELLED';
+    decisionId?: string;
+    councilEvaluationId?: string;
+    boardVerdict?: 'APPROVED' | 'CONDITIONAL' | 'REJECTED';
+    boardSizeMultiplier?: number;
+    boardVotes?: Record<string, string>;
+    strategyCouncilVotes?: unknown[];
+    sevenCouncilVotes?: unknown[];
+    entryReferencePrice?: number;
+    exitReferencePrice?: number;
+    entrySlippageBps?: number;
+    exitSlippageBps?: number;
+    grossPnl?: number;
+    entryFee?: number;
+    exitFee?: number;
+    entryFills?: unknown[];
+    exitFills?: unknown[];
 }
 
 export interface SignalRecord {
@@ -171,13 +187,14 @@ export class DatabaseService {
         this.save();
     }
 
-    public async closeTrade(id: string, pnl: number, exitPrice?: number, fee?: number) {
+    public async closeTrade(id: string, pnl: number, exitPrice?: number, fee?: number, details?: Partial<TradeRecord>) {
         if (this.data.trades[id]) {
             this.data.trades[id].status = 'CLOSED';
             this.data.trades[id].pnl = pnl;
             this.data.trades[id].closedAt = Date.now();
             if (exitPrice !== undefined) this.data.trades[id].exitPrice = exitPrice;
             if (fee !== undefined) this.data.trades[id].fee = fee;
+            Object.assign(this.data.trades[id], details || {});
             this.save();
         }
     }

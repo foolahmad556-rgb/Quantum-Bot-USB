@@ -23,7 +23,7 @@ export class D1DatabaseService extends DatabaseService {
   async saveTrade(trade: TradeRecord) { await this.call('/d1/trades', { method: 'POST', body: JSON.stringify(trade) }); }
   async getOpenTrades(symbol?: string) { const q = symbol ? `?symbol=${encodeURIComponent(symbol)}` : ''; return (await this.call<{ items: TradeRecord[] }>(`/d1/trades/open${q}`)).items; }
   async getAllTrades(symbol?: string) { const q = symbol ? `?symbol=${encodeURIComponent(symbol)}` : ''; return (await this.call<{ items: TradeRecord[] }>(`/d1/trades${q}`)).items; }
-  async closeTrade(id: string, pnl: number, exitPrice?: number, fee?: number) { await this.call(`/d1/trades/${encodeURIComponent(id)}`, { method: 'PATCH', body: JSON.stringify({ pnl, exitPrice, fee }) }); }
+  async closeTrade(id: string, pnl: number, exitPrice?: number, fee?: number, details?: Partial<TradeRecord>) { await this.call(`/d1/trades/${encodeURIComponent(id)}`, { method: 'PATCH', body: JSON.stringify({ pnl, exitPrice, fee, ...details }) }); }
   async saveSignal(signal: SignalRecord) { await this.call('/d1/signals', { method: 'POST', body: JSON.stringify(signal) }); }
   async saveBalanceSnapshot(equity: number, freeMargin: number, unrealizedPnl: number) { await this.call('/d1/balances', { method: 'POST', body: JSON.stringify({ equity, freeMargin, unrealizedPnl }) }); }
   async saveState(key: string, value: any) { await this.call(`/d1/state/${encodeURIComponent(key)}`, { method: 'PUT', body: JSON.stringify({ value }) }); }

@@ -85,6 +85,10 @@ export interface Order {
   errorMessage?: string;
   exchangeOrderId?: number | string;
   reduceOnly?: boolean;
+  commission?: number;
+  commissionAsset?: string;
+  fillTimestamp?: number;
+  isMaker?: boolean;
 }
 
 export interface Fill {

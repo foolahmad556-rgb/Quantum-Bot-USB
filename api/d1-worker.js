@@ -91,7 +91,7 @@ export default {
         const id = decodeURIComponent(trade[1]), existing = await rows(env, 'SELECT payload FROM trades WHERE id=?', [id]);
         if (!existing[0]) return json({ error: 'Trade not found' }, 404);
         if (!Number.isFinite(body.pnl)) return json({ error: 'Finite pnl required' }, 400);
-        const value = { ...JSON.parse(existing[0].payload), pnl: body.pnl, exitPrice: body.exitPrice, fee: body.fee, status: 'CLOSED', closedAt: Date.now() };
+        const value = { ...JSON.parse(existing[0].payload), ...body, pnl: body.pnl, exitPrice: body.exitPrice, fee: body.fee, status: 'CLOSED', closedAt: Date.now() };
         await run(env, 'UPDATE trades SET payload=?,updated_at=? WHERE id=?', [JSON.stringify(value), Date.now(), id]);
         return json({ ok: true });
       }

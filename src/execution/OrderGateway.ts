@@ -801,7 +801,40 @@ export class OrderGateway {
     const localId = this.exchangeIdMap.get(exchangeOrderId) || clientOrderId.replace(/^C_/, '');
     const order = this.orders.get(localId) || this.orders.get(clientOrderId);
 
-    if (!order) return;
+    if (!order) {
+      // Conditional SL/TP orders are created directly on Binance and are not
+      // present in the local order map. Still forward their real TRADE fill so
+      // commission, exit price and realized PnL remain attributable.
+      if (eventOrder.x === 'TRADE' && eventOrder.t !== undefined) {
+        const tradeKey = `${exchangeOrderId}:${eventOrder.t}`;
+        if (!this.seenTrades.has(tradeKey)) {
+          if (this.seenTrades.size > 5000) this.seenTrades.clear();
+          this.seenTrades.add(tradeKey);
+          const rawSymbol = String(eventOrder.s || '');
+          const symbol = (rawSymbol.endsWith('USDT') ? `${rawSymbol.slice(0, -4)}/USDT` : rawSymbol) as AssetSymbol;
+          const price = parseFloat(eventOrder.L) || parseFloat(eventOrder.ap) || 0;
+          const quantity = parseFloat(eventOrder.l) || parseFloat(eventOrder.z) || 0;
+          const commissionAsset = String(eventOrder.N || 'USDT');
+          const commission = parseFloat(eventOrder.n) || 0;
+          if (symbol && price > 0 && quantity > 0) {
+            this.userDataStream.processFill({
+              fillId: `EX_FILL-${exchangeOrderId}-${eventOrder.t}`,
+              orderId: clientOrderId || exchangeOrderId,
+              symbol,
+              side: String(eventOrder.S).toUpperCase() === 'SELL' ? 'SELL' : 'BUY',
+              price,
+              quantity,
+              commission,
+              commissionAsset,
+              timestamp: eventOrder.T || Date.now(),
+              isMaker: Boolean(eventOrder.m),
+              realizedPnl: Number(eventOrder.rp || 0),
+            }, price);
+          }
+        }
+      }
+      return;
+    }
 
     const binanceStatus = eventOrder.X;
     const avgPrice = parseFloat(eventOrder.ap) || parseFloat(eventOrder.L) || order.avgFillPrice;
@@ -833,6 +866,10 @@ export class OrderGateway {
         const px = order.avgFillPrice || order.price;
         let commission = this.orderCommission.get(order.id) || 0;
         if (commission === 0) commission = Number(((order.filledQuantity * px * this.config.takerFeeBps) / 10000).toFixed(6));
+        order.commission = commission;
+        order.commissionAsset = 'USDT';
+        order.fillTimestamp = eventOrder.T || Date.now();
+        order.isMaker = Boolean(eventOrder.m);
         this.userDataStream.processFill({
           fillId: `EX_FILL-${exchangeOrderId}`,
           orderId: order.id,
@@ -1094,6 +1131,10 @@ export class OrderGateway {
     order.filledQuantity = Number((order.filledQuantity + fillQty).toFixed(4));
     order.remainingQuantity = Number((order.quantity - order.filledQuantity).toFixed(4));
     order.avgFillPrice = fillPrice;
+    order.commission = Number(((order.commission || 0) + commission).toFixed(8));
+    order.commissionAsset = fill.commissionAsset;
+    order.fillTimestamp = fill.timestamp;
+    order.isMaker = fill.isMaker;
 
     if (order.remainingQuantity <= 0.0001) {
       this.fsm.transition(order, 'FILLED');
@@ -1164,7 +1205,7 @@ export class OrderGateway {
    * Order of operations matters: the reduce-only MARKET close is sent FIRST and the protective
    * SL/TP are removed only after the close is confirmed, so a failed close never leaves a naked position.
    */
-  public async closePositionDirectlyOnBinance(symbol: AssetSymbol, size?: number): Promise<{ success: boolean; qty: number; error?: string }> {
+  public async closePositionDirectlyOnBinance(symbol: AssetSymbol, size?: number): Promise<{ success: boolean; qty: number; error?: string; orderId?: string; exitPrice?: number; commission?: number; timestamp?: number }> {
     if (this.executionMode === 'PAPER' || !this.apiKey || !this.apiSecret) {
       return { success: true, qty: size || 0 };
     }
@@ -1214,7 +1255,16 @@ export class OrderGateway {
       await this.cancelAllOpenOrdersForSymbol(symbol);
       await this.cancelProtectiveOrders(symbol);
       console.log(`✅ [EXCHANGE CLOSE SUCCESS] Closed ${symbol} on Binance (${closeSide} ${qtyStr})`);
-      return { success: true, qty: Math.abs(currentAmt) };
+      const exitPrice = Number(order.data?.avgPrice || order.data?.price || order.data?.avgPrice || 0);
+      const commission = Number(order.data?.commission || 0);
+      return {
+        success: true,
+        qty: Math.abs(currentAmt),
+        orderId: String(order.data?.orderId || ''),
+        exitPrice: exitPrice > 0 ? exitPrice : undefined,
+        commission: commission > 0 ? commission : undefined,
+        timestamp: Date.now(),
+      };
     } catch (e) {
       console.error(`❌ [EXCHANGE CLOSE ERROR] ${symbol}`, e);
       return { success: false, qty: 0, error: String(e) };
