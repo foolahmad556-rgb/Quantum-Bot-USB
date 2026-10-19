@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
-import { buildFuturesCombinedStreamUrl, getReconnectDelay } from '../market-data/ExchangeMarketData';
+import { buildFuturesCombinedStreamUrl, ExchangeMarketData, getReconnectDelay } from '../market-data/ExchangeMarketData';
+import type { AssetSymbol } from '../domain/types';
 
 assert.equal(
   buildFuturesCombinedStreamUrl(['BTC/USDT', 'ETH/USDT']),
@@ -14,4 +15,27 @@ assert.doesNotMatch(source, /setInterval\(\(\) => \{\s*this\.fetchOrderBookSnaps
 assert.doesNotMatch(source, /connectSpotWs\(/);
 assert.match(source, /fstream\.binancefuture\.com/);
 
-console.log('PASS exchange market data safety helpers');
+const marketData = new ExchangeMarketData(undefined, ['BTC/USDT', 'ETH/USDT'] as AssetSymbol[]);
+const oldFetch = globalThis.fetch;
+const requested: string[] = [];
+globalThis.fetch = (async (input: string | URL | Request) => {
+  const url = String(input);
+  requested.push(url);
+  if (url.includes('BTCUSDT')) return new Response('unavailable', { status: 503 });
+  return new Response(JSON.stringify([
+    [60_000, '10', '12', '9', '11', '4', 119_000, '440', 3, '1', '100', '0']
+  ]), { status: 200, headers: { 'content-type': 'application/json' } });
+}) as typeof fetch;
+try {
+  await marketData.backfillRealCandles(['BTC/USDT', 'ETH/USDT'] as AssetSymbol[]);
+} finally {
+  globalThis.fetch = oldFetch;
+}
+assert.equal(requested.length, 2, 'failed symbol must not stop later symbol backfill');
+assert.equal(marketData.getCandles('ETH/USDT' as AssetSymbol)[0]?.timestamp, 60_000);
+assert.equal(marketData.getCandles('ETH/USDT' as AssetSymbol)[0]?.vwap, 110);
+assert.equal(marketData.getLastUpdateTime('BTC/USDT' as AssetSymbol), 0, 'failed backfill must not mark symbol fresh');
+assert.deepEqual(marketData.getInsufficientHistory(), ['BTC/USDT', 'ETH/USDT'], 'report symbols below required history');
+assert.deepEqual(marketData.getCandles('BTC/USDT' as AssetSymbol), [], 'failure must not create candle data');
+
+console.log('PASS exchange market data safety and backfill');

@@ -412,7 +412,7 @@ app.get('/api/live-status', async (_req: Request, res: Response) => {
 app.post('/api/protected/trading/start', requireAuth, async (_req: Request, res: Response) => {
   try {
     await pipeline.startAutonomousTrading();
-    return ok(res, { isRunning: true });
+    return ok(res, { isRunning: !!pipeline.isRunning });
   } catch (e: any) {
     return fail(res, 409, e?.message || 'trading start failed');
   }

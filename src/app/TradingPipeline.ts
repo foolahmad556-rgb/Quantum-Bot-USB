@@ -296,11 +296,15 @@ export class TradingPipeline {
 
       // 2. Start Market Data Stream
       try {
-        await this.marketData.backfillRealCandles(this.config.activeSymbols);
-      } catch (e: any) {
-        console.warn('⚠️ Non-blocking candle backfill notice:', e.message);
-      }
-      this.marketData.startStreaming(300, this.config.activeSymbols);
+              await this.marketData.backfillRealCandles(this.config.activeSymbols);
+            } catch (e: any) {
+              console.warn('⚠️ Non-blocking candle backfill notice:', e.message);
+            }
+            const insufficientHistory = this.marketData.getInsufficientHistory(100);
+            if (insufficientHistory.length > 0) {
+              console.warn(`⚠️ Insufficient candle history (<100 candles) for: ${insufficientHistory.join(', ')}`);
+            }
+            this.marketData.startStreaming(300, this.config.activeSymbols);
 
       // 3. Start Optimization
       this.runQuantumOptimization();
@@ -336,6 +340,7 @@ export class TradingPipeline {
       if (this.telegramService) {
         await this.telegramService.sendMessage(`🚨 <b>خطأ أثناء بدء التشغيل</b>\n\n${error.message}`).catch(() => {});
       }
+      throw error;
     }
   }
 
@@ -402,7 +407,8 @@ export class TradingPipeline {
 
         }
       } catch (err) {
-        // Silent catch
+        console.error('❌ Position monitor loop failed:', err);
+        this.eventJournal.record('CRITICAL', 'ORDER_GATEWAY', `Position monitor loop failed: ${err instanceof Error ? err.message : String(err)}`);
       }
     }, 1000);
 
@@ -624,7 +630,7 @@ export class TradingPipeline {
                 status: 'OPEN',
               });
               this.partialProfitManager.registerPosition(
-                ord.id, ord.symbol, ord.side, fillPrice, ord.filledQuantity, pending.ouMu
+                ord.id, ord.symbol, ord.side, fillPrice, ord.filledQuantity
               );
               this.scaleInManager.registerOriginalPosition(
                 ord.id, ord.symbol, ord.side, fillPrice, ord.filledQuantity
@@ -654,9 +660,15 @@ export class TradingPipeline {
     const rawDist = 2 * Number(pending.ouSigma);
     const dist = Math.min(Math.max(Number.isFinite(rawDist) ? rawDist : 0, fill * 0.004), fill * 0.03);
     const sl = pending.side === 'BUY' ? fill - dist : fill + dist;
+    // Target is a price from the strategy, not a duration. Reject invalid/sideways targets;
+    // the stop remains mandatory and is verified by OrderGateway.
+    const candidateTp = Number(pending.ouMu);
+    const tp = Number.isFinite(candidateTp) && (pending.side === 'BUY' ? candidateTp > fill : candidateTp < fill)
+      ? candidateTp
+      : undefined;
 
     const prot = await this.orderGateway.sendProtectiveOrders(
-      ord.symbol, pending.side, ord.filledQuantity, fill, sl, pending.ouMu, ord.id
+      ord.symbol, pending.side, ord.filledQuantity, fill, sl, tp, ord.id
     );
 
     if (prot.slOk) {
@@ -787,6 +799,14 @@ export class TradingPipeline {
     const dataAge = Date.now() - this.marketData.getLastUpdateTime(symbol);
     if (dataAge > 3000) {
       console.warn(`⚠️ [${symbol}] Stale market data detected (${dataAge}ms). Execution aborted.`);
+      return;
+    }
+
+    // Insufficient candle history would feed partial data into indicators; skip evaluation
+    // until enough candles exist (backfill failure must not become a bogus signal).
+    const historyLen = this.marketData.getCandles(symbol).length;
+    if (historyLen < 30) {
+      console.warn(`⚠️ [${symbol}] Insufficient candle history (${historyLen}/30). Signal evaluation skipped.`);
       return;
     }
 

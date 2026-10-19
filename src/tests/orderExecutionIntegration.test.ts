@@ -59,3 +59,9 @@ assert.equal(stream.getFills().length, fillCount + 1);
 console.log('order execution integration test passed');
 
 process.env.EXECUTION_MODE = undefined;
+
+// Gateway safety regressions: never increase risk quantity to meet minimum notional.
+gateway.setSymbolFilter('BTCUSDT', 0.000001, 0.1, 0.000001, 5);
+const undersized = gateway.submitOrder({ symbol: 'BTCUSDT', side: 'BUY', type: 'MARKET', quantity: 0.00005, price: 50000 });
+assert.equal(undersized.status, 'REJECTED');
+assert.match(undersized.errorMessage || '', /Notional value/);

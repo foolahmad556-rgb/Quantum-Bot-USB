@@ -308,7 +308,7 @@ export class OrderGateway {
     quantity: number,
     entryPrice: number,
     slPrice: number,
-    tpPrice: number,
+    tpPrice?: number,
     localOrderId?: string
   ): Promise<{ slId?: string; tpId?: string; slOk: boolean }> {
     if (this.executionMode === 'PAPER' || !this.apiKey || !this.apiSecret) return { slOk: true };
@@ -317,11 +317,18 @@ export class OrderGateway {
     const filter = this.getSymbolFilter(symbol);
     const exitSide = side === 'BUY' ? 'SELL' : 'BUY';
     const formattedSl = formatPriceToTick(slPrice, filter.tickSize);
-    const formattedTp = formatPriceToTick(tpPrice, filter.tickSize);
+    const formattedTp = Number.isFinite(tpPrice) ? formatPriceToTick(tpPrice as number, filter.tickSize) : NaN;
     const formattedQty = formatQuantityToStep(quantity, filter.stepSize);
 
     if (!Number.isFinite(formattedQty) || formattedQty < filter.minQty) {
       console.warn(`⚠️ Protective order quantity ${formattedQty} below minQty ${filter.minQty} for ${symbol}`);
+      return { slOk: false };
+    }
+
+    // A protective order below the exchange minimum notional would be rejected outright,
+    // leaving the position unprotected — fail fast so the caller can close it instead.
+    if (filter.minNotional && formattedQty * entryPrice < filter.minNotional) {
+      console.error(`❌ Protective notional ${formattedQty}×${entryPrice} below minNotional ${filter.minNotional} for ${symbol}; SL would be rejected — refusing to pretend protection exists.`);
       return { slOk: false };
     }
 
@@ -452,6 +459,28 @@ export class OrderGateway {
   }
 
   /**
+   * Returns false when none of the tracked protective IDs are open on Binance,
+   * true when at least one is still open, or 'unknown' when the query failed
+   * (caller must then keep local tracking instead of assuming success).
+   */
+  private async protectiveOrderIdsStillOpen(
+    symbol: string,
+    tracked: { slId?: string; tpId?: string }
+  ): Promise<boolean | 'unknown'> {
+    const ids = new Set<string>();
+    if (tracked.slId) ids.add(String(tracked.slId));
+    if (tracked.tpId) ids.add(String(tracked.tpId));
+    if (ids.size === 0) return false;
+    try {
+      const res = await this.signedRequest('GET', '/fapi/v1/openOrders', { symbol });
+      if (!res.ok || !Array.isArray(res.data)) return 'unknown';
+      return res.data.some((o: any) => ids.has(String(o.orderId)) || ids.has(String(o.algoId ?? '')));
+    } catch {
+      return 'unknown';
+    }
+  }
+
+  /**
    * إلغاء كافة أوامر الحماية للرمز أو لأمر محدد بالمعرف
    */
   public async cancelProtectiveOrders(symbolOrOrderId: string, secondaryKey?: string): Promise<void> {
@@ -490,11 +519,30 @@ export class OrderGateway {
           cancelPromises.push(fetch(`${this.apiBaseUrl}/fapi/v1/order?${q}&signature=${sig}`, { method: 'DELETE', headers }).catch(() => null));
         }
 
-        await Promise.allSettled(cancelPromises);
+        const results = await Promise.allSettled(cancelPromises);
+        const anyOk = results.some(r => r.status === 'fulfilled' && r.value && r.value.ok);
+        if (!anyOk) {
+          // Every targeted DELETE failed or never reached Binance: fall back to a symbol-wide cancel.
+          console.warn(`⚠️ Targeted protective cancels reported no success for ${symbolOrOrderId}; falling back to symbol-wide cancel.`);
+          await this.cancelAllProtectiveForSymbol(clean);
+        }
+
+        // A cancel response alone does not prove the orders are gone. Verify on the exchange
+        // before dropping local tracking, so a failed cancel can be retried later.
+        const stillOpen = await this.protectiveOrderIdsStillOpen(clean, tracked);
+        if (stillOpen === 'unknown') {
+          console.error(`❌ Could not verify protective-order cancellation for ${symbolOrOrderId}; keeping tracking for retry.`);
+          return;
+        }
+        if (stillOpen) {
+          console.error(`❌ Protective order(s) still open on Binance for ${symbolOrOrderId} after cancel; keeping tracking for retry.`);
+          return;
+        }
+
         this.protectiveOrders.delete(symbolOrOrderId);
         this.protectiveOrders.delete(clean);
         if (secondaryKey) this.protectiveOrders.delete(secondaryKey);
-        console.log(`🗑️ Cancelled specific protective order IDs for ${symbolOrOrderId}`);
+        console.log(`🗑️ Cancelled and verified protective orders for ${symbolOrOrderId}`);
         return;
       }
 
@@ -547,6 +595,55 @@ export class OrderGateway {
       }
     } catch (err) {
       console.error(`❌ Error cancelling all open orders for ${symbol}:`, err);
+    }
+  }
+
+  /**
+   * After a transport error on submit, decide whether the order actually reached Binance.
+   * Returns 'found' when the clientOrderId exists (open or closed), 'absent' when Binance
+   * confirms it never arrived, 'unknown' when the query itself failed.
+   */
+  private async reconcileAmbiguousSubmit(order: Order, cleanSymbol: string): Promise<'found' | 'absent' | 'unknown'> {
+    try {
+      const openRes = await this.signedRequest('GET', '/fapi/v1/openOrders', {
+        origClientOrderId: order.id,
+        symbol: cleanSymbol,
+      });
+      if (!openRes.ok || !Array.isArray(openRes.data)) return 'unknown';
+
+      const openHit: any = openRes.data.find((o: any) => String(o.origClientOrderId ?? '') === order.id);
+      if (openHit) {
+        order.exchangeOrderId = String(openHit.orderId);
+        this.exchangeIdMap.set(order.exchangeOrderId, order.id);
+        order.filledQuantity = parseFloat(openHit.executedQty) || 0;
+        order.remainingQuantity = Math.max(0, order.quantity - order.filledQuantity);
+        const target: OrderStatus = openHit.status === 'PARTIALLY_FILLED' ? 'PARTIALLY_FILLED' : openHit.status === 'FILLED' ? 'FILLED' : 'NEW';
+        if (this.fsm.canTransition(order.status, target)) this.fsm.transition(order, target);
+        else order.status = target;
+        this.notifyOrder(order);
+        return 'found';
+      }
+
+      // Not open — it may be FILLED and already closed (or never arrived).
+      const closedRes = await this.signedRequest('GET', '/fapi/v1/order', {
+        origClientOrderId: order.id,
+        symbol: cleanSymbol,
+      });
+      if (!closedRes.ok) return 'unknown';
+      const code = Number(closedRes.data?.code || 0);
+      if (code === -2013) return 'absent';
+      if (closedRes.data && closedRes.data.orderId) {
+        order.exchangeOrderId = String(closedRes.data.orderId);
+        this.exchangeIdMap.set(order.exchangeOrderId, order.id);
+        const target: OrderStatus = closedRes.data.status === 'FILLED' ? 'FILLED' : closedRes.data.status === 'NEW' ? 'NEW' : closedRes.data.status === 'CANCELED' || closedRes.data.status === 'EXPIRED' ? 'CANCELLED' : 'PARTIALLY_FILLED';
+        if (this.fsm.canTransition(order.status, target)) this.fsm.transition(order, target);
+        else order.status = target;
+        this.notifyOrder(order);
+        return 'found';
+      }
+      return 'unknown';
+    } catch {
+      return 'unknown';
     }
   }
 
@@ -665,6 +762,21 @@ export class OrderGateway {
       }
     } catch (err) {
       console.error('❌ Error sending order to Binance Futures:', err);
+      // Network failure after the request was sent: Binance may still have accepted it.
+      // Reconcile by clientOrderId before declaring rejection, otherwise a retry could
+      // duplicate the position or a real fill would be reported as a failure.
+      const clean = params.symbol.replace('/', '');
+      const verdict = await this.reconcileAmbiguousSubmit(order, clean);
+      if (verdict === 'found') {
+        console.warn(`⚠️ Order ${order.id} was accepted on Binance despite transport error; reconciled to exchangeOrderId=${order.exchangeOrderId}.`);
+        return;
+      }
+      if (verdict === 'unknown') {
+        order.errorMessage = 'Transport error during submit; exchange state unknown, not marked rejected';
+        console.error(`⚠️ Order ${order.id}: cannot verify exchange state after transport error; leaving PENDING_NEW for reconciliation.`);
+        this.notifyOrder(order);
+        return;
+      }
       if (this.fsm.canTransition(order.status, 'REJECTED')) {
         this.fsm.transition(order, 'REJECTED', String(err));
       } else {
@@ -827,13 +939,7 @@ export class OrderGateway {
     }
 
     if (filter.minNotional && notionalValue < filter.minNotional) {
-      // للأرصدة الصغيرة: تصحيح الكمية تلقائياً للوصول للحد الأدنى لبايننس (5 USDT)
-      const adjustedQty = formatQuantityToStep((filter.minNotional * 1.02) / limitPrice, filter.stepSize);
-      if (adjustedQty >= filter.minQty && (adjustedQty * limitPrice) >= filter.minNotional) {
-        formattedQty = adjustedQty;
-        console.log(`ℹ️ Auto-adjusted micro order quantity for ${params.symbol} to meet minNotional: ${formattedQty} (Val: $${(formattedQty * limitPrice).toFixed(2)})`);
-      } else {
-        const order: Order = {
+      const order: Order = {
           id: orderId,
           clientOrderId,
           symbol: params.symbol,
@@ -855,7 +961,6 @@ export class OrderGateway {
         this.orders.set(orderId, order);
         this.notifyOrder(order);
         return order;
-      }
     }
 
     const order: Order = {

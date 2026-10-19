@@ -58,12 +58,14 @@ export class HybridReconciliationManager {
     positions: PositionData[];
     source: 'websocket' | 'rest';
   }> {
-    // Try WebSocket first (real-time)
+    // Try WebSocket first (real-time). A connected socket alone is not enough: it must also
+    // carry an account record AND at least one real position snapshot, otherwise an empty
+    // position list could be mistaken for "all trades closed" and wrongly close DB trades.
     if (this.wsManager.getConnectionStatus()) {
       const account = this.wsManager.getAccount();
       const positions = this.wsManager.getPositions();
 
-      if (account && positions.length >= 0) {
+      if (account && this.wsManager.hasValidPositionSnapshot()) {
         return {
           account,
           positions,
@@ -78,14 +80,21 @@ export class HybridReconciliationManager {
       return await this.restFallback();
     }
 
-    // Use cached data if no fresh REST call
+    // No REST budget left: reuse cached WS data only when it is a verified snapshot,
+    // otherwise fail closed instead of serving stale/empty state as current.
+    return this.requireCachedSnapshot();
+  }
+
+  private requireCachedSnapshot(): {
+    account: AccountData;
+    positions: PositionData[];
+    source: 'websocket';
+  } {
     const account = this.wsManager.getAccount();
-    const positions = this.wsManager.getPositions();
-    return {
-      account,
-      positions,
-      source: this.wsManager.getConnectionStatus() ? 'websocket' : 'rest'
-    };
+    if (account && this.wsManager.hasValidPositionSnapshot()) {
+      return { account, positions: this.wsManager.getPositions(), source: 'websocket' };
+    }
+    throw new Error('No valid reconciliation snapshot: WebSocket position data missing and REST fallback unavailable');
   }
 
   private async restFallback(): Promise<{
@@ -124,12 +133,8 @@ export class HybridReconciliationManager {
         if (this.failureCount >= this.maxFailures) {
           throw new Error(`Rate limited 3+ times - IP likely banned`);
         }
-        // Return cached WebSocket data
-        return {
-          account: this.wsManager.getAccount(),
-          positions: this.wsManager.getPositions(),
-          source: 'websocket'
-        };
+        // Cached WS data is only usable when it holds a verified position snapshot.
+        return this.requireCachedSnapshot();
       }
 
       if (!accountRes.ok || !positionsRes.ok) {
@@ -168,12 +173,8 @@ export class HybridReconciliationManager {
       console.error(`❌ [REST] Fallback failed: ${e.message}`);
       this.failureCount++;
 
-      // Return cached data
-      return {
-        account: this.wsManager.getAccount(),
-        positions: this.wsManager.getPositions(),
-        source: 'websocket'
-      };
+      // Cached WS data only if it is a verified snapshot; otherwise fail closed.
+      return this.requireCachedSnapshot();
     }
   }
 

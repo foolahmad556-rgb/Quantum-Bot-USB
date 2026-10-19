@@ -1,5 +1,7 @@
 // src/tests/TradingPipelineIntegration.test.ts
 import assert from 'node:assert';
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import { describe, it, beforeEach } from 'node:test';
 import { DurableStateManager } from '../storage/DurableStateManager';
 
@@ -8,6 +10,13 @@ import { DurableStateManager } from '../storage/DurableStateManager';
  * instead of D1 for live data writes.
  */
 describe('TradingPipeline Integration with DurableStateManager', () => {
+  it('does not pass take-profit price as a holding-time duration', () => {
+    const source = readFileSync(fileURLToPath(new URL('../app/TradingPipeline.ts', import.meta.url)), 'utf8');
+    assert.match(source, /registerPosition\(\s*ord\.id,\s*ord\.symbol,\s*ord\.side,\s*fillPrice,\s*ord\.filledQuantity\s*\)/);
+    assert.doesNotMatch(source, /registerPosition\([\s\S]{0,180}pending\.ouMu/);
+  });
+
+
   let durableManager: DurableStateManager;
 
   beforeEach(() => {

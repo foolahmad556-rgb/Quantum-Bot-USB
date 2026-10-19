@@ -449,23 +449,27 @@ export class BacktestEngine {
           },
         });
 
-        // Council evaluation is per-symbol and shadow-only; it never changes the strategy signal.
-        councilVotes = evaluateCandleCouncil(candleHistory, { intervalMs, asOf: timestamp });
-        councilDecision = decideByCouncil(councilVotes);
-        councilEvaluationId = `COUNCIL-${symbol}-${timestamp}`;
-        councilReport = {
-          side: councilDecision?.side ?? null,
-          confidence: councilDecision?.confidence ?? 0,
-          votes: councilVotes.map(({ member, side, confidence }) => ({ member, side, confidence })),
+        // Keep council state scoped to this symbol; the timestamp's equity point is only a compact summary.
+        const symbolCouncilVotes = evaluateCandleCouncil(candleHistory, { intervalMs, asOf: timestamp });
+        const symbolCouncilDecision = decideByCouncil(symbolCouncilVotes);
+        const symbolCouncilEvaluationId = `COUNCIL-${symbol}-${timestamp}`;
+        const symbolCouncilReport: NonNullable<Fill['councilReport']> = {
+          side: symbolCouncilDecision?.side ?? null,
+          confidence: symbolCouncilDecision?.confidence ?? 0,
+          votes: symbolCouncilVotes.map(({ member, side, confidence }) => ({ member, side, confidence })),
         };
+        councilVotes = symbolCouncilVotes;
+        councilDecision = symbolCouncilDecision;
+        councilEvaluationId = symbolCouncilEvaluationId;
+        councilReport = symbolCouncilReport;
         councilEvaluations.push({
-          id: councilEvaluationId,
+          id: symbolCouncilEvaluationId,
           symbol,
           timestamp,
-          decision: councilDecision
-            ? { side: councilDecision.side, votes: councilDecision.votes, confidence: councilDecision.confidence, members: councilDecision.members }
+          decision: symbolCouncilDecision
+            ? { side: symbolCouncilDecision.side, votes: symbolCouncilDecision.votes, confidence: symbolCouncilDecision.confidence, members: symbolCouncilDecision.members }
             : null,
-          votes: councilReport.votes,
+          votes: symbolCouncilReport.votes,
         });
 
         // If strong signal and capital is available, execute

@@ -192,6 +192,10 @@ export class ExchangeMarketData extends EventEmitter {
     return this.candleHistory.get(symbol) || [];
   }
 
+  public getInsufficientHistory(minimumCandles: number = 100): AssetSymbol[] {
+    return this.activeCryptoSymbols.filter(symbol => (this.candleHistory.get(symbol)?.length || 0) < minimumCandles);
+  }
+
   public subscribeTicks(listener: (tick: Tick) => void): () => void {
     this.tickListeners.add(listener);
     return () => this.tickListeners.delete(listener);
@@ -211,7 +215,7 @@ export class ExchangeMarketData extends EventEmitter {
         const res = await binanceRateLimiter.fetch(`${baseUrl}/fapi/v1/klines?symbol=${binanceSym}&interval=1m&limit=100`);
         if (!res.ok) {
           console.warn(`⚠️ ExchangeMarketData: Could not fetch candles for ${sym}: HTTP ${res.status}`);
-          return;
+          continue;
         }
         const data = await res.json();
         if (Array.isArray(data) && data.length > 0) {
@@ -251,12 +255,6 @@ export class ExchangeMarketData extends EventEmitter {
 
     console.log(`🌐 ExchangeMarketData: Starting live Binance real-time data engine for ${this.activeCryptoSymbols.join(', ')}...`);
 
-    // Initialize lastUpdateTimes for all active symbols with current timestamp
-    // This prevents false stale-data warnings before streams come online
-    const now = Date.now();
-    for (const sym of this.activeCryptoSymbols) {
-      this.lastUpdateTimes.set(sym, now);
-    }
 
     // Historical candles are backfilled by TradingPipeline before streaming starts.
     // Avoid repeating REST klines requests every time the WebSocket reconnects.
@@ -314,9 +312,6 @@ export class ExchangeMarketData extends EventEmitter {
             this.currentPrices.set(sym, p);
             this.lastUpdateTimes.set(sym, now);
 
-            // Construct or update candle in candleHistory
-            // Price ticker has no real volume. Candle volume comes only from Binance kline stream.
-            this.updateCandleHistory(sym, p, 0);
 
             const book = this.orderBookBuilder.getBook(sym);
             // REST ticker is price-only. Do not fabricate trade size, side, or order-book depth.
@@ -401,24 +396,6 @@ export class ExchangeMarketData extends EventEmitter {
 
   }
 
-  private updateCandleHistory(symbol: AssetSymbol, price: number, volume: number) {
-    const now = Date.now();
-    if (!this.candleHistory.has(symbol)) {
-      this.candleHistory.set(symbol, []);
-    }
-    const candlesArr = this.candleHistory.get(symbol)!;
-    const lastCandle = candlesArr[candlesArr.length - 1];
-    if (lastCandle && now - lastCandle.timestamp < 60_000) {
-      lastCandle.high = Math.max(lastCandle.high, price);
-      lastCandle.low = Math.min(lastCandle.low, price);
-      lastCandle.close = price;
-      lastCandle.volume += volume;
-      lastCandle.vwap = lastCandle.volume > 0 ? (lastCandle.vwap + price) / 2 : price;
-    } else {
-      candlesArr.push({ timestamp: now, open: price, high: price, low: price, close: price, volume, vwap: price });
-      if (candlesArr.length > 120) candlesArr.shift();
-    }
-  }
 
   private connectMarketWs(url: string) {
     if (this.marketWs) {

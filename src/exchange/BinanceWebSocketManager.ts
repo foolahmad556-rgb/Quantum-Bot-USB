@@ -30,6 +30,7 @@ export class BinanceWebSocketManager extends EventEmitter {
   private reconnectDelay = 5000;
 
   private lastPositionUpdate: PositionData[] = [];
+  private hasPositionSnapshot = false;
   private lastAccountUpdate: AccountData | null = null;
   private isConnected = false;
 
@@ -104,19 +105,35 @@ export class BinanceWebSocketManager extends EventEmitter {
       console.log(`💰 Account updated: $${this.lastAccountUpdate.totalWalletBalance.toFixed(2)}`);
     }
 
-    // Position Update
-    if (message.e === 'POSITION_UPDATE') {
-      const { a } = message;
-      this.lastPositionUpdate = a.map((p: any) => ({
-        symbol: p.s,
-        positionAmt: parseFloat(p.pa),
-        entryPrice: parseFloat(p.ep),
-        markPrice: parseFloat(p.mp),
-        unRealizedProfit: parseFloat(p.up),
-        positionSide: p.ps,
-        timestamp: Date.now()
-      })).filter((p: PositionData) => p.positionAmt !== 0);
-
+    // ACCOUNT_UPDATE carries futures position data in a.P. Binance pushes ONLY the symbols
+    // changed by this event ("Position information of other symbols will no longer be pushed"),
+    // so merge per symbol+side instead of replacing the cache; an empty P means no position
+    // change at all (balance-only event) and must not wipe open positions.
+    if (message.e === 'ACCOUNT_UPDATE') {
+      const rawPositions = message.a?.P;
+      if (!Array.isArray(rawPositions) || rawPositions.length === 0) return;
+      const timestamp = Date.now();
+      const merged = new Map<string, PositionData>();
+      for (const p of this.lastPositionUpdate) merged.set(`${p.symbol}:${p.positionSide}`, p);
+      for (const p of rawPositions) {
+        if (typeof p?.s !== 'string' || !p.s || typeof p?.ps !== 'string') return;
+        const positionAmt = Number(p.pa);
+        const entryPrice = Number(p.ep);
+        const unRealizedProfit = Number(p.up);
+        if (!Number.isFinite(positionAmt) || !Number.isFinite(entryPrice) || !Number.isFinite(unRealizedProfit)) return;
+        const key = `${p.s}:${p.ps}`;
+        if (positionAmt === 0) {
+          merged.delete(key);
+        } else {
+          merged.set(key, {
+            symbol: p.s, positionAmt, entryPrice,
+            markPrice: Number.isFinite(Number(p.mp)) ? Number(p.mp) : 0,
+            unRealizedProfit, positionSide: p.ps, timestamp
+          });
+        }
+      }
+      this.lastPositionUpdate = [...merged.values()];
+      this.hasPositionSnapshot = true;
       this.emit('positions', this.lastPositionUpdate);
       console.log(`📊 Positions updated: ${this.lastPositionUpdate.length} open`);
     }
@@ -182,6 +199,10 @@ export class BinanceWebSocketManager extends EventEmitter {
 
   getAccount(): AccountData | null {
     return this.lastAccountUpdate;
+  }
+
+  hasValidPositionSnapshot(): boolean {
+    return this.hasPositionSnapshot;
   }
 
   getConnectionStatus(): boolean {

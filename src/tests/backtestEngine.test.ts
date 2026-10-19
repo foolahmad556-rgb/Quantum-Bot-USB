@@ -31,4 +31,24 @@ assert.ok(Math.abs(result.totalFeesPaid - fillFees) < 0.02, 'reported fees must 
 assert.ok(Math.abs(result.equityCurve.at(-1)!.equity - result.equityCurve.at(-1)!.cash) < 0.01,
   'final equity and cash must reconcile when no positions remain');
 assert.ok(result.equityCurve.every((point) => point.equity >= 0));
+const symbols = ['BTC/USDT', 'ETH/USDT'] as const;
+const multiSymbolCandles = (scale: number): Candle[] => Array.from({ length: 40 }, (_, i) => {
+  const close = scale * (100 + i * 0.15 + Math.sin(i / 3) * 2);
+  return { timestamp: i * 3_600_000, open: close, high: close + 0.5, low: close - 0.5, close, volume: 1000, vwap: close };
+});
+const multiSymbolEngine = new BacktestEngine({ symbols: [...symbols], initialCapital: 10_000, takerFeeBps: 5, slippage: 0 });
+const multiSymbolResult = multiSymbolEngine.runSync(new Map([
+  [symbols[0], multiSymbolCandles(1)],
+  [symbols[1], multiSymbolCandles(10)],
+]));
+for (const symbol of symbols) {
+  const entries = multiSymbolResult.trades.filter((fill) => fill.symbol === symbol && fill.fillId.startsWith('FILL-ENT-'));
+  assert.ok(entries.length > 0, `expected entry for ${symbol}`);
+  for (const entry of entries) {
+    const evaluation = multiSymbolResult.councilEvaluations!.find((item) => item.id === entry.councilEvaluationId);
+    assert.ok(evaluation, `entry must resolve council evaluation for ${symbol}`);
+    assert.equal(evaluation!.symbol, symbol, `entry council evaluation must belong to ${symbol}`);
+    assert.deepEqual(entry.councilReport!.votes, evaluation!.votes.map(({ member, side, confidence }) => ({ member, side, confidence })));
+  }
+}
 console.log('backtest engine smoke tests passed');
