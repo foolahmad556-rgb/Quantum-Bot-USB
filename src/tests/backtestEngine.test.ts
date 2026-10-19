@@ -12,6 +12,8 @@ const candles: Candle[] = Array.from({ length: 100 }, (_, i) => {
 const result = engine.runSync(new Map([['BTC/USDT', candles]]));
 assert.equal(result.equityCurve.length, candles.length);
 assert.ok(Array.isArray(result.councilEvaluations), 'backtest report must expose per-symbol council evaluations');
+assert.ok(result.trades.some((fill) => fill.councilReport), 'backtest result must include council data consumed by the UI');
+assert.ok(result.trades.filter((fill) => fill.fillId.startsWith('FILL-EXIT-')).every((fill) => fill.councilEvaluationId && fill.tradeId && fill.exitReason && fill.realizedPnl !== undefined), 'closed trades must retain council linkage and exit details for the UI');
 assert.ok(result.councilEvaluations!.length > 0, 'council evaluations must be recorded');
 assert.ok(result.councilEvaluations!.every((evaluation) => evaluation.symbol === 'BTC/USDT' && evaluation.votes.length === 4));
 assert.ok(result.trades.filter((fill) => fill.fillId.startsWith('FILL-ENT-')).every((fill) => fill.councilEvaluationId),

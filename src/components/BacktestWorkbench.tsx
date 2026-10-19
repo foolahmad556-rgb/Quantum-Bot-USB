@@ -273,6 +273,63 @@ export const BacktestWorkbench: React.FC<BacktestProps> = ({ lang }) => {
         </div>
       </div>
 
+      {/* Shadow council evaluations linked to originating trades */}
+      {backtestResult && (() => {
+        const evaluations = backtestResult.councilEvaluations ?? [];
+        const evaluationsById = new Map(evaluations.map((evaluation) => [evaluation.id, evaluation]));
+        const tradeGroups = new Map<string, typeof backtestResult.trades>();
+        backtestResult.trades.forEach((fill) => {
+          if (!fill.tradeId) return;
+          const group = tradeGroups.get(fill.tradeId) ?? [];
+          group.push(fill);
+          tradeGroups.set(fill.tradeId, group);
+        });
+        const linkedTrades = Array.from(tradeGroups.entries()).map(([tradeId, fills]) => {
+          const entry = fills.find((fill) => fill.fillId.startsWith('FILL-ENT-')) ?? fills[0];
+          const exit = fills.find((fill) => fill.fillId.startsWith('FILL-EXIT-'));
+          return { tradeId, entry, exit, evaluation: entry.councilEvaluationId ? evaluationsById.get(entry.councilEvaluationId) : undefined, report: entry.councilReport };
+        });
+        return (
+          <section className="bg-slate-900/90 border border-slate-800 rounded-2xl p-5" data-testid="council-trade-report">
+            <div className="flex flex-wrap items-center justify-between gap-2 mb-4">
+              <div>
+                <h3 className="text-sm font-bold text-slate-200">{isAr ? 'قرارات المجلس المرتبطة بالصفقات' : 'Shadow Council Decisions Linked to Trades'}</h3>
+                <p className="text-xs text-slate-400 mt-1">{isAr ? 'المجلس للمراقبة فقط؛ لا يغيّر قرارات التنفيذ.' : 'Observation only; council does not control trade execution.'}</p>
+              </div>
+              <span className="text-xs text-cyan-300">{evaluations.length} {isAr ? 'تقييم' : 'evaluations'} · {linkedTrades.length} {isAr ? 'صفقة مرتبطة' : 'linked trades'}</span>
+            </div>
+            {linkedTrades.length === 0 ? (
+              <p className="text-xs text-slate-400">{isAr ? 'لا توجد صفقات مرتبطة في هذه النتيجة.' : 'No linked trades in this result.'}</p>
+            ) : (
+              <div className="overflow-x-auto">
+                <table className="w-full text-left text-xs">
+                  <thead className="text-slate-400 border-b border-slate-800"><tr>
+                    <th className="py-2 pr-3">{isAr ? 'الرمز / الصفقة' : 'Symbol / Trade'}</th>
+                    <th className="py-2 pr-3">{isAr ? 'قرار المجلس' : 'Council decision'}</th>
+                    <th className="py-2 pr-3">{isAr ? 'الأصوات' : 'Votes'}</th>
+                    <th className="py-2 pr-3">{isAr ? 'الدخول' : 'Entry'}</th>
+                    <th className="py-2 pr-3">{isAr ? 'الخروج / الربح والخسارة' : 'Exit / P&L'}</th>
+                    <th className="py-2">ID</th>
+                  </tr></thead>
+                  <tbody>{linkedTrades.map(({ tradeId, entry, exit, evaluation, report }) => {
+                    const votes = evaluation?.votes ?? report?.votes ?? [];
+                    const decision = evaluation?.decision?.side ?? report?.side ?? '—';
+                    return <tr key={tradeId} className="border-b border-slate-800/70 align-top">
+                      <td className="py-3 pr-3"><span className="font-bold text-slate-200">{entry.symbol}</span><span className="block text-slate-500 font-mono mt-1">{tradeId}</span></td>
+                      <td className="py-3 pr-3"><span className="text-cyan-300 font-bold">{decision}</span><span className="block text-slate-400 mt-1">{isAr ? 'ثقة' : 'Confidence'}: {((evaluation?.decision?.confidence ?? report?.confidence ?? 0) * 100).toFixed(0)}%</span><span className="block text-slate-500 mt-1">{evaluation ? new Date(evaluation.timestamp).toLocaleString(isAr ? 'ar' : 'en') : (isAr ? 'تقييم غير متاح' : 'Evaluation unavailable')}</span></td>
+                      <td className="py-3 pr-3">{votes.length ? votes.map((vote) => <span key={vote.member} className="block text-slate-300">{vote.member}: <span className={vote.side === 'BUY' ? 'text-emerald-400' : vote.side === 'SELL' ? 'text-rose-400' : 'text-slate-500'}>{vote.side}</span> ({(vote.confidence * 100).toFixed(0)}%)</span>) : <span className="text-slate-500">—</span>}</td>
+                      <td className="py-3 pr-3 text-slate-300">{entry.side} @ ${entry.price.toLocaleString()}</td>
+                      <td className="py-3 pr-3">{exit ? <><span className="text-slate-300">{exit.exitReason ?? exit.side} @ ${exit.price.toLocaleString()}</span><span className={`block mt-1 font-bold ${(exit.realizedPnl ?? 0) >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>{(exit.realizedPnl ?? 0) >= 0 ? '+' : ''}${(exit.realizedPnl ?? 0).toFixed(2)}</span></> : <span className="text-amber-300">{isAr ? 'مفتوحة' : 'Open'}</span>}</td>
+                      <td className="py-3 font-mono text-slate-500">{entry.councilEvaluationId ?? '—'}</td>
+                    </tr>;
+                  })}</tbody>
+                </table>
+              </div>
+            )}
+          </section>
+        );
+      })()}
+
       {/* Grid: Walk-Forward Out-of-Sample Matrix & Stress Testing */}
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
         {/* Walk-Forward Optimization Windows (6 cols) */}
