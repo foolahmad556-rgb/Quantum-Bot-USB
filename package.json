@@ -46,7 +46,8 @@
     "ws": "^8.21.3"
   },
   "overrides": {
-    "react-is": "^19.0.1"
+    "react-is": "^19.0.1",
+    "esbuild": "$esbuild"
   },
   "devDependencies": {
     "@types/bcryptjs": "^2.4.6",
