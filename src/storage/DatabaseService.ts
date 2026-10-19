@@ -51,7 +51,7 @@ export class DatabaseService {
         botState: Record<string, any>;
     };
 
-    constructor(dbPath: string = 'data/baselbot_db.json') {
+    constructor(dbPath: string = 'data/baselbot_db.json', private readonly persistent = true) {
         this.filePath = path.join(process.cwd(), dbPath);
         this.data = {
             trades: {},
@@ -60,8 +60,7 @@ export class DatabaseService {
             prices: {},
             botState: {}
         };
-        this.load();
-        this.sanitizeLegacyTrades();
+        if (persistent) this.load();
         console.log(`🗄️ Database Service initialized at ${this.filePath}`);
     }
 
@@ -90,6 +89,7 @@ export class DatabaseService {
     // ... (rest of save method remains similar)
 
     private save() {
+        if (!this.persistent) return;
         try {
             const dir = path.dirname(this.filePath);
             if (!fs.existsSync(dir)) {
@@ -111,7 +111,7 @@ export class DatabaseService {
             symbol,
             price
         });
-        
+
         // Keep last 1000 prices per symbol
         if (this.data.prices[symbol].length > 1000) {
             this.data.prices[symbol].shift();
@@ -222,7 +222,7 @@ export class DatabaseService {
         const totalTrades = tradesList.length;
         const winningTrades = tradesList.filter(t => (t.pnl || 0) > 0).length;
         const totalPnl = tradesList.reduce((sum, t) => sum + (t.pnl || 0), 0);
-        
+
         return {
             totalTrades,
             winningTrades,

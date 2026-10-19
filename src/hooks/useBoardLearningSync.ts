@@ -1,3 +1,4 @@
+import { authenticatedApiFetch } from '../lib/api.ts';
 /**
  * useBoardLearningSync.ts
  * ====================================================================
@@ -6,7 +7,7 @@
  * Manages the live state of the 14 Autonomous Quantum Agents:
  * - 6 Alpha Decision Makers
  * - 8 Anti-Overfitting Guards
- * 
+ *
  * Features:
  * - Real-time `learn_from_outcome` execution directly within React state
  * - Automatic synchronizer with server WebSocket (/brain-ws) & REST API (/api/board/learn)
@@ -337,17 +338,7 @@ export function useBoardLearningSync(initialBoardData?: BoardStatusReport | null
       setRecentShifts({});
     }, 4500);
 
-    // Sync with server API asynchronously
-    setIsSyncing(true);
-    fetch('/api/board/learn', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ pnl, symbol, reason })
-    })
-      .then(res => res.json())
-      .catch(err => console.warn('Non-blocking board learn sync notice:', err))
-      .finally(() => setIsSyncing(false));
-
+    // UI learning is display-only; verified server outcomes own production learning.
     return newEvent;
   }, []);
 
@@ -357,7 +348,7 @@ export function useBoardLearningSync(initialBoardData?: BoardStatusReport | null
   const holdMeeting = useCallback(async (symbol = 'BTC/USDT') => {
     setIsSyncing(true);
     try {
-      const res = await fetch('/api/board/hold-meeting', {
+      const res = await authenticatedApiFetch('/api/board/hold-meeting', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ symbol })

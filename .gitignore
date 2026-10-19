@@ -18,3 +18,7 @@ quantum_training_state.json
 *.bak
 migration-export/
 .env.migration
+
+agent_learning.json
+quantum_deliberations.json
+api/wrangler.deploy.json

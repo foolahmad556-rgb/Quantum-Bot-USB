@@ -6,7 +6,7 @@
  * 14 Autonomous Quantum Agents:
  * - 6 Alpha Decision Makers (Strategy, Math, Risk, Execution, Macro, Scout)
  * - 8 Anti-Overfitting Guards (Walk-Forward, OOS, Cross-Asset, MTF, Sensitivity, Bootstrap, Stress, Regime)
- * 
+ *
  * Features:
  * - 100% Real In-Memory Backtest & Bootstrap Math (Zero Mock Data)
  * - Adaptive Voting Thresholds based on Market Volatility
@@ -474,7 +474,7 @@ function pnlRoundTrip(cfg?: BoardConfig): number {
 
 export function calculatePnLSeries(candles: Array<{ close: number; high?: number; low?: number }>, atrMultiplier = 1.5, roundTripCost = pnlRoundTrip()): number[] {
   const pnls: number[] = [];
-  if (!candles || candles.length < 20) return [0.01];
+  if (!candles || candles.length < 20) return [];
   for (let i = 15; i < candles.length - 1; i++) {
     const entry = candles[i].close;
     const next = candles[i + 1].close;
@@ -489,7 +489,7 @@ export function calculatePnLSeries(candles: Array<{ close: number; high?: number
     pnl -= roundTripCost;
     pnls.push(pnl);
   }
-  return pnls.length > 0 ? pnls : [0.005];
+  return pnls;
 }
 
 function calculateSharpe(pnls: number[]): number {
@@ -508,7 +508,7 @@ export class WalkForwardGuard extends ExpertAgent {
 
   public vote(candles: Array<{ close: number }>): AgentVoteProposal {
     if (!candles || candles.length < 50) {
-      return { verdict: 'approved', confidence: 0.6, riskPct: 0.01, note: 'بيانات غير كافية لتقسيم WF — موافقة مشروطة' };
+      return { verdict: 'challenge', confidence: 0, riskPct: 0.01, note: 'بيانات غير كافية لتقسيم WF — موافقة مشروطة' };
     }
     // 3 TimeSeries rolling splits
     const gaps: number[] = [];
@@ -542,7 +542,7 @@ export class OutOfSampleGuard extends ExpertAgent {
 
   public vote(candles: Array<{ close: number }>): AgentVoteProposal {
     if (!candles || candles.length < 40) {
-      return { verdict: 'approved', confidence: 0.6, riskPct: 0.01, note: 'بيانات غير كافية لفصل العينة' };
+      return { verdict: 'challenge', confidence: 0, riskPct: 0.01, note: 'بيانات غير كافية لفصل العينة' };
     }
     const splitIdx = Math.floor(candles.length * 0.70);
     const inSample = candles.slice(0, splitIdx);
@@ -634,7 +634,7 @@ export class SensitivityGuard extends ExpertAgent {
 
   public vote(candles: Array<{ close: number }>): AgentVoteProposal {
     if (!candles || candles.length < 30) {
-      return { verdict: 'approved', confidence: 0.7, riskPct: 0.01, note: 'بيانات غير كافية لاختبار الحساسية' };
+      return { verdict: 'challenge', confidence: 0, riskPct: 0.01, note: 'بيانات غير كافية لاختبار الحساسية' };
     }
     const baseSharpe = calculateSharpe(calculatePnLSeries(candles, 1.5, pnlRoundTrip(this.config)));
     const variations = [0.7, 0.85, 1.15, 1.3];
@@ -670,7 +670,7 @@ export class BootstrapGuard extends ExpertAgent {
   public vote(candles: Array<{ close: number }>): AgentVoteProposal {
     const pnls = calculatePnLSeries(candles, 1.5, pnlRoundTrip(this.config));
     if (pnls.length < 10) {
-      return { verdict: 'approved', confidence: 0.7, riskPct: 0.01, note: 'عينة محدودة للمحاكاة العشوائية' };
+      return { verdict: 'challenge', confidence: 0, riskPct: 0.01, note: 'عينة محدودة للمحاكاة العشوائية' };
     }
     const iterations = 1000;
     const means: number[] = [];
@@ -709,7 +709,7 @@ export class StressTestGuard extends ExpertAgent {
   public vote(candles: Array<{ close: number }>, capital: number): AgentVoteProposal {
     const pnls = calculatePnLSeries(candles, 1.5, pnlRoundTrip(this.config));
     if (pnls.length < 10) {
-      return { verdict: 'approved', confidence: 0.7, riskPct: 0.01, note: 'بيانات غير كافية للاختبار الصادم' };
+      return { verdict: 'challenge', confidence: 0, riskPct: 0.01, note: 'بيانات غير كافية للاختبار الصادم' };
     }
     // Compounded equity curve: max peak-to-trough drawdown (not a per-bar average, which cancels capital).
     let equity = 1, peak = 1, maxDd = 0;
@@ -789,12 +789,14 @@ export class BoardOfDirectorsEngine {
     cooldownMinutesAfterLoss: 3,
     dynamicLeverageCap: 3.0,
     maxAllowedSlippageBps: 12,
-    errorReductionScore: 78.5,
+    errorReductionScore: 0,
     totalDeliberationsHeld: 0,
     lastOptimizedAt: new Date().toISOString()
   };
 
-  private constructor(config?: Partial<BoardConfig>) {
+  private constructor(config?: Partial<BoardConfig>, private readonly evaluation?: {
+    seed: number; now: () => number; equalWeights?: boolean; exclude?: string;
+  }) {
     this.config = { ...DEFAULT_BOARD_CONFIG, ...(config || {}) };
 
     // Initialize all 14 Agents
@@ -813,12 +815,12 @@ export class BoardOfDirectorsEngine {
       cross: new CrossAssetGuard(this.config),
       tf: new MultiTimeframeGuard(this.config),
       sens: new SensitivityGuard(this.config),
-      boot: new BootstrapGuard(undefined, this.config),
+      boot: new BootstrapGuard(evaluation?.seed, this.config),
       stress: new StressTestGuard(this.config),
       regime: new RegimeShiftGuard()
     };
 
-    this.loadState();
+    if (!this.evaluation) this.loadState();
   }
 
   public getCouncilStructure(): CouncilMemberDefinition[] {
@@ -938,6 +940,11 @@ export class BoardOfDirectorsEngine {
     return { symbol: params.symbol, action, confidence: Number(confidence.toFixed(4)), veto, executionEnabled: false, members };
   }
 
+  /** Fresh deterministic instance; never reads/writes production learning files. */
+  public static forEvaluation(options: { seed: number; now: () => number; equalWeights?: boolean; exclude?: string }, config?: Partial<BoardConfig>) {
+    return new BoardOfDirectorsEngine(config, options);
+  }
+
   public static getInstance(config?: Partial<BoardConfig>): BoardOfDirectorsEngine {
     if (!BoardOfDirectorsEngine.instance) {
       BoardOfDirectorsEngine.instance = new BoardOfDirectorsEngine(config);
@@ -958,6 +965,12 @@ export class BoardOfDirectorsEngine {
     capital?: number;
     latencyMs?: number;
   }): BoardMeetingDecision {
+    if (params.candles.length < 60 || params.candles.some(c => !Number.isFinite(c.close) || c.close <= 0)) {
+      throw new Error('Board requires at least 60 valid closed candles');
+    }
+    if (params.features && (!Number.isFinite(params.features.currentPrice) || params.features.currentPrice <= 0)) {
+      throw new Error('Board received invalid features');
+    }
     this.round++;
     const currentCapital = params.capital || this.config.capital;
     const votes: Record<string, 'approved' | 'challenge' | 'rejected'> = {};
@@ -1020,7 +1033,7 @@ export class BoardOfDirectorsEngine {
     let approvedWeight = 0;
 
     for (const [key, agent] of Object.entries(this.agents)) {
-      const weight = agent.getVoteWeight();
+      const weight = key === this.evaluation?.exclude ? 0 : this.evaluation?.equalWeights ? 1 : agent.getVoteWeight();
       voteWeights[key] = weight;
       totalWeight += weight;
       if (votes[key] === 'approved') {
@@ -1044,7 +1057,7 @@ export class BoardOfDirectorsEngine {
 
     // Hard Veto checks
     const guardRejected = Object.entries(votes).some(([k, v]) => ['wf', 'oos', 'stress', 'boot'].includes(k) && v === 'rejected');
-    const riskRejected = votes.risk === 'rejected';
+    const riskRejected = votes.risk === 'rejected' || votes.trading === 'rejected';
 
     if (riskRejected || guardRejected) {
       finalVerdict = 'REJECTED';
@@ -1065,9 +1078,9 @@ export class BoardOfDirectorsEngine {
     }
 
     const decision: BoardMeetingDecision = {
-      id: `dec-${this.round}-${Date.now().toString(36)}`,
+      id: `dec-${this.round}-${(this.evaluation?.now() ?? Date.now()).toString(36)}`,
       round: this.round,
-      timestamp: new Date().toISOString(),
+      timestamp: new Date(this.evaluation?.now() ?? Date.now()).toISOString(),
       symbol: params.symbol,
       verdict: finalVerdict,
       action,
@@ -1084,6 +1097,7 @@ export class BoardOfDirectorsEngine {
     };
 
     this.openDecisionVotes.set(decision.id, { ...votes });
+    if (this.openDecisionVotes.size > 2000) this.openDecisionVotes.delete(this.openDecisionVotes.keys().next().value!);
     if (params.symbol) {
       this.symbolToLastDecisionId.set(params.symbol, decision.id);
     }
@@ -1101,54 +1115,15 @@ export class BoardOfDirectorsEngine {
    * Supports isolating live real-money/paper execution learning from simulation sandbox runs
    */
   public learnFromOutcome(pnl: number, symbol?: string, source: 'LIVE' | 'SIMULATION' = 'LIVE', decisionId?: string): TradeLearningEvent {
+    if (!Number.isFinite(pnl)) throw new Error('Learning requires a finite outcome');
+    if (source === 'LIVE') {
+      return { id: `observed-${randomUUID()}`, timestamp: new Date().toISOString(),
+        pnl, symbol: symbol || 'UNKNOWN', isWin: pnl > 0, shifts: {} };
+    }
     const isWin = pnl > 0;
     const shifts: Record<string, { deltaConf: number; deltaAcc: number; newConf: number; newAcc: number }> = {};
-    const decId = decisionId || (symbol ? this.symbolToLastDecisionId.get(symbol) : undefined);
-    const recordedVotes = decId ? this.openDecisionVotes.get(decId) : undefined;
-    if (decId) {
-      this.openDecisionVotes.delete(decId);
-    }
 
-    if (source === 'LIVE') {
-      for (const [name, agent] of Object.entries(this.agents)) {
-        const prevConf = agent.profile.confidence;
-        const prevAcc = agent.profile.accuracy;
-        const agentVote = recordedVotes ? recordedVotes[name] : undefined;
-        // Evaluate the agent's individual vote:
-        // Winning trade: agent was correct if they voted 'approved'
-        // Losing trade: agent was correct if they voted 'challenge' or 'rejected'
-        const agentWasCorrect = agentVote !== undefined
-          ? (isWin ? agentVote === 'approved' : agentVote !== 'approved')
-          : isWin;
-
-        agent.learn(agentWasCorrect, pnl);
-        const deltaConf = Number((agent.profile.confidence - prevConf).toFixed(4));
-        const deltaAcc = Number((agent.profile.accuracy - prevAcc).toFixed(4));
-        shifts[name] = {
-          deltaConf,
-          deltaAcc,
-          newConf: agent.profile.confidence,
-          newAcc: agent.profile.accuracy
-        };
-      }
-
-      const event: TradeLearningEvent = {
-        id: `learn-${Date.now()}-${randomUUID().slice(0, 5)}`,
-        timestamp: new Date().toISOString(),
-        pnl,
-        symbol: symbol || 'BTC/USDT',
-        isWin,
-        shifts
-      };
-
-      this.learningEvents.unshift(event);
-      if (this.learningEvents.length > 25) {
-        this.learningEvents.pop();
-      }
-
-      this.saveState();
-      return event;
-    } else {
+    {
       // SIMULATION ISOLATED SANDBOX LEARNING:
       // Computes shifts for observation & telemetry without polluting production live agent weights or state
       for (const [name, agent] of Object.entries(this.agents)) {
@@ -1216,7 +1191,7 @@ export class BoardOfDirectorsEngine {
   }
 
   /**
-   * Conducts deep multi-agent deliberation, cross-peer critique, 3x trial strategy verification, and error-correction
+   * Records observations without inventing validation evidence or mutating live policy
    */
   public conductPostMortemDeliberation(context: {
     tradeId: string;
@@ -1232,494 +1207,33 @@ export class BoardOfDirectorsEngine {
     decision?: BoardMeetingDecision;
     isSimulation?: boolean;
   }): BoardDeliberationSession {
-    const isWin = context.isWin;
-    const pnl = context.pnl;
-    const symbol = context.symbol;
-    const side = context.side;
-    const duration = context.durationMinutes || 5;
-
-    // -------------------------------------------------------------
-    // ROUND 1: 14 AGENT INDIVIDUAL DOMAIN DIAGNOSES
-    // -------------------------------------------------------------
-    const diagnoses: AgentDeliberationDiagnosis[] = [];
-
-    // 1. AlgoEngineer
-    diagnoses.push({
-      agentId: 'algo',
-      agentName: 'AlgoEngineer',
-      arabicName: 'خبير الخوارزميات والهندسة',
-      role: 'فحص سلامة التنفيذ والتعقيد الحسابي',
-      diagnosisPerspectiveAr: isWin
-        ? `التنفيذ الخوارزمي تم بسرعة فائقة (14ms) مع انزلاق سعري منعدم، مما ضمن نقطة دخول مثالية عند $${context.entryPrice}.`
-        : `لوحظ تأخير طفيف في معالجة ميكرو-الشموع (38ms) مما أدى إلى انزلاق سعري بنسبة 0.04% أثر على دقة الوقف.`,
-      diagnosisPerspectiveEn: isWin
-        ? `Ultra-low latency execution (14ms) ensured zero slippage on entry at $${context.entryPrice}.`
-        : `Micro-burst execution latency (38ms) introduced a 0.04% entry drag that degraded stop-loss buffer.`,
-      rootCauseAr: isWin
-        ? `تزامن ممتاز بين خيوط المعالجة الخوارزمية وتدفقات بيانات بايننس السريعة.`
-        : `تزاحم في طابور معالجة أوامر الـ WebSocket اللحظية لحظة تقلب السعر.`,
-      rootCauseEn: isWin
-        ? `Optimal synchronization between algorithmic threads and Binance WebSocket stream.`
-        : `WebSocket buffer congestion during high micro-frequency tick burst.`,
-      proposedParameterFixAr: isWin
-        ? `الحفاظ على مهلة المعالجة الحالية عند 25ms.`
-        : `خفض سقف مهلة الإرسال القصوى إلى 15ms وتفعيل التنفيذ المسبق للأوامر المحددة.`,
-      proposedParameterFixEn: isWin
-        ? `Maintain current sub-25ms execution timeout window.`
-        : `Tighten async execution timeout to 15ms with pre-staged limit order routing.`,
-      suggestedStrategyAdjustment: {
-        param: 'maxAllowedSlippageBps',
-        oldValue: this.activePolicy.maxAllowedSlippageBps,
-        newValue: isWin ? this.activePolicy.maxAllowedSlippageBps : Math.max(6, this.activePolicy.maxAllowedSlippageBps - 1),
-        action: isWin ? 'REBALANCE' : 'TIGHTEN'
-      },
-      confidenceScore: isWin ? 0.94 : 0.88,
-      voteOnFix: 'ACCEPT'
-    });
-
-    // 2. TradingEngineer
-    diagnoses.push({
-      agentId: 'trading',
-      agentName: 'TradingEngineer',
-      arabicName: 'خبير الصفقات وتطابق الإشارات',
-      role: 'التحقق من تناغم إشارات الدخول والوقف',
-      diagnosisPerspectiveAr: isWin
-        ? `تطابق إشارة الانعكاس الكمي مع تأكيد مؤشر القوة النسبية والزخم، مما حقق الهدف الربحي بنجاح.`
-        : `الإشارة دخلت مبكراً قبل تأكيد شمعة الارتداد مما عرض الصفقة لكسر وهمي (False Breakout).`,
-      diagnosisPerspectiveEn: isWin
-        ? `Harmonic confluence between Quant Reversion signal and RSI momentum expansion hit target.`
-        : `Signal triggered premature entry prior to candle close validation, suffering a false breakout.`,
-      rootCauseAr: isWin
-        ? `ثنائية الدخول (Z-Score + Momentum) كانت في المنطقة الذهبية للارتداد.`
-        : `عدم انتظار إغلاق شمعة الدقيقة لتأكيد كسر نطاق التماسك.`,
-      rootCauseEn: isWin
-        ? `Dual confirmation (Z-Score + Momentum) operated in prime statistical reversion territory.`
-        : `Lack of 1-min candle close confirmation before executing directional order.`,
-      proposedParameterFixAr: isWin
-        ? `تعزيز فلتر الاتجاه وزيادة نسبة الأمان عند الدخول.`
-        : `اشتراط تأكيد شمعة الارتداد السعرية قبل إرسال أمر السوق لتقليل الإشارات الخاطئة.`,
-      proposedParameterFixEn: isWin
-        ? `Enforce continuous momentum filtration on winning trade structures.`
-        : `Require 1-bar price action confirmation before firing market entry.`,
-      suggestedStrategyAdjustment: {
-        param: 'zScoreEntryThreshold',
-        oldValue: this.activePolicy.zScoreEntryThreshold,
-        newValue: isWin ? Number((this.activePolicy.zScoreEntryThreshold).toFixed(2)) : Number((this.activePolicy.zScoreEntryThreshold + 0.08).toFixed(2)),
-        action: isWin ? 'REBALANCE' : 'TIGHTEN'
-      },
-      confidenceScore: isWin ? 0.92 : 0.89,
-      voteOnFix: 'ACCEPT'
-    });
-
-    // 3. QuantMathematician
-    diagnoses.push({
-      agentId: 'quant',
-      agentName: 'QuantMathematician',
-      arabicName: 'خبير الرياضيات والإحصاء',
-      role: 'فحص الالتواء، التفلطح، والتوزيع الإحصائي',
-      diagnosisPerspectiveAr: isWin
-        ? `انحراف Z-Score تجاوز 2.3 سيغما وعاد بسرعة إلى المتوسط الحسابي كما توقع النموذج الرياضي.`
-        : `التفلطح المرتفع (Kurtosis > 5.2) تسبب في حدوث ذيل سميك (Fat Tail) لم يستوعبه النطاق القياسي.`,
-      diagnosisPerspectiveEn: isWin
-        ? `Z-Score deviated beyond 2.3-sigma and mean-reverted swiftly into expected gaussian distribution.`
-        : `High kurtosis (Fat-tail > 5.2) caused outlier volatility outside standard Gaussian bell bounds.`,
-      rootCauseAr: isWin
-        ? `التوزيع الاحتمالي لحركة السعر كان يتبع نموذج أورنشتاين-أولنبيك بدقة 94%.`
-        : `حدوث صدمة سعرية ناتجة عن سيولة مفاجئة كسرت التوزيع الطبيعي.`,
-      rootCauseEn: isWin
-        ? `Ornstein-Uhlenbeck mean-reverting process operated at 94% theoretical fidelity.`
-        : `Liquidity sweep triggered a localized non-Gaussian jump event.`,
-      proposedParameterFixAr: isWin
-        ? `تثبيت مضاعف وقف الخسارة الإحصائي.`
-        : `توسيع نطاق حساب السيغما وتطبيق تدرج Student-t للتوزيعات ذات الذيول السميكة.`,
-      proposedParameterFixEn: isWin
-        ? `Keep statistical volatility bands calibrated.`
-        : `Apply Student-t distribution heavy-tail adjustment for Kurtosis > 4.5.`,
-      suggestedStrategyAdjustment: {
-        param: 'volatilitySensitivity',
-        oldValue: this.activePolicy.volatilitySensitivity,
-        newValue: isWin ? this.activePolicy.volatilitySensitivity : Number((this.activePolicy.volatilitySensitivity * 1.05).toFixed(2)),
-        action: isWin ? 'REBALANCE' : 'EXPAND'
-      },
-      confidenceScore: 0.95,
-      voteOnFix: 'ACCEPT'
-    });
-
-    // 4. CoinScoutAgent
-    diagnoses.push({
-      agentId: 'scout',
-      agentName: 'CoinScout',
-      arabicName: 'كشاف الفرص وقوة العملة',
-      role: 'مقارنة الزخم النسبي مع أزواج السوق',
-      diagnosisPerspectiveAr: isWin
-        ? `العملة أظهرت قوة نسبية متفوقة مقارنة بـ BTC، مما أعطى دفعة قوية لحركة السعر.`
-        : `حدوث هبوط جماعي في أزواج السوق جر العملة للأسفل رغم إيجابية المؤشرات الفردية.`,
-      diagnosisPerspectiveEn: isWin
-        ? `Asset exhibited strong relative alpha decoupling from BTC benchmark.`
-        : `Systemic market-wide market dump dragged the asset downwards despite local indicators.`,
-      rootCauseAr: isWin
-        ? `سيولة الشراء الصافية كانت إيجابية ومستقلة عن اتجاه السوق العام.`
-        : `ارتباط لحظي مفاجئ مع هبوط البيتكوين اللحظي بنسبة بيتا مرتفعة.`,
-      rootCauseEn: isWin
-        ? `Asset order flow remained decoupled with net positive delta.`
-        : `High instantaneous beta correlation with sudden BTC benchmark drop.`,
-      proposedParameterFixAr: isWin
-        ? `مواصلة تتبع قوة الألفا المستقلة.`
-        : `إضافة فلتر منع الدخول إذا كان مؤشر بيتا مع BTC يتجاوز 1.4 في اللحظة نفسها.`,
-      proposedParameterFixEn: isWin
-        ? `Continue scanning decoupled relative strength.`
-        : `Impose a BTC Beta cap filter (<1.4) during high-velocity benchmark swings.`,
-      suggestedStrategyAdjustment: {
-        param: 'minApprovalRatio',
-        oldValue: this.activePolicy.minApprovalRatio,
-        newValue: isWin ? this.activePolicy.minApprovalRatio : Number((Math.min(0.75, this.activePolicy.minApprovalRatio + 0.02)).toFixed(2)),
-        action: isWin ? 'REBALANCE' : 'TIGHTEN'
-      },
-      confidenceScore: 0.90,
-      voteOnFix: 'ACCEPT'
-    });
-
-    // 5. MarketExpertAgent
-    diagnoses.push({
-      agentId: 'market',
-      agentName: 'MarketExpert',
-      arabicName: 'خبير السيولة وصناع السوق',
-      role: 'مراقبة عمق دفتر الأوامر واختلال السيولة',
-      diagnosisPerspectiveAr: isWin
-        ? `امتصاص سيولة البيع في دفتر الأوامر وظهور حائط طلب قوي دعم ارتداد السعر.`
-        : `سحب مفاجئ لطلبات الشراء في عمق الأوامر (Liquidity Evaporation) سهل كسر مستوى الدعم.`,
-      diagnosisPerspectiveEn: isWin
-        ? `Orderbook bid wall absorbed selling volume, creating immediate rebound buoyancy.`
-        : `Orderbook bid liquidity evaporated, allowing minimal sell pressure to breach support.`,
-      rootCauseAr: isWin
-        ? `توازن صحي في نسبة عدم توازن دفتر الأوامر (Imbalance Ratio > +0.35).`
-        : `فجوة في دفتر الأوامر سمحت بانزلاق السعر إلى الوقف المحدد.`,
-      rootCauseEn: isWin
-        ? `Orderbook delta remained solidly supportive (Imbalance Ratio > +0.35).`
-        : `Thin bid book depth led to cascading fill slippage into stop loss level.`,
-      proposedParameterFixAr: isWin
-        ? `تثبيت متطلبات سيولة دفتر الأوامر.`
-        : `رفع الحد الأدنى لعمق دفتر الأوامر المطلوب قبل فتح الصفقة بنسبة 20%.`,
-      proposedParameterFixEn: isWin
-        ? `Maintain current depth filtering.`
-        : `Increase minimum top-5 orderbook depth liquidity requirement by +20%.`,
-      suggestedStrategyAdjustment: {
-        param: 'minGuardsQuorum',
-        oldValue: this.activePolicy.minGuardsQuorum,
-        newValue: isWin ? this.activePolicy.minGuardsQuorum : Math.min(7, this.activePolicy.minGuardsQuorum + 1),
-        action: isWin ? 'REBALANCE' : 'TIGHTEN'
-      },
-      confidenceScore: 0.91,
-      voteOnFix: 'ACCEPT'
-    });
-
-    // 6. RiskControllerAgent
-    diagnoses.push({
-      agentId: 'risk',
-      agentName: 'RiskController',
-      arabicName: 'مدير المخاطر الكمي الصارم',
-      role: 'التحكم بالرافعة ونسب التعرض ورأس المال',
-      diagnosisPerspectiveAr: isWin
-        ? `حجم الصفقة ($${Math.abs(pnl).toFixed(2)} ربح) كان متوافقاً تماماً مع معيار كيلي الآمن (10% من المحفظة).`
-        : `الخسارة كانت محدودة ($${Math.abs(pnl).toFixed(2)}) بفضل الصرامة في تحديد الوقف، ولم تؤثر على رصيد المحفظة.`,
-      diagnosisPerspectiveEn: isWin
-        ? `Position size ($${pnl.toFixed(2)} gain) complied perfectly with Fractional Kelly (10% wallet margin).`
-        : `Loss was safely capped at ($${Math.abs(pnl).toFixed(2)}) via strict pre-allocated stop boundaries.`,
-      rootCauseAr: isWin
-        ? `نسبة العائد إلى المخاطرة (Risk:Reward > 1:1.6) وفرت ميزة إحصائية إيجابية.`
-        : `مستوى الوقف كان قريباً نسبياً من ضوضاء السوق اللحظية.`,
-      rootCauseEn: isWin
-        ? `Realized Risk:Reward ratio (> 1:1.6) provided positive mathematical expectancy.`
-        : `Stop-loss barrier was placed slightly within micro-noise volatility bandwidth.`,
-      proposedParameterFixAr: isWin
-        ? `تثبيت معايير إدارة رأس المال.`
-        : `تعديل مضاعف وقف الخسارة بنسبة +10% لإعطاء مساحة كافية للارتداد دون زيادة المخاطرة المالية.`,
-      proposedParameterFixEn: isWin
-        ? `Maintain core risk allocation parameters.`
-        : `Widen ATR stop-loss buffer by +10% to prevent noise stop-outs while reducing lot size.`,
-      suggestedStrategyAdjustment: {
-        param: 'stopLossPctMultiplier',
-        oldValue: this.activePolicy.stopLossPctMultiplier,
-        newValue: isWin ? this.activePolicy.stopLossPctMultiplier : Number((this.activePolicy.stopLossPctMultiplier * 1.08).toFixed(2)),
-        action: isWin ? 'REBALANCE' : 'EXPAND'
-      },
-      confidenceScore: 0.96,
-      voteOnFix: 'ACCEPT'
-    });
-
-    // 7. WalkForwardGuard
-    diagnoses.push({
-      agentId: 'wf',
-      agentName: 'WalkForwardGuard',
-      arabicName: 'حارس الاستقرار الزمني (Walk-Forward)',
-      role: 'التأكد من عدم تدهور الاستراتيجية عبر الزمن',
-      diagnosisPerspectiveAr: isWin
-        ? `أداء الاستراتيجية ثابت ومتناسق عبر 8 نوافذ زمنية متعاقبة بنسبة فجوة أقل من 5%.`
-        : `لوحظ انحراف طفيف في كفاءة المعاملات بين النافذة التاريخية والنافذة اللحظية.`,
-      diagnosisPerspectiveEn: isWin
-        ? `Strategy performance was stable across 8 consecutive walk-forward windows (gap < 5%).`
-        : `Minor parameter drift detected between lookback window and real-time execution window.`,
-      rootCauseAr: isWin
-        ? `المعاملات الرياضية غير مفرطة التخصيص (Robust Parameters).`
-        : `تغير طفيف في متوسط فترة الارتداد الزمني للعملة.`,
-      rootCauseEn: isWin
-        ? `Parameters are non-overfitted and robust across shifting market periods.`
-        : `Slight drift in empirical half-life of price mean reversion.`,
-      proposedParameterFixAr: isWin
-        ? `الحفاظ على النوافذ الحالية.`
-        : `تحديث فترة نصف العمر (Half-life) ديناميكياً كل 10 شموع بدلاً من قيمة ثابتة.`,
-      proposedParameterFixEn: isWin
-        ? `Maintain rolling walk-forward intervals.`
-        : `Dynamically recalculate empirical half-life every 10 bars.`,
-      suggestedStrategyAdjustment: {
-        param: 'cooldownMinutesAfterLoss',
-        oldValue: this.activePolicy.cooldownMinutesAfterLoss,
-        newValue: isWin ? this.activePolicy.cooldownMinutesAfterLoss : Math.min(10, this.activePolicy.cooldownMinutesAfterLoss + 1),
-        action: isWin ? 'REBALANCE' : 'TIGHTEN'
-      },
-      confidenceScore: 0.93,
-      voteOnFix: 'ACCEPT'
-    });
-
-    // 8. OutOfSampleGuard
-    diagnoses.push({
-      agentId: 'oos',
-      agentName: 'OutOfSampleGuard',
-      arabicName: 'حارس العينة المجهولة (OOS 30%)',
-      role: 'فحص قوة التعميم على بيانات غير مرئية',
-      diagnosisPerspectiveAr: isWin
-        ? `الصفقة حققت نسبة نجاح 100% في عينة البيانات غير المرئية مما يؤكد قدرة التعميم.`
-        : `حدث تباين في حركة السعر في العينة غير المرئية أظهر ضرورة تشديد فلاتر الدخول.`,
-      diagnosisPerspectiveEn: isWin
-        ? `Trade demonstrated robust generalization on unobserved out-of-sample data points.`
-        : `Out-of-sample test showed variance dispersion indicating tighter entry gating is needed.`,
-      rootCauseAr: isWin
-        ? `انعدام الانحياز التاريخي وتطابق السلوك السعري مع النماذج المحايدة.`
-        : `تغير طفيف في سرعة الارتداد في النطاق المجهول.`,
-      rootCauseEn: isWin
-        ? `Zero data snooping bias, trade structure generalized seamlessly.`
-        : `Slight variance dispersion in unexplored price regime.`,
-      proposedParameterFixAr: `رفع نسبة العينات غير المرئية المطلوبة لتأكيد الدخول إلى 70%.`,
-      proposedParameterFixEn: `Increase required OOS validation threshold to 70%.`,
-      suggestedStrategyAdjustment: {
-        param: 'minApprovalRatio',
-        oldValue: this.activePolicy.minApprovalRatio,
-        newValue: isWin ? this.activePolicy.minApprovalRatio : Number((Math.min(0.72, this.activePolicy.minApprovalRatio + 0.01)).toFixed(2)),
-        action: isWin ? 'REBALANCE' : 'TIGHTEN'
-      },
-      confidenceScore: 0.92,
-      voteOnFix: 'ACCEPT'
-    });
-
-    // 9. StressTestGuard
-    diagnoses.push({
-      agentId: 'stress',
-      agentName: 'StressTestGuard',
-      arabicName: 'حارس الاختبار الصادم (Stress Test 20%)',
-      role: 'حماية الرصيد من الصدمات والانهيارات السريعة',
-      diagnosisPerspectiveAr: isWin
-        ? `تحملت الصفقة تقلبات مجهرية بنجاح دون الاقتراب من سقف المخاطرة الصادم.`
-        : `هبوط مفاجئ سريع لامس حاجز الوقف، مما يثبت نجاح آلية الحماية في منع نزيف رأس المال.`,
-      diagnosisPerspectiveEn: isWin
-        ? `Trade navigated micro-shocks successfully with zero drawdown breach.`
-        : `Rapid localized dip triggered safety stop, confirming risk ceiling successfully prevented catastrophic drawdown.`,
-      rootCauseAr: isWin
-        ? `مستوى السيولة كان كافياً لتخفيف أي ارتدادات سلبية حادة.`
-        : `شمعة بيع حادة وفورية في إطار 1 دقيقة.`,
-      rootCauseEn: isWin
-        ? `Liquidity buffer absorbed localized shockwaves without trailing stop compromise.`
-        : `1-minute aggressive market selling spike tested baseline buffer.`,
-      proposedParameterFixAr: `إلزام تخفيض حجم الصفقة تلقائياً في الفترات التي تتبع تقلبات صادمة.`,
-      proposedParameterFixEn: `Enforce automatic lot scaling reduction immediately following high stress spikes.`,
-      suggestedStrategyAdjustment: {
-        param: 'dynamicLeverageCap',
-        oldValue: this.activePolicy.dynamicLeverageCap,
-        newValue: isWin ? this.activePolicy.dynamicLeverageCap : Math.max(2.0, Number((this.activePolicy.dynamicLeverageCap - 0.2).toFixed(1))),
-        action: isWin ? 'REBALANCE' : 'TIGHTEN'
-      },
-      confidenceScore: 0.94,
-      voteOnFix: 'ACCEPT'
-    });
-
-    // -------------------------------------------------------------
-    // ROUND 2: MULTI-AGENT PEER CRITIQUE & DEBATE (مناقشة تفاعلية متبادلة)
-    // -------------------------------------------------------------
-    const critiques: AgentPeerCritique[] = [];
-
-    critiques.push({
-      fromAgentId: 'risk',
-      fromAgentName: 'RiskController',
-      toAgentId: 'trading',
-      critiqueAr: isWin
-        ? `أتفق مع خبير الصفقات، لكن يجب ألا نطمع بزيادة حجم المركز حتى في الصفقات الرابحة حفاظاً على ثبات منحنى النمو.`
-        : `تشخيص خبير الصفقات صحيح حول الدخول المبكر، والحل هو رفع عتبة Z-Score وليس زيادة الوقف لتفادي المخاطر.`,
-      critiqueEn: isWin
-        ? `Concur with Trading Engineer, but margin allocation must remain tightly capped to preserve Kelly growth slope.`
-        : `Trading Engineer correctly identified premature entry. The optimal fix is tightening Z-Score entry threshold rather than widening stop risk.`,
-      counterProposalAr: `رفع شرط Z-Score إلى ${Number((this.activePolicy.zScoreEntryThreshold + 0.1).toFixed(2))} لضمان جودة الإشارة بنسبة 99%.`,
-      counterProposalEn: `Adjust Z-Score entry requirement to ${Number((this.activePolicy.zScoreEntryThreshold + 0.1).toFixed(2))} to ensure 99% signal purity.`,
-      agreementScore: 0.95
-    });
-
-    critiques.push({
-      fromAgentId: 'quant',
-      fromAgentName: 'QuantMathematician',
-      toAgentId: 'algo',
-      critiqueAr: isWin
-        ? `الأداء الرياضي والخوارزمي كان متناغماً بنسبة 100% مع النموذج النظري.`
-        : `الانزلاق السعري الطفيف الذي ذكره خبير الخوارزميات يمكن تعويضه بوضع أمر Limit عند منتصف نطاق السيولة بدلاً من أمر Market.`,
-      critiqueEn: isWin
-        ? `Algorithmic execution and mathematical distribution were in 100% alignment with theoretical model.`
-        : `The micro-slippage mentioned by Algo Engineer can be fully mitigated by routing pegged Limit orders at midpoint rather than taking immediate liquidity.`,
-      counterProposalAr: `اعتماد توجيه الأوامر بالـ Midpoint Limit Order في جميع أزواج الـ Testnet.`,
-      counterProposalEn: `Adopt Midpoint Pegged Limit Order routing across all simulated Testnet executions.`,
-      agreementScore: 0.92
-    });
-
-    critiques.push({
-      fromAgentId: 'stress',
-      fromAgentName: 'StressTestGuard',
-      toAgentId: 'market',
-      critiqueAr: isWin
-        ? `عمق دفتر الأوامر كان متيناً وامتص الصدمات السعرية بكفاءة عالية.`
-        : `سحب السيولة كان خطيراً ويجب تفعيل الحظر الفوري إذا انخفض عمق الطلبات عن 50,000$.`,
-      critiqueEn: isWin
-        ? `Orderbook bid liquidity buffer was robust, effectively absorbing price shocks.`
-        : `Orderbook liquidity drainage was hazardous; we must trigger an instant circuit breaker if top-5 depth drops below $50k.`,
-      counterProposalAr: `إضافة فلتر حظر السيولة الضعيفة وربطه بنصاب إجماع الحراس.`,
-      counterProposalEn: `Inject minimum orderbook depth gating into guard quorum consensus.`,
-      agreementScore: 0.89
-    });
-
-    critiques.push({
-      fromAgentId: 'wf',
-      fromAgentName: 'WalkForwardGuard',
-      toAgentId: 'oos',
-      critiqueAr: isWin
-        ? `تطابق تام بين النوافذ الزمنية والبيانات المجهولة يؤكد متانة الخوارزمية.`
-        : `يجب ألا نغير أكثر من معاملين اثنين في الجولة الواحدة لتجنب الإفراط في التعديل (Over-optimization).`,
-      critiqueEn: isWin
-        ? `High congruence between rolling time windows and out-of-sample data validates algorithmic robustness.`
-        : `We must avoid mutating more than two hyperparameters per cycle to prevent over-adaptation.`,
-      counterProposalAr: `حصر التعديل في: عتبة الدخول Z-Score وفلتر التقلب فقط لضمان الثبات.`,
-      counterProposalEn: `Restrict policy mutations strictly to Z-Score Threshold and Volatility Sensitivity for stability.`,
-      agreementScore: 0.97
-    });
-
-    // -------------------------------------------------------------
-    // ROUND 3: MULTI-TRIAL VALIDATION (التجربة والتطبيق 1 و 2 و 3)
-    // -------------------------------------------------------------
-    const trials: MultiTrialValidation[] = [];
-
-    // Trial 1: Micro-Shock Resilience
-    const trial1Profit = isWin ? Number((pnl * 1.05).toFixed(2)) : Number((pnl * 0.45).toFixed(2));
-    trials.push({
-      trialNumber: 1,
-      testName: 'اختبار الصدمات المجهرية والانزلاق (Micro-Shock & Slippage Test)',
-      candlesTested: 30,
-      syntheticProfit: trial1Profit,
-      syntheticWinRate: 0.0,
-      maxDrawdownPct: 0.85,
-      isSuccessful: true,
-      validationLogAr: `✅ التجربة 1: اختبار الصدمات المجهرية — يحتاج حساب فوز حقيقي من بيانات الاختبار الخلفي.`,
-      validationLogEn: `✅ Trial 1: Micro-shock resilience test — requires real backtest win rate calculation.`
-    });
-
-    // Trial 2: Adaptive Trailing Stop & Noise Immunity
-    const trial2Profit = isWin ? Number((pnl * 1.12).toFixed(2)) : Number((Math.abs(pnl) * 0.2).toFixed(2));
-    trials.push({
-      trialNumber: 2,
-      testName: 'اختبار مناعة الضوضاء والوقف التكيفي (Noise Immunity & Adaptive Trailing)',
-      candlesTested: 45,
-      syntheticProfit: trial2Profit,
-      syntheticWinRate: 0.0,
-      maxDrawdownPct: 0.62,
-      isSuccessful: true,
-      validationLogAr: `✅ التجربة 2: اختبار مناعة الضوضاء — يحتاج حساب فوز حقيقي من بيانات الاختبار الخلفي.`,
-      validationLogEn: `✅ Trial 2: Noise immunity test — requires real backtest win rate calculation.`
-    });
-
-    // Trial 3: Out-of-Sample Forward Consistency
-    const trial3Profit = isWin ? Number((pnl * 1.18).toFixed(2)) : Number((Math.abs(pnl) * 0.35).toFixed(2));
-    trials.push({
-      trialNumber: 3,
-      testName: 'اختبار التعميم في نافذة غير مرئية (Forward Out-of-Sample Consistency)',
-      candlesTested: 60,
-      syntheticProfit: trial3Profit,
-      syntheticWinRate: 0.0,
-      maxDrawdownPct: 0.48,
-      isSuccessful: true,
-      validationLogAr: `✅ التجربة 3: اختبار التعميم خارج العينة — يحتاج حساب فوز حقيقي من بيانات الاختبار الخلفي.`,
-      validationLogEn: `✅ Trial 3: Out-of-sample consistency test — requires real backtest win rate calculation.`
-    });
-
-    // -------------------------------------------------------------
-    // ROUND 4: ADOPTION OF MUTATED STRATEGY POLICY
-    // -------------------------------------------------------------
-    const targetPolicy = context.isSimulation ? { ...this.activePolicy } : this.activePolicy;
-
-    targetPolicy.version += 1;
-    targetPolicy.totalDeliberationsHeld += 1;
-    targetPolicy.lastOptimizedAt = new Date().toISOString();
-
-    if (!isWin) {
-      targetPolicy.zScoreEntryThreshold = Number((Math.min(2.8, targetPolicy.zScoreEntryThreshold + 0.04)).toFixed(2));
-      targetPolicy.minApprovalRatio = Number((Math.min(0.75, targetPolicy.minApprovalRatio + 0.01)).toFixed(2));
-      targetPolicy.stopLossPctMultiplier = Number((Math.min(1.4, targetPolicy.stopLossPctMultiplier + 0.03)).toFixed(2));
-    } else {
-      targetPolicy.takeProfitPctMultiplier = Number((Math.min(1.5, targetPolicy.takeProfitPctMultiplier + 0.01)).toFixed(2));
+    if (![context.pnl, context.pnlPct, context.entryPrice, context.exitPrice].every(Number.isFinite)) {
+      throw new Error('Post-mortem requires finite trade observations');
     }
-
-    // Recalculate Error Reduction Score (moves smoothly from 78.5% towards 98.8%)
-    const targetScore = 78.5 + Math.min(20.3, targetPolicy.totalDeliberationsHeld * 0.35);
-    targetPolicy.errorReductionScore = Number(targetScore.toFixed(1));
-
-    const policySummaryAr = isWin
-      ? `تم تعزيز استراتيجية الدخول بنجاح؛ تحسين نسبة جني الأرباح إلى ${(targetPolicy.takeProfitPctMultiplier * 100).toFixed(0)}% ورفع معيار الدقة الإحصائية (مؤشر التطور: ${targetPolicy.errorReductionScore}%).`
-      : `تم علاج الخطأ التشغيلي بنجاح؛ رفع عتبة الدخول Z-Score إلى ${targetPolicy.zScoreEntryThreshold}، وتشديد نصاب إجماع الحراس لمنع الصفقات المتسرعة (مؤشر التخلص من الأخطاء: ${targetPolicy.errorReductionScore}%).`;
-
-    const policySummaryEn = isWin
-      ? `Strategy successfully reinforced: take-profit multiplier scaled to ${(targetPolicy.takeProfitPctMultiplier * 100).toFixed(0)}% with enhanced edge (Evolution Score: ${targetPolicy.errorReductionScore}%).`
-      : `Operational flaw eliminated: Z-Score entry threshold raised to ${targetPolicy.zScoreEntryThreshold} with reinforced guard quorum (Error Reduction Score: ${targetPolicy.errorReductionScore}%).`;
-
+    const existing = this.deliberationSessions.find(session => session.tradeId === context.tradeId);
+    if (existing) return existing;
+    // A closed-trade observation is not a backtest, a causal diagnosis, or an
+    // approval to mutate the strategy. Evaluation artifacts supply that evidence.
     const session: BoardDeliberationSession = {
-      id: `delib-${Date.now()}-${randomUUID().slice(0, 5)}`,
-      tradeId: context.tradeId,
-      symbol,
-      pnl,
-      pnlPct: context.pnlPct,
-      isWin,
-      timestamp: new Date().toISOString(),
-      round1Diagnoses: diagnoses,
-      round2Critiques: critiques,
-      round3Trials: trials,
-      consensusVerdictAr: isWin
-        ? `✅ إجماع المجلس على تعزيز وتثبيت الاستراتيجية بعد اجتياز 3 اختبارات تأكيدية.`
-        : `🛡️ إجماع المجلس على تصحيح المعاملات وسد ثغرة الدخول بعد اجتياز 3 اختبارات تأكيدية.`,
-      consensusVerdictEn: isWin
-        ? `✅ Unanimous board consensus: Strategy policy reinforced following 3 successful validation trials.`
-        : `🛡️ Unanimous board consensus: Operational flaw corrected and policy calibrated following 3 validation trials.`,
-      adoptedStrategyPolicy: { ...targetPolicy },
-      policyMutationSummaryAr: policySummaryAr,
-      policyMutationSummaryEn: policySummaryEn,
-      errorReductionScore: targetPolicy.errorReductionScore
+      id: `observation-${context.tradeId}`, tradeId: context.tradeId, symbol: context.symbol,
+      pnl: context.pnl, pnlPct: context.pnlPct, isWin: context.pnl > 0,
+      timestamp: new Date(this.evaluation?.now() ?? Date.now()).toISOString(),
+      round1Diagnoses: [], round2Critiques: [], round3Trials: [],
+      consensusVerdictAr: 'نتيجة مسجلة للمراجعة؛ لم تُجر اختبارات تحقق ولم تُعدّل الاستراتيجية.',
+      consensusVerdictEn: 'Observation recorded; no validation trials executed or strategy changes approved.',
+      adoptedStrategyPolicy: { ...this.activePolicy },
+      policyMutationSummaryAr: 'لا توجد تعديلات معتمدة. راجع تقرير التقييم خارج العينة.',
+      policyMutationSummaryEn: 'No policy changes. Review the out-of-sample evaluation artifact.',
+      errorReductionScore: 0,
     };
-
     this.deliberationSessions.unshift(session);
-    if (this.deliberationSessions.length > 20) {
-      this.deliberationSessions.pop();
-    }
-
-    // Call standard weight learning as well with isolated source tag
-    this.learnFromOutcome(pnl, symbol, context.isSimulation ? 'SIMULATION' : 'LIVE', context.decision?.id);
-    if (!context.isSimulation) {
-      this.saveDeliberations();
-    }
-
+    if (this.deliberationSessions.length > 20) this.deliberationSessions.pop();
+    if (!context.isSimulation) this.saveDeliberations();
     return session;
   }
 
   public saveDeliberations(): void {
+    if (this.evaluation) return;
     try {
       const data = {
         activePolicy: this.activePolicy,
@@ -1732,11 +1246,12 @@ export class BoardOfDirectorsEngine {
   }
 
   public loadDeliberations(): void {
+    if (this.evaluation) return;
     try {
       if (fs.existsSync(this.deliberationsFilePath)) {
         const raw = fs.readFileSync(this.deliberationsFilePath, 'utf-8');
         const parsed = JSON.parse(raw);
-        if (parsed.activePolicy) this.activePolicy = parsed.activePolicy;
+        // Policies require explicit reviewed promotion; do not reload legacy auto-mutated policies.
         if (Array.isArray(parsed.deliberationSessions)) this.deliberationSessions = parsed.deliberationSessions;
       }
     } catch (e) {
@@ -1745,6 +1260,7 @@ export class BoardOfDirectorsEngine {
   }
 
   public saveState(): void {
+    if (this.evaluation) return;
     try {
       const state: Record<string, any> = {};
       for (const [id, agent] of Object.entries(this.agents)) {
@@ -1764,6 +1280,7 @@ export class BoardOfDirectorsEngine {
   }
 
   public loadState(): void {
+    if (this.evaluation) return;
     try {
       if (fs.existsSync(this.stateFilePath)) {
         const data = fs.readFileSync(this.stateFilePath, 'utf-8');

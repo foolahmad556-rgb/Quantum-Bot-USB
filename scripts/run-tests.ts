@@ -12,7 +12,9 @@ for (const file of files) {
   console.log(`\n=== ${path} ===`);
   const child = spawn(process.execPath, ['--import', 'tsx', path], { stdio: 'inherit' });
   const code = await new Promise<number>((resolve) => {
-    child.on('exit', (exitCode, signal) => resolve(exitCode ?? (signal ? 1 : 0)));
+    const timeout = setTimeout(() => { console.error(`Timed out: ${file}`); child.kill('SIGKILL'); }, 120000);
+    child.once('error', () => { clearTimeout(timeout); resolve(1); });
+    child.once('exit', (exitCode, signal) => { clearTimeout(timeout); resolve(exitCode ?? (signal ? 1 : 0)); });
   });
   if (code !== 0) process.exit(code);
 }

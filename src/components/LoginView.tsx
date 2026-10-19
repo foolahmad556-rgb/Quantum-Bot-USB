@@ -4,10 +4,10 @@ import { useAuth } from '../contexts/AuthContext.tsx';
 import { LogIn, Mail, Lock, Cpu } from 'lucide-react';
 
 export const LoginView: React.FC<{ lang: 'ar' | 'en' }> = ({ lang }) => {
-  const { signIn, signUp, error } = useAuth();
+  const { signIn, error } = useAuth();
   const isAr = lang === 'ar';
-  
-  const [mode, setMode] = useState<'login' | 'signup'>('login');
+
+  const mode = 'login';
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [loading, setLoading] = useState(false);
@@ -19,11 +19,7 @@ export const LoginView: React.FC<{ lang: 'ar' | 'en' }> = ({ lang }) => {
     setLoading(true);
 
     try {
-      if (mode === 'login') {
-        await signIn(email, password);
-      } else {
-        await signUp(email, password);
-      }
+      await signIn(email, password);
     } catch (err: any) {
       setLocalError(err.message || 'An error occurred');
     } finally {
@@ -108,26 +104,9 @@ export const LoginView: React.FC<{ lang: 'ar' | 'en' }> = ({ lang }) => {
           </button>
         </form>
 
-        <div className="text-center">
-          <p className="text-slate-400 text-sm mb-3">
-            {mode === 'login'
-              ? (isAr ? 'ليس لديك حساب؟' : "Don't have an account?")
-              : (isAr ? 'لديك حساب بالفعل؟' : 'Already have an account?')}
-          </p>
-          <button
-            onClick={() => {
-              setMode(mode === 'login' ? 'signup' : 'login');
-              setEmail('');
-              setPassword('');
-              setLocalError('');
-            }}
-            className="text-cyan-400 hover:text-cyan-300 font-semibold transition-colors"
-          >
-            {mode === 'login'
-              ? (isAr ? 'إنشاء حساب جديد' : 'Create Account')
-              : (isAr ? 'تسجيل الدخول' : 'Sign In')}
-          </button>
-        </div>
+        <p className="text-center text-slate-400 text-sm">
+          {isAr ? 'للحصول على حساب، تواصل مع مشغل النظام.' : 'Contact your system operator for an account.'}
+        </p>
       </motion.div>
     </div>
   );

@@ -40,6 +40,11 @@ export interface DecisionInput {
 export function decide(input: DecisionInput): TradingSignal | null {
   const params: StrategyParams = { ...DEFAULT_STRATEGY_PARAMS, ...(input.params || {}) };
   const { features, regime } = input;
+  // A risk/regime veto is a veto, never a request to switch to a trend entry.
+  if (regime && !regime.tradingAllowed) return null;
+  if (![features.currentPrice, features.zScore, features.ouMu, features.ouSigma,
+      features.halfLifePeriods, features.hurstExponent, features.rsi14].every(Number.isFinite) ||
+      features.currentPrice <= 0 || features.ouSigma < 0) return null;
   const {
     symbol,
     currentPrice,
@@ -57,7 +62,7 @@ export function decide(input: DecisionInput): TradingSignal | null {
   // إذا كان السوق في حالة اتجاه مستمر قوي (TRENDING أو Hurst > maxHurst)،
   // يتحول المحرك تلقائياً وبسلاسة إلى استراتيجية تتبع الاتجاه وانفجار الزخم (Trend Breakout Momentum)
   // بدلاً من التوقف التام، مما يضمن استمرارية التداول والربحية في كافة ظروف السوق 24/7 دون أي تعطيل!
-  const isTrendingRegime = (regime && !regime.tradingAllowed) || hurstExponent > (params.maxHurst || 0.60);
+  const isTrendingRegime = hurstExponent > (params.maxHurst || 0.60);
 
   if (isTrendingRegime) {
     const trendSigma = safeSigma;
@@ -163,7 +168,7 @@ export function decide(input: DecisionInput): TradingSignal | null {
     : Number((currentPrice + stopDistance).toFixed(2));
 
   const takeProfit = Number(ouMu.toFixed(2));
-  
+
   // الخروج الزمني بناءً على نصف عمر الارتداد (2 * halfLife)
   const candleMs = params.candleIntervalMs || 60000;
   const maxHoldMs = Math.max(300000, Math.round(2 * halfLifePeriods * candleMs));

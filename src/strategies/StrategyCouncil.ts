@@ -24,6 +24,10 @@ export function evaluateCandleCouncil(candles: Candle[], options: CandleCouncilO
   ).sort((a, b) => a.timestamp - b.timestamp);
   const abstain = (member: string): CouncilVote => ({ member, side: 'ABSTAIN', confidence: 0 });
   if (closed.length < 21) return ['trend', 'mean-reversion', 'breakout', 'momentum'].map(abstain);
+  if (options.asOf - (closed.at(-1)!.timestamp + options.intervalMs) > options.intervalMs ||
+      closed.some((c, i) => i > 0 && c.timestamp - closed[i - 1].timestamp !== options.intervalMs)) {
+    return ['trend', 'mean-reversion', 'breakout', 'momentum'].map(abstain);
+  }
   const tail = closed.slice(-21);
   const last = tail[tail.length - 1];
   const pct = (a: number, b: number) => (a / b) - 1;

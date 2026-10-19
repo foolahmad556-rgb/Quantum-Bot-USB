@@ -19,7 +19,7 @@ export function generateToken(payload: JWTPayload, secret: string): string {
  * Verify JWT token. Throws if invalid/expired.
  */
 export function verifyToken(token: string, secret: string): JWTPayload {
-  return jwt.verify(token, secret) as JWTPayload;
+  return jwt.verify(token, secret, { algorithms: ['HS256'] }) as JWTPayload;
 }
 
 /**

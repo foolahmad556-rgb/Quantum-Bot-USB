@@ -7,7 +7,7 @@ import { describe, it, beforeEach } from 'node:test';
  * Requires BINANCE_TESTNET_KEY and BINANCE_TESTNET_SECRET
  * Run with: npm test -- src/tests/BinanceConnectionTest.test.ts
  */
-describe('Binance Testnet Connection', () => {
+describe('Binance Testnet response contracts (offline fixtures)', () => {
   const TESTNET_BASE = 'https://testnet.binance.vision';
   const apiKey = process.env.BINANCE_TESTNET_KEY;
   const apiSecret = process.env.BINANCE_TESTNET_SECRET;
@@ -38,7 +38,7 @@ describe('Binance Testnet Connection', () => {
       assert.ok(timeDiff < 1000, `Time drift should be <1000ms, got ${timeDiff}ms`);
     });
 
-    it('should validate API credentials format', () => {
+    it('should validate API credentials format', { skip: !apiKey || !apiSecret }, () => {
       if (!apiKey || !apiSecret) {
         console.log('⚠️  Skipping credential test - BINANCE_TESTNET_KEY/SECRET not set');
         return;

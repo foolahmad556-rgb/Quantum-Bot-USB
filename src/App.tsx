@@ -50,7 +50,7 @@ const BoardOfDirectorsTab = lazy(() => import('./components/BoardOfDirectorsTab'
 const ShadowReportPanel = lazy(() => import('./components/ShadowReportPanel').then((module) => ({ default: module.ShadowReportPanel })));
 import { useAuth } from './contexts/AuthContext.tsx';
 import { LoginView } from './components/LoginView.tsx';
-import { fetchWithAuth } from './lib/api.ts';
+import { fetchWithAuth, authenticatedApiFetch } from './lib/api.ts';
 
 const INITIAL_MARKETS: HolographicAsset[] = [
   { symbol: 'BTC/USDT', binanceSymbol: 'btcusdt', nameEn: 'Bitcoin', nameAr: 'بتكوين', price: 0, change24h: 0, volume: '0', rsi: 50, high24h: 0, low24h: 0, status: 'ACCUMULATION' },
@@ -201,7 +201,7 @@ export default function CyberPulseNexusApp() {
 
       // Priority 1: Backend proxy (bypasses browser CORS & sandbox IP issues)
       try {
-        const res = await fetch(`/api/binance/klines?symbol=${symUpper}&interval=1m&limit=25`);
+        const res = await authenticatedApiFetch(`/api/binance/klines?symbol=${symUpper}&interval=1m&limit=25`);
         if (res.ok) rawKlines = await res.json();
       } catch {}
 
@@ -258,7 +258,7 @@ export default function CyberPulseNexusApp() {
 
       // Priority 1: Backend proxy
       try {
-        const res = await fetch(`/api/binance/depth?symbol=${symUpper}&limit=10`);
+        const res = await authenticatedApiFetch(`/api/binance/depth?symbol=${symUpper}&limit=10`);
         if (res.ok) depthData = await res.json();
       } catch {}
 
@@ -330,7 +330,7 @@ export default function CyberPulseNexusApp() {
 
         // Stage 1: Try backend proxy (avoids browser CORS & network blocks)
         try {
-          const res = await fetch('/api/binance/tickers');
+          const res = await authenticatedApiFetch('/api/binance/tickers');
           if (res.ok) {
             data = await res.json();
           }
@@ -505,7 +505,7 @@ export default function CyberPulseNexusApp() {
     setClosingSymbols(prev => ({ ...prev, [symbol]: true }));
     playHoloTone(440, 0.1);
     try {
-      const data = await fetchWithAuth('/api/positions/close', {
+      const data = await fetchWithAuth('/api/protected/positions/close', {
         method: 'POST',
         body: JSON.stringify({ symbol, reason: 'Manual operator click in dashboard' })
       });
@@ -527,6 +527,7 @@ export default function CyberPulseNexusApp() {
     try {
       // Send real order request to backend API
       const orderResult = await fetchWithAuth('/api/protected/manual-order', {
+        headers: { 'Idempotency-Key': crypto.randomUUID() },
         method: 'POST',
         body: JSON.stringify({
           symbol: selectedAsset.symbol,
@@ -1177,7 +1178,7 @@ export default function CyberPulseNexusApp() {
                     playHoloTone(440, 0.3);
                     if (!window.confirm(isAr ? 'سيتم إغلاق جميع المراكز المفتوحة فوراً بأسعار السوق. متابعة؟' : 'This will close ALL open positions at market immediately. Continue?')) return;
                     try {
-                      const data = await fetchWithAuth('/api/protected/close-all', { method: 'POST' });
+                      const data = await fetchWithAuth('/api/protected/positions/close-all', { method: 'POST' });
                       const ok = !!data?.success;
                       const failedList: string[] = Array.isArray(data?.failed) ? data.failed : [];
                       if (ok) setIsRunning(false);

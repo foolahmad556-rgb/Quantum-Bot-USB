@@ -7,7 +7,7 @@ import { DurableStateManager } from '../storage/DurableStateManager';
  * Integration tests with real Binance Testnet connection
  * Verifies full pipeline: market data → signals → execution
  */
-describe('Binance Testnet Integration', () => {
+describe('Binance pipeline contracts (offline fixtures)', () => {
   let durableManager: DurableStateManager;
   const TESTNET_BASE = 'https://testnet.binance.vision';
 
@@ -74,7 +74,7 @@ describe('Binance Testnet Integration', () => {
 
       const avgGain = gains.reduce((a, b) => a + b) / gains.length;
       const avgLoss = losses.reduce((a, b) => a + b) / losses.length;
-      
+
       // Handle edge case: all gains, no losses
       let rsi = 100;
       if (avgLoss > 0) {

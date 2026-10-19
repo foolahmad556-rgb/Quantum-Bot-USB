@@ -1,55 +1,70 @@
 name: Deploy Cloudflare D1 Worker
-
 on:
-  push:
-    branches: [master]
-    paths:
-      - 'api/**'
-      - '.github/workflows/deploy-d1.yml'
   workflow_dispatch:
-
+    inputs:
+      environment:
+        type: choice
+        options: [staging, production]
+        default: staging
+        required: true
 permissions:
   contents: read
-
+concurrency:
+  group: d1-${{ inputs.environment }}
+  cancel-in-progress: false
 jobs:
+  validate:
+    uses: ./.github/workflows/ci.yml
   deploy:
+    needs: validate
+    environment: ${{ inputs.environment }}
     runs-on: ubuntu-latest
     defaults:
       run:
         working-directory: api
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      D1_API_SECRET: ${{ secrets.D1_API_SECRET }}
+      TELEGRAM_WEBHOOK_SECRET: ${{ secrets.TELEGRAM_WEBHOOK_SECRET }}
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-      - name: Setup Node
-        uses: actions/setup-node@v4
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
         with:
           node-version: '22'
-      - name: Require D1 API secret
+      - name: Generate explicit environment configuration
         env:
-          D1_API_SECRET: ${{ secrets.D1_API_SECRET }}
+          WORKER_NAME: ${{ vars.WORKER_NAME }}
+          D1_DATABASE_NAME: ${{ vars.D1_DATABASE_NAME }}
+          D1_DATABASE_ID: ${{ vars.D1_DATABASE_ID }}
+          BOTKEEP_URL: ${{ vars.BOTKEEP_URL }}
+          TELEGRAM_ALLOWED_CHAT_IDS: ${{ vars.TELEGRAM_ALLOWED_CHAT_IDS }}
+          TELEGRAM_ALLOWED_USER_IDS: ${{ vars.TELEGRAM_ALLOWED_USER_IDS }}
         run: |
-          if [ -z "$D1_API_SECRET" ]; then
-            echo "::error::D1_API_SECRET is required; refusing deployment without API authentication"
-            exit 1
-          fi
-      - name: Apply D1 schema
-        env:
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-        run: npx wrangler@4 d1 execute quantum-bot-d1 --remote --file=schema.sql --config wrangler.toml
-      - name: Deploy Worker
-        env:
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-        run: npx wrangler@4 deploy --config wrangler.toml
-      - name: Set D1 API secret
-        env:
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          D1_API_SECRET: ${{ secrets.D1_API_SECRET }}
+          test -n "$D1_API_SECRET"
+          test -n "$TELEGRAM_WEBHOOK_SECRET"
+          node --input-type=module <<'JS'
+          import fs from 'node:fs';
+          const required = key => { const value=process.env[key]; if(!value) throw Error(key+' required'); return value; };
+          fs.writeFileSync('wrangler.deploy.json', JSON.stringify({
+            name: required('WORKER_NAME'), main: 'd1-worker.js', compatibility_date: '2024-01-01',
+            d1_databases: [{binding:'DB', database_name:required('D1_DATABASE_NAME'), database_id:required('D1_DATABASE_ID'), migrations_dir:'migrations'}],
+            vars: {BOTKEEP_URL:required('BOTKEEP_URL'), TELEGRAM_ALLOWED_CHAT_IDS:required('TELEGRAM_ALLOWED_CHAT_IDS'), TELEGRAM_ALLOWED_USER_IDS:required('TELEGRAM_ALLOWED_USER_IDS')}
+          }));
+          JS
+      - name: Apply additive migrations and deploy
         run: |
-          if [ -z "$D1_API_SECRET" ]; then
-            echo "::error::D1_API_SECRET is required; refusing deployment without API authentication"
-            exit 1
-          fi
-          printf '%s' "$D1_API_SECRET" | npx wrangler@4 secret put D1_API_SECRET --config wrangler.toml
+          npx wrangler@4 d1 migrations apply DB --remote --config wrangler.deploy.json
+          npx wrangler@4 deploy --config wrangler.deploy.json
+          printf '%s' "$D1_API_SECRET" | npx wrangler@4 secret put D1_API_SECRET --config wrangler.deploy.json
+          printf '%s' "$TELEGRAM_WEBHOOK_SECRET" | npx wrangler@4 secret put TELEGRAM_WEBHOOK_SECRET --config wrangler.deploy.json
+      - name: Verify authenticated database readiness
+        env:
+          D1_API_URL: ${{ vars.D1_API_URL }}
+        run: |
+          node --input-type=module <<'JS'
+          const base = new URL(process.env.D1_API_URL); if(base.protocol!=='https:') throw Error('HTTPS D1_API_URL required');
+          const response = await fetch(new URL('/d1/health',base), {headers:{Authorization:`Bearer ${process.env.D1_API_SECRET}`},signal:AbortSignal.timeout(10000)});
+          if(!response.ok || !(await response.json()).ok) throw Error('D1 readiness failed');
+          const denied = await fetch(new URL('/d1/health',base)); if(denied.status!==401) throw Error('D1 auth boundary failed');
+          JS

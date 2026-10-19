@@ -6,3 +6,5 @@ compatibility_date = "2024-01-01"
 binding = "DB"
 database_name = "quantum-bot-d1"
 database_id = "47f2c6fa-1604-4d2a-9145-13a184fd02c3"
+
+migrations_dir = "migrations"

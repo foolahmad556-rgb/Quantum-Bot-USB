@@ -1,20 +1,6 @@
-/**
- * Quantum Bot — Botkeep.Cloud production server (free-tier safe).
- *
- * Architecture (all state OUTSIDE server RAM):
- *  - Trading state / trades / balances  -> Google Cloud SQL (Postgres, via Drizzle) + Firestore
- *  - Auth / users                        -> Firebase Auth (Admin SDK verify)
- *  - Frontend                            -> Cloudflare Pages (static dist/)
- *  - Webhook ingress                     -> Cloudflare Worker -> POST /webhook/telegram
- *  - Alerts                              -> Telegram Bot API
- *  - This server (Botkeep, 2GB)          -> stateless compute only: orchestrates the
- *    TradingPipeline in-process, persists EVERYTHING to Cloud SQL / Firestore.
- *
- * Required env (Botkeep Environment, never committed):
- *  FIREBASE_CREDENTIALS_JSON, SQL_HOST, SQL_USER, SQL_PASSWORD, SQL_DB_NAME
- *  OPERATOR_SECRET (or ADMIN_API_KEY), TELEGRAM_BOT_TOKEN, TELEGRAM_CHANNEL_ID
- *  Required: JWT_SECRET, TELEGRAM_WEBHOOK_SECRET
- *  Optional: EXECUTION_MODE, AUTOSTART_TRADING=true
+/** Botkeep owns the execution engine; Pages hosts the UI; the Worker owns D1.
+ * Local user authentication requires a persistent AUTH_DB_PATH outside dist.
+ * Account provisioning uses OPERATOR_SECRET; JWT operators must be in ADMIN_EMAILS.
  */
 
 import dotenv from 'dotenv';
@@ -25,6 +11,10 @@ import expressWs from 'express-ws';
 import path from 'path';
 import fs from 'fs';
 import sqlite3 from 'sqlite3';
+import { randomUUID } from 'node:crypto';
+import { RuntimeSupervisor } from './src/server/RuntimeSupervisor.ts';
+import { submitManualOrder } from './src/server/manualOrders.ts';
+import { secretEquals, isOperator, rateLimit } from './src/server/security.ts';
 // __dirname exists in bundled CJS; dev mode uses project working directory.
 declare const __dirname: string | undefined;
 const serverDir: string =
@@ -42,8 +32,9 @@ import { generateToken, verifyToken, hashPassword, comparePassword } from './src
 
 const PORT = Number(process.env.PORT || process.env.SERVER_PORT || 3000);
 const OPERATOR_SECRET = (process.env.OPERATOR_SECRET || process.env.ADMIN_API_KEY || '').trim();
+if (OPERATOR_SECRET && OPERATOR_SECRET.length < 32) throw new Error('OPERATOR_SECRET must be at least 32 characters');
 const configuredJwtSecret = process.env.JWT_SECRET?.trim();
-if (!configuredJwtSecret || configuredJwtSecret === 'dev-secret-change-in-production') {
+if (!configuredJwtSecret || configuredJwtSecret.length < 32 || configuredJwtSecret === 'dev-secret-change-in-production') {
   throw new Error('JWT_SECRET must be configured with a strong production secret');
 }
 const JWT_SECRET: string = configuredJwtSecret;
@@ -120,10 +111,24 @@ async function retryWithBackoff<T>(
 const app = express();
 expressWs(app as any);
 app.disable('x-powered-by');
+const proxyHops = Number(process.env.TRUST_PROXY_HOPS || 0);
+if (Number.isInteger(proxyHops) && proxyHops > 0) app.set('trust proxy', proxyHops);
+app.use((_req, res, next) => {
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('Referrer-Policy', 'same-origin');
+  next();
+});
+app.use('/api/auth', rateLimit(20, 60_000));
 app.use(express.json({ limit: '1mb' }));
 
 // SQLite local DB for users (auth)
-const dbPath = path.join(serverDir, 'users.db');
+const dbPath = path.resolve(process.env.AUTH_DB_PATH || 'data/auth/users.db');
+const publicDir = path.resolve(process.env.FRONTEND_DIST_DIR || 'dist');
+if (dbPath === publicDir || dbPath.startsWith(publicDir + path.sep)) {
+  throw new Error('AUTH_DB_PATH must be outside FRONTEND_DIST_DIR');
+}
+fs.mkdirSync(path.dirname(dbPath), { recursive: true, mode: 0o700 });
+let authDbReady = false;
 let userDb: sqlite3.Database | null = null;
 
 const initDb = (): Promise<void> => {
@@ -148,7 +153,8 @@ const initDb = (): Promise<void> => {
             reject(err);
           } else {
             userDb!.run(`CREATE INDEX IF NOT EXISTS idx_users_email ON users(email)`, () => {
-              console.log('✅ SQLite users DB ready:', dbPath);
+              authDbReady = true;
+              console.log('✅ SQLite users DB ready');
               resolve();
             });
           }
@@ -166,15 +172,13 @@ app.use((req: Request, res: Response, next: NextFunction) => {
     'http://localhost:5173',
     process.env.APP_URL,
   ].filter(Boolean);
-  
+
   const origin = req.headers.origin;
   if (origin && allowedOrigins.includes(origin)) {
     res.header('Access-Control-Allow-Origin', origin);
-  } else if (process.env.NODE_ENV === 'development') {
-    res.header('Access-Control-Allow-Origin', '*');
   }
-  
-  res.header('Access-Control-Allow-Headers', 'Authorization, Content-Type, x-telegram-bot-api-secret-token');
+
+  res.header('Access-Control-Allow-Headers', 'Authorization, Content-Type, Idempotency-Key, x-telegram-bot-api-secret-token');
   res.header('Access-Control-Allow-Methods', 'GET,POST,PUT,DELETE,OPTIONS');
   res.header('Access-Control-Allow-Credentials', 'true');
   if (req.method === 'OPTIONS') return res.sendStatus(204);
@@ -198,7 +202,7 @@ try {
     cloudDb = new D1DatabaseService() as any;
     const maybe = (pipeline as any).setDatabase;
     if (typeof maybe === 'function') maybe.call(pipeline, cloudDb);
-    cloudStorageOk = true;
+    cloudStorageOk = false; // Set only after an authenticated database readiness probe.
     console.log('✅ External storage: Cloudflare D1');
   } else {
     throw new Error('Cloudflare D1 is required: set STORAGE_BACKEND=d1 and D1_API_URL');
@@ -208,23 +212,74 @@ try {
   console.error('❌ D1 storage initialization failed:', storageInitError.message);
 }
 
-function requireCloudStorage(res: Response): boolean {
-  if (cloudStorageOk && cloudDb) return true;
-  fail(res, 503, `Persistent D1 storage unavailable: ${storageInitError?.message || 'not configured'}`);
+async function checkStorage(): Promise<boolean> {
+  try {
+    cloudStorageOk = !!cloudDb && (await cloudDb.ping()).ok === true;
+  } catch { cloudStorageOk = false; }
+  return cloudStorageOk;
+}
+
+async function requireCloudStorage(res: Response): Promise<boolean> {
+  if (await checkStorage()) return true;
+  fail(res, 503, 'Persistent storage is unavailable');
   return false;
 }
 
+const supervisor = cloudDb ? new RuntimeSupervisor(cloudDb, process.env.EXCHANGE_ACCOUNT_ID || '', async () => {
+  pipeline.getKillSwitch().trigger('HARD_HALT', 'Execution lease or storage lost', 'HEALTH_HEARTBEAT_LOSS');
+  await pipeline.stop();
+}) : null;
+pipeline.setRuntimeSafetyGuard(() => !!pipeline.isRunning && !!supervisor?.canEnter());
+let startInProgress: Promise<void> | null = null;
+async function startTrading() {
+  if (pipeline.isRunning) return;
+  if (startInProgress) return startInProgress;
+  startInProgress = (async () => {
+    if (!supervisor) throw new Error('Storage and execution lease are required');
+    await supervisor.start();
+    try { await pipeline.startAutonomousTrading(); }
+    catch (error) { await supervisor.stop(); throw error; }
+  })();
+  try { await startInProgress; } finally { startInProgress = null; }
+}
+
+// Persist order status events in order, including acknowledgments and partial fills.
+let orderWrites: Promise<unknown> = Promise.resolve();
+function persistOrder(order: any): Promise<unknown> {
+  const snapshot = JSON.parse(JSON.stringify(order));
+  const write = orderWrites.then(() => cloudDb!.saveOrder(snapshot));
+  orderWrites = write.catch(() => {
+    cloudStorageOk = false;
+    pipeline.getKillSwitch().trigger('HARD_HALT', 'Order persistence failed', 'AUTO_RISK_ENGINE');
+  });
+  return write;
+}
+pipeline.getOrderGateway().subscribeOrders((order: any) => {
+  if (!cloudDb || order.strategyId !== 'MANUAL_UI') return;
+  void persistOrder(order).catch(() => {});
+});
+
 /* ----------------------------- auth -------------------------------- */
+function authorize(req: Request, res: Response, next: NextFunction) {
+  if (req.method !== 'GET') res.once('finish', () => {
+    const event = { id: randomUUID(), at: Date.now(), actor: (req as any).user?.userId,
+      method: req.method, path: req.path, status: res.statusCode };
+    console.log(JSON.stringify({ audit: event }));
+    if (cloudDb) void cloudDb.saveState(`audit:${event.id}`, event).catch(() => console.error('Audit persistence failed'));
+  });
+  next();
+}
 // Protected routes: OPERATOR_SECRET match (VPS/headless) OR valid JWT token.
 async function requireAuth(req: Request, res: Response, next: NextFunction) {
   const header = req.header('authorization') || '';
   const token = header.startsWith('Bearer ') ? header.slice(7).trim() : '';
-  if (OPERATOR_SECRET && token === OPERATOR_SECRET) return next();
+  if (secretEquals(token, OPERATOR_SECRET)) { (req as any).user = { userId: 'operator-service' }; return authorize(req, res, next); }
   if (token) {
     try {
       const decoded = verifyToken(token, JWT_SECRET);
+      if (!isOperator(decoded.email)) return fail(res, 403, 'Operator access required');
       (req as any).user = decoded;
-      return next();
+      return authorize(req, res, next);
     } catch (e: any) {
       return fail(res, 401, 'Invalid or expired token');
     }
@@ -242,20 +297,23 @@ const bootTime = Date.now();
 /* auth endpoints (public)                                             */
 /* ------------------------------------------------------------------ */
 
-app.post('/api/auth/register', async (req: Request, res: Response) => {
+app.post('/api/auth/register', requireAuth, async (req: Request, res: Response) => {
   try {
     if (!userDb) return fail(res, 500, 'Database unavailable');
-    const { email, password } = req.body || {};
-    
+    const { password } = req.body || {};
+    const email = typeof req.body?.email === 'string' ? req.body.email.trim().toLowerCase() : '';
+
     if (typeof email !== 'string' || !email.includes('@')) {
       return fail(res, 400, 'Valid email required');
     }
-    if (typeof password !== 'string' || password.length < 6) {
-      return fail(res, 400, 'Password must be at least 6 characters');
+    if (typeof password !== 'string' || password.length < 12 || Buffer.byteLength(password, 'utf8') > 72) {
+      return fail(res, 400, 'Password must be 12 or more characters and at most 72 UTF-8 bytes');
     }
 
+    if (!isOperator(email)) return fail(res, 403, 'Account must be listed in ADMIN_EMAILS');
+
     // Check if user already exists (with retry)
-    const existingUser = await retryWithBackoff(() => 
+    const existingUser = await retryWithBackoff(() =>
       new Promise<any>((resolve, reject) => {
         userDb!.get('SELECT id FROM users WHERE email = ?', [email], (err: any, row: any) => {
           if (err) reject(err);
@@ -271,7 +329,7 @@ app.post('/api/auth/register', async (req: Request, res: Response) => {
     // Hash password and insert (with retry)
     const passwordHash = await hashPassword(password);
     const userId = `user_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`;
-    
+
     await retryWithBackoff(() =>
       new Promise<void>((resolve, reject) => {
         userDb!.run(
@@ -286,8 +344,8 @@ app.post('/api/auth/register', async (req: Request, res: Response) => {
     );
 
     const token = generateToken({ userId, email }, JWT_SECRET);
-    return ok(res, { 
-      token, 
+    return ok(res, {
+      token,
       user: { userId, email },
       message: 'Registration successful'
     });
@@ -300,11 +358,14 @@ app.post('/api/auth/register', async (req: Request, res: Response) => {
 app.post('/api/auth/login', async (req: Request, res: Response) => {
   try {
     if (!userDb) return fail(res, 500, 'Database unavailable');
-    const { email, password } = req.body || {};
+    const { password } = req.body || {};
+    const email = typeof req.body?.email === 'string' ? req.body.email.trim().toLowerCase() : '';
 
     if (typeof email !== 'string' || typeof password !== 'string') {
       return fail(res, 400, 'Email and password required');
     }
+
+    if (!isOperator(email)) return fail(res, 401, 'Invalid email or password');
 
     // Get user from local DB
     userDb.get('SELECT id, email, password_hash FROM users WHERE email = ?', [email], async (err: any, user: any) => {
@@ -344,6 +405,7 @@ app.get('/api/auth/validate', async (req: Request, res: Response) => {
     }
 
     const decoded = verifyToken(token, JWT_SECRET);
+    if (!isOperator(decoded.email)) return fail(res, 403, 'Operator access required');
     return ok(res, { userId: decoded.userId, email: decoded.email });
   } catch (err: any) {
     return fail(res, 401, 'Invalid or expired token');
@@ -354,23 +416,15 @@ app.get('/api/auth/validate', async (req: Request, res: Response) => {
 /* public: health / status                                             */
 /* ------------------------------------------------------------------ */
 
-app.get('/api/health', (_req: Request, res: Response) => {
-  const pipelineRunning = typeof pipeline.isRunning === 'function' ? pipeline.isRunning() : !!pipeline.isRunning;
-  const status = pipelineRunning && cloudStorageOk ? 'healthy' : (pipelineRunning ? 'degraded' : 'ready');
-  const statusCode = status === 'healthy' ? 200 : (status === 'degraded' ? 200 : 200);
-  
-  res.status(statusCode).json({
-    status,
-    uptimeSec: Math.floor((Date.now() - bootTime) / 1000),
-    version: process.env.npm_package_version || '1.0.0',
-    tradingRunning: pipelineRunning,
-    storage: cloudStorageOk ? 'cloudflare-d1' : 'unavailable',
-    autostart: AUTOSTART,
-    timestamp: new Date().toISOString(),
-  });
+app.get('/api/health', (_req, res) => res.json({ status: 'alive', tradingRunning: !!pipeline.isRunning, autostart: AUTOSTART }));
+app.get('/api/ready', async (_req, res) => {
+  const storage = await checkStorage();
+  const executionOwner = !pipeline.isRunning || !!supervisor?.canEnter();
+  const ready = authDbReady && storage && executionOwner;
+  res.status(ready ? 200 : 503).json({ ready, auth: authDbReady, storage, executionOwner });
 });
 
-app.get('/api/system-health', async (_req: Request, res: Response) => {
+app.get('/api/system-health', requireAuth, async (_req: Request, res: Response) => {
   const health = await callAny(pipeline, ['getLastHealth', 'checkHealth', 'getHealth']);
   const risk = await callAny(pipeline, ['getRiskState', 'getRiskMetrics']);
   ok(res, {
@@ -380,7 +434,7 @@ app.get('/api/system-health', async (_req: Request, res: Response) => {
   });
 });
 
-app.get('/api/live-status', async (_req: Request, res: Response) => {
+app.get('/api/live-status', requireAuth, async (_req: Request, res: Response) => {
   try {
     const uds = getAny(pipeline, ['userDataStream', 'getUserDataStream']);
     const gw = getAny(pipeline, ['orderGateway', 'getOrderGateway']);
@@ -411,7 +465,7 @@ app.get('/api/live-status', async (_req: Request, res: Response) => {
 
 app.post('/api/protected/trading/start', requireAuth, async (_req: Request, res: Response) => {
   try {
-    await pipeline.startAutonomousTrading();
+    await startTrading();
     return ok(res, { isRunning: !!pipeline.isRunning });
   } catch (e: any) {
     return fail(res, 409, e?.message || 'trading start failed');
@@ -421,13 +475,14 @@ app.post('/api/protected/trading/start', requireAuth, async (_req: Request, res:
 app.post('/api/protected/trading/stop', requireAuth, async (_req: Request, res: Response) => {
   try {
     await pipeline.stop();
+    await supervisor?.stop();
     return ok(res, { isRunning: false });
   } catch (e: any) {
     return fail(res, 500, e?.message || 'trading stop failed');
   }
 });
 
-app.get('/api/binance/tickers', async (req: Request, res: Response) => {
+app.get('/api/binance/tickers', requireAuth, async (req: Request, res: Response) => {
   try {
     const symbols = typeof req.query.symbols === 'string' ? req.query.symbols.split(',') : null;
     const r = await fetch('https://api.binance.com/api/v3/ticker/24hr');
@@ -444,7 +499,7 @@ app.get('/api/binance/tickers', async (req: Request, res: Response) => {
 /* board of directors                                                  */
 /* ------------------------------------------------------------------ */
 
-app.post('/api/board/hold-meeting', async (req: Request, res: Response) => {
+app.post('/api/board/hold-meeting', requireAuth, rateLimit(30, 60_000), async (req: Request, res: Response) => {
   try {
     const body = req.body || {};
     const decision = await board.holdMeeting({
@@ -464,26 +519,13 @@ app.post('/api/board/hold-meeting', async (req: Request, res: Response) => {
   }
 });
 
-app.post('/api/board/learn', async (req: Request, res: Response) => {
-  try {
-    const { pnl, symbol } = req.body || {};
-    if (typeof pnl !== 'number' || typeof symbol !== 'string') {
-      return fail(res, 400, 'Body requires { pnl: number, symbol: string }');
-    }
-    const event = await board.learnFromOutcome(pnl, symbol);
-    try {
-      if (cloudDb) await cloudDb.saveSignal({ symbol, action: pnl >= 0 ? 'LEARN_WIN' : 'LEARN_LOSS', price: 0, confidence: 0 } as any);
-    } catch {
-      /* learning must never fail the request */
-    }
-    broadcastBrain({ type: 'board-learn', pnl, symbol, event, at: Date.now() });
-    ok(res, { event: event ?? null });
-  } catch (e: any) {
-    fail(res, 500, e?.message || 'board-learn failed');
-  }
+// Outcomes are accepted only from reconciled fills inside the engine. UI-supplied
+// PnL cannot establish a closed trade or safely credit an agent.
+app.post('/api/board/learn', requireAuth, (_req, res) => {
+  fail(res, 409, 'External learning disabled; learning requires a reconciled trade outcome');
 });
 
-app.get('/api/council/shadow-report', async (req: Request, res: Response) => {
+app.get('/api/council/shadow-report', requireAuth, async (req: Request, res: Response) => {
   try {
     if (!cloudDb) return fail(res, 503, 'Persistent D1 storage unavailable');
     const limit = typeof req.query.limit === 'string' ? Number(req.query.limit) : 100;
@@ -495,7 +537,7 @@ app.get('/api/council/shadow-report', async (req: Request, res: Response) => {
   }
 });
 
-app.get('/api/board/sessions', async (_req: Request, res: Response) => {
+app.get('/api/board/sessions', requireAuth, async (_req: Request, res: Response) => {
   const s = await callAny(board, ['getDeliberationSessions', 'getSessions', 'getHistory']);
   ok(res, { sessions: s.called ? s.value : [] });
 });
@@ -506,8 +548,8 @@ app.get('/api/board/sessions', async (_req: Request, res: Response) => {
 /* telegram                                                            */
 /* ------------------------------------------------------------------ */
 
-app.get('/api/telegram/status', async (_req: Request, res: Response) => {
-  const s = await callAny(telegramService, ['getStatus', 'getConfig']);
+app.get('/api/telegram/status', requireAuth, async (_req: Request, res: Response) => {
+  const s = await callAny(telegramService, ['getConfigStatus']);
   ok(res, { status: s.called ? s.value : { configured: !!process.env.TELEGRAM_BOT_TOKEN } });
 });
 
@@ -551,11 +593,16 @@ app.post('/webhook/telegram', async (req: Request, res: Response) => {
     const expected = (process.env.TELEGRAM_WEBHOOK_SECRET || '').trim();
     if (!expected) return fail(res, 503, 'telegram webhook secret is not configured');
     const got = req.header('x-telegram-bot-api-secret-token') || '';
-    if (got !== expected) return fail(res, 403, 'bad webhook secret');
+    if (!secretEquals(got, expected)) return fail(res, 403, 'bad webhook secret');
     const update = req.body || {};
     const msg = update.message || update.edited_message;
     const text: string = msg?.text || '';
     const chatId = msg?.chat?.id;
+    const chats = (process.env.TELEGRAM_ALLOWED_CHAT_IDS || '').split(',').map(s => s.trim());
+    const users = (process.env.TELEGRAM_ALLOWED_USER_IDS || '').split(',').map(s => s.trim());
+    if (!chats.includes(String(chatId)) || !users.includes(String(msg?.from?.id))) {
+      return fail(res, 403, 'Telegram sender is not authorized');
+    }
     if (chatId && /^\/start/i.test(text)) {
       await (telegramService as any).sendMessage(`✅ Quantum Bot linked.\nChat: ${chatId}\nSend /status for state.`);
     } else if (chatId && /^\/status/i.test(text)) {
@@ -578,54 +625,23 @@ app.post('/webhook/telegram', async (req: Request, res: Response) => {
 /* protected: trading operations                                       */
 /* ------------------------------------------------------------------ */
 
-app.get('/api/protected/order-history', requireAuth, async (req: Request, res: Response) => {
+app.get('/api/protected/order-history', requireAuth, async (req, res) => {
   try {
-    if (!requireCloudStorage(res)) return;
-    const limit = Math.min(Number(req.query.limit) || 200, 1000);
-    let orders: any[] = [];
-    if (cloudDb) {
-      try {
-        const open = await cloudDb.getOpenTrades();
-        orders = Array.isArray(open) ? open : [];
-      } catch {
-        /* fall through */
-      }
-    }
-    ok(res, { orders: orders.slice(-limit).reverse() });
-  } catch (e: any) {
-    fail(res, 500, e?.message || 'order-history failed');
-  }
+    if (!await requireCloudStorage(res)) return;
+    ok(res, { orders: await cloudDb!.getOrders(Number(req.query.limit) || 200) });
+  } catch { fail(res, 503, 'Order history unavailable'); }
 });
 
-app.post('/api/protected/manual-order', requireAuth, async (req: Request, res: Response) => {
+app.post('/api/protected/manual-order', requireAuth, async (req, res) => {
   try {
-    if (!requireCloudStorage(res)) return;
-    const { symbol, side, type, quantity, price } = req.body || {};
-    if (typeof symbol !== 'string' || (side !== 'BUY' && side !== 'SELL')) {
-      return fail(res, 400, 'Body requires { symbol, side: BUY|SELL, quantity, [price] }');
-    }
-    const qty = Number(quantity);
-    if (!Number.isFinite(qty) || qty <= 0) return fail(res, 400, 'quantity must be > 0');
-    if (pipeline.orderGateway?.getExecutionMode?.() === 'LIVE' &&
-        String(process.env.CONFIRM_LIVE_TRADING).toLowerCase() !== 'true') {
-      return fail(res, 409, 'LIVE manual orders require CONFIRM_LIVE_TRADING=true');
-    }
-
-    const gw = getAny(pipeline, ['orderGateway', 'getOrderGateway']);
-    if (gw && typeof gw.submitOrder === 'function') {
-      const order = gw.submitOrder({
-        symbol,
-        side,
-        type: type || 'MARKET',
-        quantity: qty,
-        ...(price !== undefined ? { price: Number(price) } : {}),
-      });
-      await cloudDb?.saveTrade({ symbol, side, price: Number(price) || 0, quantity: qty, status: 'SUBMITTED', strategyId: 'MANUAL_UI' } as any);
-      return ok(res, { order, executed: true });
-    }
-    return fail(res, 503, 'Order gateway unavailable');
-  } catch (e: any) {
-    fail(res, 500, e?.message || 'manual-order failed');
+    if (!await requireCloudStorage(res)) return;
+    if (!pipeline.isRunning || !supervisor?.canEnter()) return fail(res, 409, 'Start the execution owner before submitting entries');
+    const result = await submitManualOrder({ claimOrder: cloudDb!.claimOrder.bind(cloudDb), saveOrder: persistOrder }, pipeline.getOrderGateway(), req.header('Idempotency-Key') || '', req.body || {});
+    res.status(result.statusCode).json(result.body);
+  } catch (error) {
+    const message = (error as Error).message;
+    fail(res, /Invalid order|Idempotency-Key/.test(message) ? 400 : 503,
+      /Invalid order|Idempotency-Key/.test(message) ? message : 'Order outcome uncertain; reconcile the same idempotency key before retrying');
   }
 });
 
@@ -667,16 +683,16 @@ app.post('/api/protected/positions/close-all', requireAuth, async (_req: Request
 });
 
 app.post('/api/emergency/killswitch/reset', requireAuth, async (_req: Request, res: Response) => {
-  
+
   try {
     const ks = getAny(pipeline, ['killSwitch', 'getKillSwitch']);
     const r = await callAny(ks, ['reset', 'resetKillSwitch', 'clear']);
-    
+
     console.warn(`⚠️ Emergency KillSwitch reset executed via /api/emergency/killswitch/reset`);
-    ok(res, { 
+    ok(res, {
       success: true,
       message: 'KillSwitch reset via emergency endpoint',
-      reset: r.called 
+      reset: r.called
     });
   } catch (e: any) {
     fail(res, 500, `Emergency reset failed: ${e?.message}`);
@@ -714,7 +730,7 @@ app.post('/api/backtest/run', requireAuth, async (req: Request, res: Response) =
 
 
 // JSON snapshot export (lightweight — no zip dep on free tier).
-app.get('/api/download-zip', async (_req: Request, res: Response) => {
+app.get('/api/download-zip', requireAuth, async (_req: Request, res: Response) => {
   try {
     const payload = {
       exportedAt: new Date().toISOString(),
@@ -732,14 +748,20 @@ app.get('/api/download-zip', async (_req: Request, res: Response) => {
 /* ------------------------------------------------------------------ */
 
 const brainSockets = new Set<any>();
-(app as any).ws('/brain-ws', (socket: any) => {
-  brainSockets.add(socket);
-  try {
-    socket.send(JSON.stringify({ type: 'brain-hello', at: Date.now() }));
-  } catch {
-    /* ignore */
-  }
-  socket.on('close', () => brainSockets.delete(socket));
+(app as any).ws('/brain-ws', (socket: any, req: Request) => {
+  // Browser WebSockets cannot set Authorization; authenticate the first message.
+  const timer = setTimeout(() => socket.close(1008, 'Authentication required'), 5000);
+  socket.once('message', (raw: any) => {
+    try {
+      const { token } = JSON.parse(String(raw));
+      const user = verifyToken(token, JWT_SECRET);
+      if (!isOperator(user.email)) throw new Error('Forbidden');
+      clearTimeout(timer);
+      brainSockets.add(socket);
+      socket.send(JSON.stringify({ type: 'brain-hello', at: Date.now() }));
+    } catch { socket.close(1008, 'Unauthorized'); }
+  });
+  socket.on('close', () => { clearTimeout(timer); brainSockets.delete(socket); });
 });
 
 function broadcastBrain(msg: Record<string, any>) {
@@ -758,16 +780,15 @@ setInterval(() => broadcastBrain({ type: 'brain-ping', at: Date.now() }), 30000)
 /* static frontend (vite dist) + SPA fallback                          */
 /* ------------------------------------------------------------------ */
 
-const distDir = serverDir; // dist/server.cjs lives beside vite output
-if (fs.existsSync(path.join(distDir, 'index.html'))) {
-  app.use(express.static(distDir, { index: false, maxAge: '1h' }));
-  app.get('*', (req: Request, res: Response, next: NextFunction) => {
-    if (req.path.startsWith('/api/') || req.path.startsWith('/webhook/') || req.path.startsWith('/brain-ws')) {
-      return next();
-    }
-    res.sendFile(path.join(distDir, 'index.html'));
-  });
-}
+const distDir = publicDir;
+// Only the bundled UI assets and HTML are public, never server/data files.
+app.use('/assets', express.static(path.join(distDir, 'assets'), { dotfiles: 'deny', index: false, maxAge: '1h' }));
+app.get('*', (req, res, next) => {
+  if (req.path.startsWith('/api/') || req.path.startsWith('/webhook/') ||
+      req.path.startsWith('/brain-ws') || path.extname(req.path)) return next();
+  if (fs.existsSync(path.join(distDir, 'index.html'))) return res.sendFile(path.join(distDir, 'index.html'));
+  next();
+});
 
 // 404 for unknown API routes
 app.use('/api/', (_req: Request, res: Response) => fail(res, 404, 'unknown api route'));
@@ -776,15 +797,15 @@ app.use('/api/', (_req: Request, res: Response) => fail(res, 404, 'unknown api r
 /* boot                                                                */
 /* ------------------------------------------------------------------ */
 
-app.listen(PORT, '0.0.0.0', async () => {
+const httpServer = app.listen(PORT, process.env.HOST || '0.0.0.0', async () => {
   console.log(`🚀 Quantum Bot server listening on 0.0.0.0:${PORT}`);
   console.log(`   storage=${cloudStorageOk ? 'cloudflare-d1' : 'UNAVAILABLE'} autostart=${AUTOSTART}`);
-  
+
   // Security check: warn if JWT_SECRET is using default
   if (JWT_SECRET === 'dev-secret-change-in-production') {
     console.warn('⚠️  [SECURITY] JWT_SECRET is using default value. Set JWT_SECRET env var for production!');
   }
-  
+
   // Initialize SQLite users DB
   try {
     await initDb();
@@ -798,7 +819,7 @@ app.listen(PORT, '0.0.0.0', async () => {
     return;
   }
   try {
-    await pipeline.start();
+    await startTrading();
     console.log('✅ TradingPipeline started');
   } catch (e: any) {
     console.error('❌ Pipeline start failed (API still live):', e?.message || e);
@@ -819,5 +840,21 @@ process.on('uncaughtException', (error: Error) => {
   process.exit(1);
 });
 
-process.on('SIGTERM', () => process.exit(0));
-process.on('SIGINT', () => process.exit(0));
+let shuttingDown = false;
+async function shutdown() {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  pipeline.getKillSwitch().trigger('HARD_HALT', 'Process shutdown', 'MANUAL_OPERATOR');
+  const deadline = setTimeout(() => process.exit(1), 10000);
+  deadline.unref();
+  httpServer.close();
+  try {
+    await pipeline.stop();
+    await orderWrites;
+    await supervisor?.stop();
+    await new Promise<void>((resolve) => userDb ? userDb.close(() => resolve()) : resolve());
+    process.exit(0);
+  } catch { process.exit(1); }
+}
+process.on('SIGTERM', () => { void shutdown(); });
+process.on('SIGINT', () => { void shutdown(); });

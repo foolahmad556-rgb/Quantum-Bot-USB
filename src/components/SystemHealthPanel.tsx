@@ -9,7 +9,7 @@ export default function SystemHealthPanel({ lang }: { lang: 'ar' | 'en' }) {
     useEffect(() => {
         const fetchHealth = async () => {
             try {
-                const data = await fetchWithAuth('/api/protected/system-health');
+                const data = await fetchWithAuth('/api/system-health');
                 setHealth(data);
             } catch (e) { console.error(e); }
         };

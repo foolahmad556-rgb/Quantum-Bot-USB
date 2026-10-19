@@ -39,6 +39,7 @@ export class MeanReversionStrategy {
   }
 
   public evaluate(features: CalculatedFeatures, orderBook?: OrderBook): TradingSignal | null {
+    if (![features.currentPrice, features.zScore, features.ouMu, features.ouSigma, features.halfLifePeriods, features.hurstExponent, features.rsi14, features.orderFlowImbalance].every(Number.isFinite) || features.currentPrice <= 0 || features.ouSigma <= 0) return null;
     const { symbol, currentPrice, zScore, ouMu, ouSigma, halfLifePeriods, hurstExponent, rsi14, orderFlowImbalance } = features;
 
     // Filter 1: Regime check - Must show mean-reverting property
@@ -89,7 +90,7 @@ export class MeanReversionStrategy {
     // Target is equilibrium mean (mu)
     const targetPrice = ouMu;
     const distanceToMu = Math.abs(currentPrice - ouMu);
-    
+
     // Stop loss at extreme Z-Score boundary
     const stopLoss = isBuy
       ? Number((currentPrice - this.config.stopLossZScore * ouSigma).toFixed(2))

@@ -71,6 +71,11 @@ export class TradingPipeline {
   private orderGateway: OrderGateway;
   private riskEngine: RiskEngine;
   private killSwitch: KillSwitch;
+  private runtimeSafetyGuard: (() => boolean) | undefined;
+  public setRuntimeSafetyGuard(guard: () => boolean) {
+    this.runtimeSafetyGuard = guard;
+    this.orderGateway.setExecutionLeaseValidator(guard);
+  }
   private eventJournal: EventJournal;
   private healthMonitor: HealthMonitor;
   private watchdog: SystemWatchdog;
@@ -170,8 +175,12 @@ export class TradingPipeline {
         return { allowed: true };
       }
 
+      if (this.runtimeSafetyGuard && !this.runtimeSafetyGuard()) return { allowed: false, reason: 'Execution lease or storage readiness unavailable' };
       if (this.killSwitch.isActive()) {
         return { allowed: false, reason: `New entry blocked by Kill Switch (${this.killSwitch.getLevel()})` };
+      }
+      if (this.runtimeSafetyGuard && Date.now() - this.marketData.getLastUpdateTime(order.symbol) > 15000) {
+        return { allowed: false, reason: 'Market data stale; entry rejected' };
       }
       const marketPrice = this.marketData.getPrice(order.symbol);
       if (!Number.isFinite(marketPrice) || marketPrice <= 0) {
@@ -845,6 +854,7 @@ export class TradingPipeline {
     const tier = this.portfolioSizer.getPortfolioTier();
     // 1. Evaluate Multi-Agent Quant Engine first if active
     const candles = this.marketData.getCandles(symbol) || [];
+    if (candles.length < 60) return;
     const multiAgentRes = this.strategyManager.getMultiAgentEngine().evaluate(features, regime, candles);
 
     // Fall back to OU Decision Engine
@@ -1195,11 +1205,11 @@ export class TradingPipeline {
       const savedKs = await this.db.getState<{ level: KillSwitchLevel; active: boolean; reason: string }>('killswitch_state');
       if (savedKs && restorePersistentKillSwitch(savedKs, this.killSwitch)) {
         console.warn(`🚨 Restoring persisted KillSwitch state: [${savedKs.level}] - ${savedKs.reason}`);
-        
+
         // Auto-recovery: if KillSwitch was triggered due to D1 quota (old issue), check if it's resolved
         if (savedKs.reason?.includes('quota') || savedKs.reason?.includes('D1') || savedKs.reason?.includes('storage')) {
           console.log('ℹ️ KillSwitch was triggered for storage/quota issue. Checking if resolved via Hybrid Storage...');
-          
+
           // Check current storage quota status
           try {
             const quotaStatus = await this.db.getState<{ used: number; limit: number }>('storage_quota_status');

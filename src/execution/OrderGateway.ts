@@ -705,6 +705,10 @@ export class OrderGateway {
 
       console.log(`🌐 Submitting order to Binance Futures [${this.executionMode}]: ${params.side} ${formattedQty} ${cleanSymbol} (ClientOID: ${order.id})...`);
 
+      if (!params.reduceOnly && this.executionLeaseValidator && !this.executionLeaseValidator()) {
+        order.status = 'REJECTED'; order.errorMessage = 'Execution lease expired before exchange submission';
+        this.notifyOrder(order); return;
+      }
       const res = await fetch(url, {
         method: 'POST',
         headers: {
@@ -879,11 +883,15 @@ export class OrderGateway {
     return () => this.listeners.delete(listener);
   }
 
+  private executionLeaseValidator?: () => boolean;
+  public setExecutionLeaseValidator(validator: () => boolean): void { this.executionLeaseValidator = validator; }
+
   public setPreTradeValidator(validator: PreTradeValidator): void {
     this.preTradeValidator = validator;
   }
 
   public submitOrder(params: {
+    orderId?: string;
     symbol: AssetSymbol;
     side: OrderSide;
     type: OrderType;
@@ -899,7 +907,7 @@ export class OrderGateway {
 
     this.orderCounter += 1;
     const randomSuffix = crypto.randomBytes(3).toString('hex');
-    const orderId = `ORD-${Date.now().toString(36)}-${this.orderCounter}-${randomSuffix}`;
+    const orderId = params.orderId || `ORD-${Date.now().toString(36)}-${this.orderCounter}-${randomSuffix}`;
     const clientOrderId = `C_${orderId}`;
 
     const filter = this.getSymbolFilter(params.symbol);

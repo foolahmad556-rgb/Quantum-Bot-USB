@@ -52,7 +52,7 @@ export default function TelegramSettings({ lang }: { lang: 'ar' | 'en' }) {
         setStatus('loading');
         setMessage('');
         try {
-            const data = await fetchWithAuth('/api/protected/telegram/test', { method: 'POST' });
+            const data = await fetchWithAuth('/api/telegram/test', { method: 'POST' });
             setStatus(data.success ? 'success' : 'error');
             setMessage(data.message || (data.success ? 'Test message sent!' : 'Failed to send'));
         } catch (err) {
@@ -63,8 +63,8 @@ export default function TelegramSettings({ lang }: { lang: 'ar' | 'en' }) {
     };
 
     return (
-        <motion.div 
-            initial={{ opacity: 0, y: 10 }} 
+        <motion.div
+            initial={{ opacity: 0, y: 10 }}
             animate={{ opacity: 1, y: 0 }}
             className="bg-[#0f1523] border border-slate-800 rounded-xl p-6 shadow-2xl"
         >
@@ -82,7 +82,7 @@ export default function TelegramSettings({ lang }: { lang: 'ar' | 'en' }) {
                 <div className="flex items-center gap-2">
                     {isEnabled ? <Bell className="w-4 h-4 text-green-400" /> : <BellOff className="w-4 h-4 text-slate-500" />}
                     <span className="text-sm text-slate-300">
-                        {isAr ? 'الحالة:' : 'Status:'} 
+                        {isAr ? 'الحالة:' : 'Status:'}
                         <span className={isEnabled ? 'text-green-400 ml-2 font-semibold' : 'text-slate-500 ml-2 font-semibold'}>
                             {isEnabled ? (isAr ? 'مفعّل' : 'Enabled') : (isAr ? 'متوقف' : 'Disabled')}
                         </span>
@@ -151,8 +151,8 @@ export default function TelegramSettings({ lang }: { lang: 'ar' | 'en' }) {
 
                 {/* Status alerts */}
                 {message && (
-                    <motion.div 
-                        initial={{ opacity: 0, height: 0 }} 
+                    <motion.div
+                        initial={{ opacity: 0, height: 0 }}
                         animate={{ opacity: 1, height: 'auto' }}
                         className={`flex items-center gap-2 text-xs p-2.5 rounded-lg ${
                             status === 'success' ? 'bg-green-500/10 text-green-400 border border-green-500/20' : 'bg-red-500/10 text-red-400 border border-red-500/20'

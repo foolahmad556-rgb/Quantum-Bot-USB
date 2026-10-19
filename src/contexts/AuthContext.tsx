@@ -1,6 +1,6 @@
 import React, { createContext, useContext, useEffect, useState } from 'react';
 
-const API_BASE_URL = (import.meta.env.VITE_API_URL || 'https://5uq4nr.bot-keep.xyz').replace(/\/$/, '');
+const API_BASE_URL = (import.meta.env.VITE_API_URL || '').replace(/\/$/, '');
 
 interface User {
   id: number;

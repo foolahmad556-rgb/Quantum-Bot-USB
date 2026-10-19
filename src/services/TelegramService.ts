@@ -93,7 +93,7 @@ export class TelegramService {
             if (!fs.existsSync(dir)) {
                 fs.mkdirSync(dir, { recursive: true });
             }
-            fs.writeFileSync(CONFIG_FILE, JSON.stringify(this.config, null, 2), 'utf-8');
+            fs.writeFileSync(CONFIG_FILE, JSON.stringify({ ...this.config, botToken: undefined }, null, 2), 'utf-8');
         } catch (e) {
             console.error('❌ [TELEGRAM] Failed to persist config to disk:', e);
         }
@@ -257,7 +257,7 @@ export class TelegramService {
                     const retrySeconds = Math.max(2, result.retryAfter || 5);
                     this.backoffUntil = Date.now() + (retrySeconds * 1000) + 500;
                     console.warn(`⏳ [TELEGRAM] Rate-limited (429). Pausing for ${retrySeconds}s before retrying...`);
-                    
+
                     if (item.retries < 3) {
                         item.retries++;
                         this.queue.unshift(item);
@@ -315,7 +315,7 @@ export class TelegramService {
             }
 
             const errorBody = await response.json().catch(() => ({}));
-            
+
             // Handle HTTP 429 Too Many Requests
             if (response.status === 429) {
                 const retryAfter = errorBody?.parameters?.retry_after || 5;
@@ -334,7 +334,7 @@ export class TelegramService {
         } catch (error: any) {
             clearTimeout(timeout);
             const isTimeout = error.name === 'AbortError' || error.code === 'ETIMEDOUT' || error.message?.includes('timeout') || error.message?.includes('fetch failed');
-            
+
             if (isTimeout) {
                 console.warn('⚠️ [TELEGRAM] Network timeout or transient socket glitch (recovering automatically)...');
             } else {

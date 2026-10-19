@@ -8,3 +8,11 @@ dist
 .vscode
 bun.lockb
 data
+
+build
+.env*
+*.db
+*.db-*
+*.sqlite*
+agent_learning.json
+quantum_deliberations.json

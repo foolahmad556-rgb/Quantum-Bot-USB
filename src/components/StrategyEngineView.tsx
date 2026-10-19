@@ -217,7 +217,7 @@ export const StrategyEngineView: React.FC<StrategyEngineViewProps> = ({
   const handleRunQuickBacktest = async (strategyId: string) => {
     setQuickBacktestRunning(true);
     try {
-      const data = await fetchWithAuth('/api/protected/backtest/run', {
+      const data = await fetchWithAuth('/api/backtest/run', {
         method: 'POST',
         body: JSON.stringify({
           symbols: ['BTC/USDT', 'ETH/USDT', 'SOL/USDT'],
@@ -255,11 +255,11 @@ export const StrategyEngineView: React.FC<StrategyEngineViewProps> = ({
 
   return (
     <div className="space-y-4 sm:space-y-6" dir={isAr ? 'rtl' : 'ltr'}>
-      
+
       {/* 1. Header & Strategy Matrix Command HUD */}
       <div className="p-4 sm:p-6 rounded-2xl bg-[var(--card)] border border-[var(--stroke)] shadow-2xl relative overflow-hidden">
         <div className="absolute top-0 right-0 w-96 h-96 bg-[radial-gradient(ellipse_at_top_right,_var(--tw-gradient-stops))] from-[rgba(var(--accent-rgb),0.15)] via-transparent to-transparent pointer-events-none" />
-        
+
         <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4 relative z-10">
           <div>
             <div className="flex items-center gap-2.5">
@@ -271,7 +271,7 @@ export const StrategyEngineView: React.FC<StrategyEngineViewProps> = ({
                   {isAr ? 'مركز قيادة استراتيجيات التداول الآلي' : 'Autonomous Multi-Strategy Hub'}
                 </h1>
                 <p className="text-xs sm:text-sm text-[var(--text-3)]">
-                  {isAr 
+                  {isAr
                     ? 'إدارة النماذج الكمية والمراجحة الإحصائية والفلترة اللحظية للأصول بالبيانات المباشرة'
                     : 'Real-time mathematical model orchestration, live screener filtering & parameter tuning'}
                 </p>
@@ -373,7 +373,7 @@ export const StrategyEngineView: React.FC<StrategyEngineViewProps> = ({
       {/* 2. MAIN SUB-VIEW: STRATEGY MATRIX */}
       {activeTabSubView === 'MATRIX' && (
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-4 sm:gap-6 items-start">
-          
+
           {/* Strategy Cards List (7 Cols) */}
           <div className="lg:col-span-7 space-y-4">
             <div className="flex items-center justify-between mb-2">
@@ -693,7 +693,7 @@ export const StrategyEngineView: React.FC<StrategyEngineViewProps> = ({
       {/* 3. SUB-VIEW: LIVE SCREENER TABLE */}
       {activeTabSubView === 'SCREENER' && (
         <div className="p-4 sm:p-6 rounded-2xl bg-[var(--card)] border border-[var(--stroke)] shadow-2xl space-y-4">
-          
+
           {/* Screener Controls & Filters */}
           <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
             <div className="flex items-center gap-2">
