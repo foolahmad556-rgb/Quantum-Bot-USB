@@ -3,5 +3,7 @@ compatibility_date = "2024-01-01"
 pages_build_output_dir = "dist"
 
 [vars]
+BOTKEEP_URL = "https://5uq4nr.bot-keep.xyz"
+VITE_API_URL = "https://5uq4nr.bot-keep.xyz"
 # NOTE: Secrets are set via Cloudflare Dashboard or wrangler secret put
 # WEBHOOK_SECRET, FIREBASE_CREDENTIALS_JSON are Workers Secrets (encrypted)
