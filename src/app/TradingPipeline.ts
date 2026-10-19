@@ -1,4 +1,5 @@
 import { BoardOfDirectorsEngine, BoardMeetingDecision } from '../strategies/BoardOfDirectorsEngine';
+import { decideByCouncil } from '../strategies/StrategyCouncil';
 /**
  * Basel Quantum Algorithmic Trading System
  * Master Unified Trading Pipeline Orchestrator
@@ -838,6 +839,15 @@ export class TradingPipeline {
     const sig = decision.signal;
     const signalType = sig.type as 'BUY' | 'SELL';
     const strength = sig.strength;
+
+    // Shadow-only council observer: only incumbent source available here; all other roles abstain.
+    // Its output is deliberately never used by the incumbent gate or order path.
+    const councilShadow = decideByCouncil([
+      { member: 'incumbent-signal', side: signalType, confidence: strength },
+      { member: 'independent-strategy-1', side: 'ABSTAIN', confidence: 0 },
+      { member: 'independent-strategy-2', side: 'ABSTAIN', confidence: 0 },
+    ]);
+    this.eventJournal.record('INFO', 'STRATEGY', `[STRATEGY_COUNCIL_SHADOW] ${symbol} decision=${councilShadow?.side ?? 'ABSTAIN'} votes=${councilShadow?.votes ?? 0} executionEnabled=false`);
 
     // 🏛️ Board of Directors v6.0 Evaluation (6 Decision Makers + 8 Anti-Overfitting Guards)
     const candlesMap: Record<string, any> = {};

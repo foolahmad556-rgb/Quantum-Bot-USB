@@ -9,7 +9,7 @@
     "build:full": "vite build && esbuild server.ts --bundle --platform=node --format=cjs --packages=external --sourcemap --outfile=dist/server.cjs",
     "start": "node dist/server.cjs",
     "data:fetch": "tsx scripts/fetch-historical-data.ts",
-    "data:wfo": "tsx scripts/run-wfo.ts",
+    "data:wfo": "tsx scripts/comprehensive-backtest.ts",
     "test": "tsx scripts/run-tests.ts",
     "test:all": "tsx scripts/run-tests.ts",
     "test:parity": "tsx scripts/parity-test.ts",

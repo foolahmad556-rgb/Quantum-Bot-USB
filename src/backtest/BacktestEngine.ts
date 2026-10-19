@@ -34,6 +34,8 @@ export interface BacktestEngineConfig {
   solver?: SolverType;
   maxLeverage?: number;
   strategyParams?: Partial<StrategyParams>;
+  candleIntervalMs?: number;
+  timeframe?: string;
 }
 
 export class BacktestEngine {
@@ -55,6 +57,8 @@ export class BacktestEngine {
       solver: config.solver || 'QUANTUM_ANNEALING',
       maxLeverage: config.maxLeverage ?? 2,
       strategyParams: config.strategyParams,
+      candleIntervalMs: config.candleIntervalMs ?? 60 * 60 * 1000,
+      timeframe: config.timeframe ?? '1h',
     };
 
     try {
@@ -190,7 +194,6 @@ export class BacktestEngine {
     customParams?: Partial<StrategyParams>
   ): BacktestResult {
     const trades: Fill[] = [];
-    let cash = this.config.initialCapital;
     let realizedCapital = this.config.initialCapital;
     let peakEquity = this.config.initialCapital;
     let maxDrawdownPct = 0;
@@ -209,10 +212,14 @@ export class BacktestEngine {
     const initialAssetPrices: Map<string, number> = new Map();
 
     const allTimestamps = new Set<number>();
-    historicalData.forEach((candles) => {
+    this.config.symbols.forEach((symbol) => {
+      const candles = historicalData.get(symbol) ?? [];
       candles.forEach((c) => allTimestamps.add(c.timestamp));
     });
     const sortedTimestamps = Array.from(allTimestamps).sort((a, b) => a - b);
+    if (sortedTimestamps.length === 0) {
+      throw new Error('Cannot run backtest: no historical candles were provided.');
+    }
 
     // Track initial prices for benchmark
     if (sortedTimestamps.length > 0) {
@@ -238,30 +245,64 @@ export class BacktestEngine {
 
     const openPositions: InternalTrade[] = [];
     // Look-ahead fix: a signal computed from bar T's close is queued and filled at bar T+1's open.
-    const pendingEntries: Array<{ symbol: AssetSymbol; isBuy: boolean; stopLoss: number; takeProfit: number; maxHoldMs?: number; quantityRiskPerUnit: number }> = [];
+    const pendingEntries: Array<{ symbol: AssetSymbol; isBuy: boolean; stopLoss: number; takeProfit: number; maxHoldMs?: number; quantityRiskPerUnit: number; referencePrice: number }> = [];
 
     // Taker & Maker fee multipliers
     const takerFeeRate = (this.config.takerFeeBps ?? 5.0) / 10000;
     const baseSlippage = this.config.slippage ?? 0.0010; // 10 bps altcoin base (ASSUMPTION)
 
     // Solver selection does not change signal quality; no unsupported confidence bonus.
+    const intervalMs = this.config.candleIntervalMs;
+    const candlesByTimestamp = new Map<AssetSymbol, Map<number, Candle>>();
+    for (const rawSymbol of this.config.symbols) {
+      const sorted = [...(historicalData.get(rawSymbol) ?? [])].sort((a, b) => a.timestamp - b.timestamp);
+      candlesByTimestamp.set(rawSymbol as AssetSymbol, new Map(sorted.map((candle) => [candle.timestamp, candle])));
+    }
+    const exposureMarks = new Map<AssetSymbol, number>();
 
     for (const timestamp of sortedTimestamps) {
+      for (const rawSymbol of this.config.symbols) {
+        const candle = historicalData.get(rawSymbol)?.find((item) => item.timestamp === timestamp);
+        if (candle) exposureMarks.set(rawSymbol as AssetSymbol, candle.close);
+      }
       // 0. Fill entries queued on the previous bar at THIS bar's open (never the signal bar's close).
       while (pendingEntries.length > 0) {
         const order = pendingEntries.shift()!;
-        const candles = historicalData.get(order.symbol);
-        const bar = candles?.find((c) => c.timestamp === timestamp);
+        const bar = candlesByTimestamp.get(order.symbol)?.get(timestamp);
         if (!bar || !(bar.open > 0)) continue;
         const entrySlippage = order.isBuy ? 1 + baseSlippage : 1 - baseSlippage;
         const entryPrice = bar.open * entrySlippage;
-        const quantity = Number(order.quantityRiskPerUnit > 0 ? order.quantityRiskPerUnit : 0);
+        const grossExposure = openPositions.reduce((sum, position) => {
+          return sum + position.quantity * (exposureMarks.get(position.symbol) ?? position.entryPrice);
+        }, 0);
+        const markedUnrealizedPnl = openPositions.reduce((sum, position) => {
+          const mark = exposureMarks.get(position.symbol) ?? position.entryPrice;
+          return sum + (position.side === 'BUY'
+            ? (mark - position.entryPrice) * position.quantity
+            : (position.entryPrice - mark) * position.quantity);
+        }, 0);
+        const equityBeforeFill = realizedCapital + markedUnrealizedPnl;
+        const maxExposure = Math.max(0, equityBeforeFill) * (this.config.maxLeverage ?? 2);
+        const portfolioQuantityCap = Math.max(0, maxExposure - grossExposure) / entryPrice;
+        const availableLongCash = order.isBuy
+          ? Math.max(0, realizedCapital) / (entryPrice * (1 + takerFeeRate))
+          : Number.POSITIVE_INFINITY;
+        const stopDistance = Math.abs(order.referencePrice - order.stopLoss);
+        const riskBasedQuantity = stopDistance > 0
+          ? (Math.max(0, equityBeforeFill) * 0.015) / stopDistance
+          : 0;
+        const quantity = Number(Math.min(
+          order.quantityRiskPerUnit,
+          riskBasedQuantity,
+          portfolioQuantityCap,
+          availableLongCash,
+        ).toFixed(4));
         if (!(quantity > 0)) continue;
         const notional = quantity * entryPrice;
         const entryFee = notional * takerFeeRate;
         totalFeesPaid += entryFee;
-        cash -= entryFee;
-        realizedCapital -= entryFee;
+        // Cash ledger: long buys spend notional; short sales receive proceeds, both net of fee.
+        realizedCapital += order.isBuy ? -(notional + entryFee) : notional - entryFee;
         const tradeId = `TR-${timestamp}-${order.symbol.replace('/', '')}`;
         openPositions.push({
           id: tradeId,
@@ -270,8 +311,8 @@ export class BacktestEngine {
           entryPrice,
           entryTime: timestamp,
           quantity,
-          stopLoss: order.stopLoss,
-          takeProfit: order.takeProfit,
+          stopLoss: order.stopLoss + (entryPrice - order.referencePrice),
+          takeProfit: order.takeProfit + (entryPrice - order.referencePrice),
           maxHoldMs: order.maxHoldMs,
           status: 'OPEN',
         });
@@ -282,7 +323,7 @@ export class BacktestEngine {
           side: order.isBuy ? 'BUY' : 'SELL',
           price: Number(entryPrice.toFixed(4)),
           quantity,
-          commission: Number(entryFee.toFixed(2)),
+          commission: entryFee,
           commissionAsset: 'USDT',
           timestamp,
           isMaker: false,
@@ -292,8 +333,7 @@ export class BacktestEngine {
       // 1. Process Open Trades (Stop-Loss, Take-Profit, Max Hold Expiration)
       for (let i = openPositions.length - 1; i >= 0; i--) {
         const trade = openPositions[i];
-        const candles = historicalData.get(trade.symbol);
-        const candle = candles?.find((c) => c.timestamp === timestamp);
+        const candle = candlesByTimestamp.get(trade.symbol)?.get(timestamp);
         if (!candle) continue;
 
         const isLong = trade.side === 'BUY';
@@ -322,8 +362,10 @@ export class BacktestEngine {
             ? (finalExitPrice - trade.entryPrice) * trade.quantity - exitFee
             : (trade.entryPrice - finalExitPrice) * trade.quantity - exitFee;
 
-          realizedCapital += tradePnl;
-          cash += exitValue - exitFee;
+          // Return exit proceeds (or repurchase cost for shorts) to the cash ledger.
+          realizedCapital += isLong
+            ? trade.quantity * finalExitPrice - exitFee
+            : -trade.quantity * finalExitPrice - exitFee;
           totalFeesPaid += exitFee;
 
           const holdSec = Math.max(60, Math.floor((timestamp - trade.entryTime) / 1000));
@@ -344,7 +386,7 @@ export class BacktestEngine {
             side: isLong ? 'SELL' : 'BUY',
             price: Number(finalExitPrice.toFixed(4)),
             quantity: trade.quantity,
-            commission: Number(exitFee.toFixed(2)),
+            commission: exitFee,
             commissionAsset: 'USDT',
             timestamp,
             isMaker: false,
@@ -383,7 +425,7 @@ export class BacktestEngine {
           params: {
             ...DEFAULT_STRATEGY_PARAMS,
             minConfidence: DEFAULT_STRATEGY_PARAMS.minConfidence || 0.5,
-            candleIntervalMs: 60 * 60 * 1000,
+            candleIntervalMs: intervalMs,
             ...(this.config.strategyParams || {}),
             ...(customParams || {}),
           },
@@ -412,6 +454,7 @@ export class BacktestEngine {
               takeProfit: signal.takeProfit,
               maxHoldMs: signal.maxHoldMs,
               quantityRiskPerUnit: quantity,
+              referencePrice: currentCandle.close,
             });
           }
         }
@@ -427,16 +470,17 @@ export class BacktestEngine {
         if (candle) {
           const price = candle.close;
           const posVal = openTrade.quantity * price;
-          holdingsValue += posVal;
-          const uPnl =
-            openTrade.side === 'BUY'
-              ? (price - openTrade.entryPrice) * openTrade.quantity
-              : (openTrade.entryPrice - price) * openTrade.quantity;
+          // Signed marked value: short positions are liabilities, not owned holdings.
+          holdingsValue += openTrade.side === 'BUY' ? posVal : -posVal;
+          const uPnl = openTrade.side === 'BUY'
+            ? (price - openTrade.entryPrice) * openTrade.quantity
+            : (openTrade.entryPrice - price) * openTrade.quantity;
           unrealizedPnl += uPnl;
         }
       }
 
-      const currentTotalEquity = Number((realizedCapital + unrealizedPnl).toFixed(2));
+      const cashBalance = Number(realizedCapital.toFixed(2));
+      const currentTotalEquity = Number((cashBalance + holdingsValue).toFixed(2));
       if (currentTotalEquity > peakEquity) peakEquity = currentTotalEquity;
 
       const currentDrawdownPct = peakEquity > 0 ? ((peakEquity - currentTotalEquity) / peakEquity) * 100 : 0;
@@ -461,7 +505,7 @@ export class BacktestEngine {
         equity: currentTotalEquity,
         benchmark: Number(benchmarkCapital.toFixed(2)),
         drawdown: Number(currentDrawdownPct.toFixed(2)),
-        cash: Number(Math.max(0, realizedCapital - holdingsValue).toFixed(2)),
+        cash: Number(cashBalance.toFixed(2)),
         holdingsValue: Number(holdingsValue.toFixed(2)),
       });
     }
