@@ -1,4 +1,5 @@
 import React, { createContext, useContext, useEffect, useState } from 'react';
+import { readJsonResponse } from '../lib/api';
 
 const API_BASE_URL = (import.meta.env.VITE_API_URL || '').replace(/\/$/, '');
 
@@ -40,7 +41,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         headers: { Authorization: `Bearer ${token}` },
       });
       if (res.ok) {
-        const userData = await res.json();
+        const userData = await readJsonResponse<User>(res);
         setUser(userData);
       } else {
         localStorage.removeItem('auth_token');
@@ -61,10 +62,10 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         body: JSON.stringify({ email, password }),
       });
       if (!res.ok) {
-        const err = await res.json();
+        const err = await readJsonResponse<{ error?: string }>(res);
         throw new Error(err.error || 'Registration failed');
       }
-      const { token, user: userData } = await res.json();
+      const { token, user: userData } = await readJsonResponse<{ token: string; user: User }>(res);
       localStorage.setItem('auth_token', token);
       setUser(userData);
     } catch (err: any) {
@@ -82,10 +83,10 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         body: JSON.stringify({ email, password }),
       });
       if (!res.ok) {
-        const err = await res.json();
+        const err = await readJsonResponse<{ error?: string }>(res);
         throw new Error(err.error || 'Login failed');
       }
-      const { token, user: userData } = await res.json();
+      const { token, user: userData } = await readJsonResponse<{ token: string; user: User }>(res);
       localStorage.setItem('auth_token', token);
       setUser(userData);
     } catch (err: any) {

@@ -5,6 +5,22 @@ export function resolveApiUrl(url: string): string {
   return `${API_BASE_URL}${url}`;
 }
 
+export async function readJsonResponse<T = any>(response: Response): Promise<T> {
+  const text = await response.text();
+  if (!text.trim()) {
+    throw new Error(response.status >= 500
+      ? `Backend unavailable (HTTP ${response.status})`
+      : `Empty server response (HTTP ${response.status})`);
+  }
+  try {
+    return JSON.parse(text) as T;
+  } catch {
+    throw new Error(response.status >= 500
+      ? `Backend unavailable (HTTP ${response.status})`
+      : `Invalid server response (HTTP ${response.status})`);
+  }
+}
+
 export async function fetchWithAuth(url: string, options: RequestInit = {}) {
   const token = localStorage.getItem('auth_token');
   if (!token) {
@@ -21,11 +37,11 @@ export async function fetchWithAuth(url: string, options: RequestInit = {}) {
   });
 
   if (!response.ok) {
-    const errorData = await response.json().catch(() => ({}));
+    const errorData = await readJsonResponse<{ error?: string }>(response);
     throw new Error(errorData.error || `HTTP error! status: ${response.status}`);
   }
 
-  return response.json();
+  return readJsonResponse(response);
 }
 
 export function authenticatedApiFetch(url: string, options: RequestInit = {}) {
