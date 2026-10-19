@@ -17,6 +17,7 @@ import { DatabaseService } from '../storage/DatabaseService';
 import { AssetSymbol, BacktestConfig, BacktestResult, Candle, EquityPoint, Fill, SolverType } from '../domain/types';
 import { FeatureEngine } from '../features/FeatureEngine';
 import { decide, StrategyParams, DEFAULT_STRATEGY_PARAMS } from '../strategies/DecisionEngine';
+import { evaluateCandleCouncil, decideByCouncil, type CouncilVote, type CouncilDecision } from '../strategies/StrategyCouncil';
 
 export interface BacktestEngineConfig {
   symbols: (AssetSymbol | string)[];
@@ -252,7 +253,7 @@ export class BacktestEngine {
     const baseSlippage = this.config.slippage ?? 0.0010; // 10 bps altcoin base (ASSUMPTION)
 
     // Solver selection does not change signal quality; no unsupported confidence bonus.
-    const intervalMs = this.config.candleIntervalMs;
+    const intervalMs = this.config.candleIntervalMs ?? 60 * 60 * 1000;
     const candlesByTimestamp = new Map<AssetSymbol, Map<number, Candle>>();
     for (const rawSymbol of this.config.symbols) {
       const sorted = [...(historicalData.get(rawSymbol) ?? [])].sort((a, b) => a.timestamp - b.timestamp);
@@ -397,6 +398,8 @@ export class BacktestEngine {
       }
 
       // 2. Evaluate Signals via FeatureEngine & DecisionEngine
+      let councilDecision: import('../strategies/StrategyCouncil').CouncilDecision | null = null;
+      let councilVotes: import('../strategies/StrategyCouncil').CouncilVote[] = [];
       for (const rawSymbol of this.config.symbols) {
         const symbol = rawSymbol as AssetSymbol;
         const candles = historicalData.get(rawSymbol);
@@ -430,6 +433,13 @@ export class BacktestEngine {
             ...(customParams || {}),
           },
         });
+
+        // Council evaluation (SHADOW only — does not influence execution)
+        // Use first valid symbol for council tracking
+        if (!councilDecision && candleHistory.length >= 20) {
+          councilVotes = evaluateCandleCouncil(candleHistory, { intervalMs, asOf: timestamp });
+          councilDecision = decideByCouncil(councilVotes);
+        }
 
         // If strong signal and capital is available, execute
         const alreadyOpen = openPositions.some((p) => p.symbol === symbol) || pendingEntries.some((p) => p.symbol === symbol);
@@ -507,6 +517,16 @@ export class BacktestEngine {
         drawdown: Number(currentDrawdownPct.toFixed(2)),
         cash: Number(cashBalance.toFixed(2)),
         holdingsValue: Number(holdingsValue.toFixed(2)),
+        // Council shadow tracking (does not influence execution)
+        councilDecision: councilDecision ? {
+          side: councilDecision.side,
+          votes: councilDecision.votes,
+          confidence: Number(councilDecision.confidence.toFixed(2)),
+          members: councilDecision.members,
+        } : null,
+        councilVotes: councilVotes
+          .filter((v): v is { member: string; side: 'BUY' | 'SELL'; confidence: number } => v.side !== 'ABSTAIN')
+          .map(v => ({ member: v.member, side: v.side, confidence: Number(v.confidence.toFixed(2)) })),
       });
     }
 
@@ -607,6 +627,8 @@ export class BacktestEngine {
       equityCurve,
       trades,
       monthlyReturns,
+      // Council shadow summary (does not influence execution)
+      councilSummary: equityCurve.filter(p => p.councilDecision).map(p => p.councilDecision),
       // Backwards-compatible aliases
       totalReturn: Number(totalReturnPct.toFixed(2)),
       maxDrawdown: Number(maxDrawdownPct.toFixed(2)),
@@ -617,6 +639,7 @@ export class BacktestEngine {
       maxDrawdown: number;
       winRate: number;
       avgTradeDuration: number;
+      councilSummary?: Array<{ side: 'BUY' | 'SELL'; votes: number; confidence: number; members: string[] }>;
     };
   }
 

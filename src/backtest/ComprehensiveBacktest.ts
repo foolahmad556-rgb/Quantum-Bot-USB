@@ -171,7 +171,7 @@ export async function runComprehensiveBacktest(options: ComprehensiveBacktestOpt
     profitFactor: result.profitFactor,
     totalTrades: result.totalTrades,
     totalFeesPaid: result.totalFeesPaid,
-  }, datasetStats: Object.fromEntries([...datasets].map(([symbol, candles]) => [symbol, { count: candles.length, firstTimestamp: candles[0].timestamp, lastTimestamp: candles.at(-1)!.timestamp }])), walkForward, result };
+  }, datasetStats: Object.fromEntries([...datasets].map(([symbol, candles]) => [symbol, { count: candles.length, firstTimestamp: candles[0].timestamp, lastTimestamp: candles.at(-1)!.timestamp }])), walkForward, result, councilSummary: result.councilSummary || [] };
   await mkdir(options.outputDir, { recursive: true });
   const outputPath = join(options.outputDir, `${runIdentity.runId}.json`);
   await writeFile(outputPath, `${JSON.stringify(report, null, 2)}\n`, 'utf8');

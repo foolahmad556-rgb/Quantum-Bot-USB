@@ -252,6 +252,14 @@ export interface EquityPoint {
   drawdown: number;
   cash: number;
   holdingsValue: number;
+  // Council shadow tracking (does not influence execution)
+  councilDecision?: {
+    side: 'BUY' | 'SELL';
+    votes: number;
+    confidence: number;
+    members: string[];
+  } | null;
+  councilVotes?: { member: string; side: 'BUY' | 'SELL'; confidence: number }[];
 }
 
 export interface BacktestResult {
@@ -276,6 +284,8 @@ export interface BacktestResult {
   equityCurve: EquityPoint[];
   trades: Fill[];
   monthlyReturns: { month: string; returnPct: number }[];
+  // Council shadow summary (does not influence execution)
+  councilSummary?: Array<{ side: 'BUY' | 'SELL'; votes: number; confidence: number; members: string[] }>;
 }
 
 export interface WalkForwardWindow {
