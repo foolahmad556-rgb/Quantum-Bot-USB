@@ -242,11 +242,14 @@ export class BacktestEngine {
       takeProfit: number;
       maxHoldMs?: number;
       status: 'OPEN' | 'CLOSED';
+      councilEvaluationId: string;
+      councilReport: NonNullable<Fill['councilReport']>;
     }
 
+    const councilEvaluations: NonNullable<BacktestResult['councilEvaluations']> = [];
     const openPositions: InternalTrade[] = [];
     // Look-ahead fix: a signal computed from bar T's close is queued and filled at bar T+1's open.
-    const pendingEntries: Array<{ symbol: AssetSymbol; isBuy: boolean; stopLoss: number; takeProfit: number; maxHoldMs?: number; quantityRiskPerUnit: number; referencePrice: number }> = [];
+    const pendingEntries: Array<{ symbol: AssetSymbol; isBuy: boolean; stopLoss: number; takeProfit: number; maxHoldMs?: number; quantityRiskPerUnit: number; referencePrice: number; councilEvaluationId: string; councilReport: NonNullable<Fill['councilReport']> }> = [];
 
     // Taker & Maker fee multipliers
     const takerFeeRate = (this.config.takerFeeBps ?? 5.0) / 10000;
@@ -308,6 +311,8 @@ export class BacktestEngine {
         openPositions.push({
           id: tradeId,
           symbol: order.symbol,
+          councilEvaluationId: order.councilEvaluationId,
+          councilReport: order.councilReport,
           side: order.isBuy ? 'BUY' : 'SELL',
           entryPrice,
           entryTime: timestamp,
@@ -328,6 +333,9 @@ export class BacktestEngine {
           commissionAsset: 'USDT',
           timestamp,
           isMaker: false,
+          tradeId,
+          councilEvaluationId: order.councilEvaluationId,
+          councilReport: order.councilReport,
         });
       }
 
@@ -391,6 +399,11 @@ export class BacktestEngine {
             commissionAsset: 'USDT',
             timestamp,
             isMaker: false,
+            tradeId: trade.id,
+            councilEvaluationId: trade.councilEvaluationId,
+            councilReport: trade.councilReport,
+            exitReason: hitSL ? 'STOP_LOSS' : hitTP ? 'TAKE_PROFIT' : 'MAX_HOLD',
+            realizedPnl: tradePnl,
           });
 
           openPositions.splice(i, 1);
@@ -400,6 +413,8 @@ export class BacktestEngine {
       // 2. Evaluate Signals via FeatureEngine & DecisionEngine
       let councilDecision: import('../strategies/StrategyCouncil').CouncilDecision | null = null;
       let councilVotes: import('../strategies/StrategyCouncil').CouncilVote[] = [];
+      let councilEvaluationId: string | null = null;
+      let councilReport: NonNullable<Fill['councilReport']> | null = null;
       for (const rawSymbol of this.config.symbols) {
         const symbol = rawSymbol as AssetSymbol;
         const candles = historicalData.get(rawSymbol);
@@ -434,12 +449,24 @@ export class BacktestEngine {
           },
         });
 
-        // Council evaluation (SHADOW only — does not influence execution)
-        // Use first valid symbol for council tracking
-        if (!councilDecision && candleHistory.length >= 20) {
-          councilVotes = evaluateCandleCouncil(candleHistory, { intervalMs, asOf: timestamp });
-          councilDecision = decideByCouncil(councilVotes);
-        }
+        // Council evaluation is per-symbol and shadow-only; it never changes the strategy signal.
+        councilVotes = evaluateCandleCouncil(candleHistory, { intervalMs, asOf: timestamp });
+        councilDecision = decideByCouncil(councilVotes);
+        councilEvaluationId = `COUNCIL-${symbol}-${timestamp}`;
+        councilReport = {
+          side: councilDecision?.side ?? null,
+          confidence: councilDecision?.confidence ?? 0,
+          votes: councilVotes.map(({ member, side, confidence }) => ({ member, side, confidence })),
+        };
+        councilEvaluations.push({
+          id: councilEvaluationId,
+          symbol,
+          timestamp,
+          decision: councilDecision
+            ? { side: councilDecision.side, votes: councilDecision.votes, confidence: councilDecision.confidence, members: councilDecision.members }
+            : null,
+          votes: councilReport.votes,
+        });
 
         // If strong signal and capital is available, execute
         const alreadyOpen = openPositions.some((p) => p.symbol === symbol) || pendingEntries.some((p) => p.symbol === symbol);
@@ -465,6 +492,8 @@ export class BacktestEngine {
               maxHoldMs: signal.maxHoldMs,
               quantityRiskPerUnit: quantity,
               referencePrice: currentCandle.close,
+              councilEvaluationId: councilEvaluationId!,
+              councilReport: councilReport!,
             });
           }
         }
@@ -527,6 +556,7 @@ export class BacktestEngine {
         councilVotes: councilVotes
           .filter((v): v is { member: string; side: 'BUY' | 'SELL'; confidence: number } => v.side !== 'ABSTAIN')
           .map(v => ({ member: v.member, side: v.side, confidence: Number(v.confidence.toFixed(2)) })),
+        councilEvaluationId: councilEvaluationId ?? undefined,
       });
     }
 
@@ -626,6 +656,7 @@ export class BacktestEngine {
       totalFeesPaid: Number(totalFeesPaid.toFixed(2)),
       equityCurve,
       trades,
+      councilEvaluations,
       monthlyReturns,
       // Council shadow summary (does not influence execution)
       councilSummary: equityCurve.filter(p => p.councilDecision).map(p => p.councilDecision),

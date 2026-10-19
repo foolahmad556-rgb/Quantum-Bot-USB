@@ -99,6 +99,15 @@ export interface Fill {
   timestamp: number;
   isMaker: boolean;
   realizedPnl?: number;
+  /** Backtest-only linkage to source trade and shadow council evaluation. */
+  tradeId?: string;
+  councilEvaluationId?: string;
+  exitReason?: 'STOP_LOSS' | 'TAKE_PROFIT' | 'MAX_HOLD';
+  councilReport?: {
+    side: 'BUY' | 'SELL' | null;
+    confidence: number;
+    votes: { member: string; side: 'BUY' | 'SELL' | 'ABSTAIN'; confidence: number }[];
+  };
 }
 
 export interface Position {
@@ -260,6 +269,7 @@ export interface EquityPoint {
     members: string[];
   } | null;
   councilVotes?: { member: string; side: 'BUY' | 'SELL'; confidence: number }[];
+  councilEvaluationId?: string;
 }
 
 export interface BacktestResult {
@@ -283,6 +293,14 @@ export interface BacktestResult {
   totalFeesPaid: number;
   equityCurve: EquityPoint[];
   trades: Fill[];
+  /** Per-symbol, per-closed-candle shadow council log; never controls execution. */
+  councilEvaluations?: Array<{
+    id: string;
+    symbol: AssetSymbol;
+    timestamp: number;
+    decision: { side: 'BUY' | 'SELL'; votes: number; confidence: number; members: string[] } | null;
+    votes: { member: string; side: 'BUY' | 'SELL' | 'ABSTAIN'; confidence: number }[];
+  }>;
   monthlyReturns: { month: string; returnPct: number }[];
   // Council shadow summary (does not influence execution)
   councilSummary?: Array<{ side: 'BUY' | 'SELL'; votes: number; confidence: number; members: string[] }>;

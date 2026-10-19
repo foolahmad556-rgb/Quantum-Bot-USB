@@ -11,6 +11,13 @@ const candles: Candle[] = Array.from({ length: 100 }, (_, i) => {
 });
 const result = engine.runSync(new Map([['BTC/USDT', candles]]));
 assert.equal(result.equityCurve.length, candles.length);
+assert.ok(Array.isArray(result.councilEvaluations), 'backtest report must expose per-symbol council evaluations');
+assert.ok(result.councilEvaluations!.length > 0, 'council evaluations must be recorded');
+assert.ok(result.councilEvaluations!.every((evaluation) => evaluation.symbol === 'BTC/USDT' && evaluation.votes.length === 4));
+assert.ok(result.trades.filter((fill) => fill.fillId.startsWith('FILL-ENT-')).every((fill) => fill.councilEvaluationId),
+  'each entry fill must reference its symbol-specific council evaluation');
+assert.ok(result.trades.filter((fill) => fill.fillId.startsWith('FILL-EXIT-')).every((fill) => fill.tradeId),
+  'each exit fill must reference its originating trade');
 assert.ok(result.equityCurve.every((point) => Number.isFinite(point.equity) && Number.isFinite(point.cash)));
 assert.ok(Number.isFinite(result.totalFeesPaid) && result.totalFeesPaid >= 0);
 for (const point of result.equityCurve) {
