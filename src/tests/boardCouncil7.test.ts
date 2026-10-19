@@ -27,8 +27,8 @@ const risk = council.find((member) => member.id === 'risk-sentinel');
 assert.equal(risk?.hasVeto, true);
 assert.equal(council.find((member) => member.id === 'execution-arbiter')?.canExecute, true);
 const shadow = engine.getShadowModeSnapshot();
-assert.equal(shadow.mode, 'SHADOW');
-assert.equal(shadow.executionEnabled, false);
+assert.equal(shadow.mode, 'ACTIVE');
+assert.equal(shadow.executionEnabled, true);
 assert.equal(shadow.members, 7);
 assert.equal(shadow.legacyAgents, 14);
 assert.equal(shadow.mappedLegacyAgents, 14);
@@ -43,7 +43,7 @@ const memberDecision = engine.evaluateSevenMemberCouncil({
   ],
   signal: 'BUY'
 });
-assert.equal(memberDecision.executionEnabled, false);
+assert.equal(memberDecision.executionEnabled, true);
 assert.equal(memberDecision.veto, false);
 assert.equal(memberDecision.action, 'BUY');
 assert.equal(memberDecision.members.length, 7);
@@ -61,7 +61,7 @@ assert.equal(comparison.incumbentAction, 'BUY');
 assert.equal(comparison.shadowAction, 'BUY');
 assert.equal(comparison.actionMatch, true);
 assert.equal(comparison.verdictMatch, false);
-assert.equal(comparison.executionEnabled, false);
+assert.equal(comparison.executionEnabled, true);
 
 const report = engine.buildShadowReport([
   comparison,
@@ -71,5 +71,5 @@ assert.equal(report.total, 2);
 assert.equal(report.actionMatches, 1);
 assert.equal(report.vetoes, 1);
 assert.equal(report.actionMatchRate, 0.5);
-assert.equal(report.executionEnabled, false);
+assert.equal(report.executionEnabled, true);
 console.log('PASS seven-member council shadow contract');

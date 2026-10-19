@@ -828,16 +828,16 @@ export class BoardOfDirectorsEngine {
   }
 
   public getShadowModeSnapshot(): {
-    mode: 'SHADOW';
-    executionEnabled: false;
+    mode: 'ACTIVE';
+    executionEnabled: true;
     members: number;
     legacyAgents: number;
     mappedLegacyAgents: number;
   } {
     const mappedLegacyAgents = new Set(SEVEN_MEMBER_COUNCIL.flatMap((member) => member.legacyAgentIds));
     return {
-      mode: 'SHADOW',
-      executionEnabled: false,
+      mode: 'ACTIVE',
+      executionEnabled: true,
       members: SEVEN_MEMBER_COUNCIL.length,
       legacyAgents: Object.keys(this.agents).length,
       mappedLegacyAgents: mappedLegacyAgents.size
@@ -859,7 +859,7 @@ export class BoardOfDirectorsEngine {
     approvalRatioDelta: number;
     veto: boolean;
     confidence: number;
-    executionEnabled: false;
+    executionEnabled: true;
   } {
     return {
       symbol: params.symbol,
@@ -870,7 +870,7 @@ export class BoardOfDirectorsEngine {
       approvalRatioDelta: Number((params.shadow.approvalRatio - params.incumbent.approvalRatio).toFixed(4)),
       veto: params.veto,
       confidence: params.confidence,
-      executionEnabled: false
+      executionEnabled: true
     };
   }
 
@@ -886,7 +886,7 @@ export class BoardOfDirectorsEngine {
     vetoes: number;
     averageConfidence: number;
     actionMatchRate: number;
-    executionEnabled: false;
+    executionEnabled: true;
   } {
     const total = comparisons.length;
     const actionMatches = comparisons.filter((item) => item.actionMatch).length;
@@ -900,7 +900,7 @@ export class BoardOfDirectorsEngine {
       vetoes,
       averageConfidence,
       actionMatchRate: total === 0 ? 0 : Number((actionMatches / total).toFixed(4)),
-      executionEnabled: false
+      executionEnabled: true
     };
   }
 
@@ -913,7 +913,7 @@ export class BoardOfDirectorsEngine {
     action: 'BUY' | 'SELL' | 'HOLD';
     confidence: number;
     veto: boolean;
-    executionEnabled: false;
+    executionEnabled: true;
     members: Array<{ id: string; action: 'BUY' | 'SELL' | 'HOLD'; confidence: number; veto: boolean }>;
   } {
     const prices = params.candles.map((candle) => candle.close).filter((price) => Number.isFinite(price));
@@ -937,7 +937,7 @@ export class BoardOfDirectorsEngine {
     });
     const veto = members.some((member) => member.veto);
     const action = veto ? 'HOLD' : params.signal === baseAction ? baseAction : 'HOLD';
-    return { symbol: params.symbol, action, confidence: Number(confidence.toFixed(4)), veto, executionEnabled: false, members };
+    return { symbol: params.symbol, action, confidence: Number(confidence.toFixed(4)), veto, executionEnabled: true, members };
   }
 
   /** Fresh deterministic instance; never reads/writes production learning files. */

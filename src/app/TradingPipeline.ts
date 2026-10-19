@@ -1,5 +1,5 @@
 import { BoardOfDirectorsEngine, BoardMeetingDecision } from '../strategies/BoardOfDirectorsEngine';
-import { decideByCouncil } from '../strategies/StrategyCouncil';
+import { decideByCouncil, evaluateCandleCouncil } from '../strategies/StrategyCouncil';
 /**
  * Basel Quantum Algorithmic Trading System
  * Master Unified Trading Pipeline Orchestrator
@@ -58,6 +58,13 @@ import { StrategyManager } from '../strategies/StrategyManager';
 import { SystemWatchdog, WatchdogStatus } from '../monitoring/SystemWatchdog';
 import { BotStrategy, StrategyScreenerItem } from '../domain/types';
 import fs from 'fs';
+
+/** Apply a council size decision without ever increasing the risk-sized quantity. */
+export function applyBoardSizeMultiplier(quantity: number, multiplier: number): number {
+  if (!Number.isFinite(quantity) || quantity <= 0) return 0;
+  if (!Number.isFinite(multiplier) || multiplier <= 0) return 0;
+  return Number((quantity * Math.min(1, multiplier)).toFixed(4));
+}
 
 export class TradingPipeline {
   private assetScreener: AssetScreener;
@@ -870,14 +877,14 @@ export class TradingPipeline {
     const signalType = sig.type as 'BUY' | 'SELL';
     const strength = sig.strength;
 
-    // Shadow-only council observer: only incumbent source available here; all other roles abstain.
-    // Its output is deliberately never used by the incumbent gate or order path.
-    const councilShadow = decideByCouncil([
-      { member: 'incumbent-signal', side: signalType, confidence: strength },
-      { member: 'independent-strategy-1', side: 'ABSTAIN', confidence: 0 },
-      { member: 'independent-strategy-2', side: 'ABSTAIN', confidence: 0 },
-    ]);
-    this.eventJournal.record('INFO', 'STRATEGY', `[STRATEGY_COUNCIL_SHADOW] ${symbol} decision=${councilShadow?.side ?? 'ABSTAIN'} votes=${councilShadow?.votes ?? 0} executionEnabled=false`);
+    // StrategyCouncil is an execution gate: only closed, contiguous candles may vote.
+    const councilVotes = evaluateCandleCouncil(candles, { intervalMs: 60_000, asOf: Date.now() });
+    const strategyCouncil = decideByCouncil(councilVotes, { quorum: 2, minimumConfidence: 0.52 });
+    this.eventJournal.record('INFO', 'STRATEGY', `[STRATEGY_COUNCIL] ${symbol} decision=${strategyCouncil?.side ?? 'ABSTAIN'} votes=${strategyCouncil?.votes ?? 0} executionEnabled=true`);
+    if (!strategyCouncil || strategyCouncil.side !== signalType) {
+      this.eventJournal.record('WARN', 'STRATEGY', `[STRATEGY_COUNCIL_REJECTED] ${symbol} signal=${signalType} consensus=${strategyCouncil?.side ?? 'ABSTAIN'}`);
+      return;
+    }
 
     // 🏛️ Board of Directors v6.0 Evaluation (6 Decision Makers + 8 Anti-Overfitting Guards)
     const candlesMap: Record<string, any> = {};
@@ -895,33 +902,38 @@ export class TradingPipeline {
       latencyMs: 15
     });
 
-    // Seven-member council runs in SHADOW mode: observe same signal, never execute.
-    const shadowSnapshot = this.boardOfDirectors.getShadowModeSnapshot();
-    const shadowDecision = this.boardOfDirectors.evaluateSevenMemberCouncil({
+    // Seven-member council is an execution gate before the deeper 14-agent board.
+    const councilSnapshot = this.boardOfDirectors.getShadowModeSnapshot();
+    const sevenMemberDecision = this.boardOfDirectors.evaluateSevenMemberCouncil({
       symbol,
       candles,
       signal: signalType
     });
-    const shadowComparison = this.boardOfDirectors.compareShadowDecision({
+    if (!sevenMemberDecision.executionEnabled || sevenMemberDecision.veto ||
+        sevenMemberDecision.action !== signalType || sevenMemberDecision.confidence < 0.5) {
+      this.eventJournal.record('WARN', 'STRATEGY', `[SEVEN_MEMBER_COUNCIL_REJECTED] ${symbol} signal=${signalType} action=${sevenMemberDecision.action} confidence=${sevenMemberDecision.confidence} veto=${sevenMemberDecision.veto}`);
+      return;
+    }
+    const councilComparison = this.boardOfDirectors.compareShadowDecision({
       symbol,
       incumbent: { verdict: boardDecision.verdict, action: boardDecision.action, approvalRatio: boardDecision.approvalRatio },
       shadow: {
-        verdict: shadowDecision.veto ? 'REJECTED' : shadowDecision.action === 'HOLD' ? 'CONDITIONAL' : 'APPROVED',
-        action: shadowDecision.action,
-        approvalRatio: shadowDecision.confidence
+        verdict: sevenMemberDecision.veto ? 'REJECTED' : 'APPROVED',
+        action: sevenMemberDecision.action,
+        approvalRatio: sevenMemberDecision.confidence
       },
-      veto: shadowDecision.veto,
-      confidence: shadowDecision.confidence
+      veto: sevenMemberDecision.veto,
+      confidence: sevenMemberDecision.confidence
     });
     this.eventJournal.record(
       'INFO',
       'STRATEGY',
-      `[COUNCIL_SHADOW] ${symbol} incumbent=${shadowComparison.incumbentAction} shadow=${shadowComparison.shadowAction} actionMatch=${shadowComparison.actionMatch} verdictMatch=${shadowComparison.verdictMatch} ratioDelta=${shadowComparison.approvalRatioDelta} mode=${shadowSnapshot.mode} members=${shadowSnapshot.members} mappedLegacy=${shadowSnapshot.mappedLegacyAgents} executionEnabled=${shadowComparison.executionEnabled}`
+      `[SEVEN_MEMBER_COUNCIL] ${symbol} incumbent=${councilComparison.incumbentAction} council=${councilComparison.shadowAction} actionMatch=${councilComparison.actionMatch} verdictMatch=${councilComparison.verdictMatch} ratioDelta=${councilComparison.approvalRatioDelta} mode=${councilSnapshot.mode} members=${councilSnapshot.members} mappedLegacy=${councilSnapshot.mappedLegacyAgents} executionEnabled=${councilComparison.executionEnabled}`
     );
-    const saveShadowComparison = (this.db as DatabaseService & { saveShadowComparison?: (value: unknown) => Promise<void> }).saveShadowComparison;
-    if (saveShadowComparison && this.shadowComparisonThrottle.shouldPersist(symbol, Date.now())) {
-      void saveShadowComparison.call(this.db, { ...shadowComparison, mode: shadowSnapshot.mode, members: shadowSnapshot.members, mappedLegacyAgents: shadowSnapshot.mappedLegacyAgents, createdAt: Date.now() }).catch(() => {
-        /* Shadow persistence must never alter incumbent trading path. */
+    const saveCouncilComparison = (this.db as DatabaseService & { saveShadowComparison?: (value: unknown) => Promise<void> }).saveShadowComparison;
+    if (saveCouncilComparison && this.shadowComparisonThrottle.shouldPersist(symbol, Date.now())) {
+      void saveCouncilComparison.call(this.db, { ...councilComparison, mode: councilSnapshot.mode, members: councilSnapshot.members, mappedLegacyAgents: councilSnapshot.mappedLegacyAgents, createdAt: Date.now() }).catch(() => {
+        /* Observability persistence must never alter the already-approved path. */
       });
     }
 
@@ -976,6 +988,8 @@ export class TradingPipeline {
       const warmupMul = this.dynamicRiskManager.getWarmupMultiplier(this.eventJournal.getEvents().length);
       const regimeMul = regime?.sizeMultiplier ?? 1;
       qty = Number((qty * multipliers.positionSize * warmupMul * regimeMul).toFixed(4));
+      // CONDITIONAL board approval is a real risk decision, not telemetry.
+      qty = applyBoardSizeMultiplier(qty, boardDecision.sizeMultiplier);
 
       // Minimum-notional handling. The old code raised ANY undersized order to ~$5.5, which silently
       // cancelled every risk reduction applied above (dynamic risk, regime, warm-up, correlation).
