@@ -8,3 +8,7 @@ database_name = "quantum-bot-d1"
 database_id = "47f2c6fa-1604-4d2a-9145-13a184fd02c3"
 
 migrations_dir = "migrations"
+
+[vars]
+# Backend used by the Telegram status ingress; secrets remain in Worker secrets.
+BOTKEEP_URL = "https://5uq4nr.bot-keep.xyz"
