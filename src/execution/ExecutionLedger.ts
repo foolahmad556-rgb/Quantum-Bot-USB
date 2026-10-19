@@ -59,7 +59,10 @@ export function totalFillQuantity(fills: ExecutionLedgerFill[]): number {
 }
 
 export function totalCommission(fills: ExecutionLedgerFill[]): number {
-  return fills.reduce((sum, fill) => sum + (Number.isFinite(fill.commission) && fill.commission > 0 ? fill.commission : 0), 0);
+  return fills.reduce((sum, fill) => {
+    const quoteCommission = fill.commissionAsset === 'USDT' || fill.commissionAsset === 'USDC';
+    return sum + (quoteCommission && Number.isFinite(fill.commission) && fill.commission > 0 ? fill.commission : 0);
+  }, 0);
 }
 
 /** Allocate an exit fill stream to one open trade, preserving fee proportionality. */
