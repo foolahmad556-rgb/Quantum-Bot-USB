@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import { once } from 'node:events';
+import { pathToFileURL } from 'node:url';
 import { mkdtemp, mkdir, writeFile, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -14,7 +15,7 @@ const jwt = randomBytes(48).toString('hex'), operator = randomBytes(32).toString
 await mkdir(path.join(temp, 'dist/assets'), { recursive: true });
 await writeFile(path.join(temp, 'dist/index.html'), '<html>test UI</html>');
 for (const file of ['users.db', 'server.cjs', 'server.cjs.map']) await writeFile(path.join(temp,'dist',file), 'must remain private');
-const child = spawn(process.execPath, ['--import', path.join(root,'node_modules/tsx/dist/loader.mjs'), path.join(root,'server.ts')], {
+const child = spawn(process.execPath, ['--import', pathToFileURL(path.join(root,'node_modules/tsx/dist/loader.mjs')).href, path.join(root,'server.ts')], {
   cwd: temp, env: { ...process.env, PORT: String(port), HOST: '127.0.0.1', JWT_SECRET: jwt, OPERATOR_SECRET: operator,
     ADMIN_EMAILS: 'operator@example.invalid', EXECUTION_MODE: 'PAPER', AUTO_START_TRADING: 'false', AUTOSTART_TRADING: 'false',
     D1_API_URL: '', D1_API_SECRET: '', STORAGE_BACKEND: '', AUTH_DB_PATH: path.join(temp,'auth/users.db'), FRONTEND_DIST_DIR: path.join(temp,'dist'),
