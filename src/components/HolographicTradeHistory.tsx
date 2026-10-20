@@ -6,6 +6,7 @@
  */
 
 import React, { useEffect, useState } from 'react';
+import { fetchWithAuth } from '../lib/api.ts';
 import {
   History,
   RefreshCw,
@@ -76,35 +77,31 @@ export const HolographicTradeHistory: React.FC<HolographicTradeHistoryProps> = (
     setIsLoading(true);
     setError(null);
     try {
-      const [orderRes, statusRes] = await Promise.all([
-        fetch('/api/protected/order-history'),
-        fetch('/api/live-status'),
+      const [ordersResult, statusResult] = await Promise.allSettled([
+        fetchWithAuth('/api/protected/order-history'),
+        fetchWithAuth('/api/live-status'),
       ]);
 
-      if (orderRes.ok) {
-        const orderText = await orderRes.text();
-        if (orderText) {
-          const orderData = JSON.parse(orderText);
-          if (orderData.success && Array.isArray(orderData.orders)) {
-            setOrders(orderData.orders);
-          } else if (Array.isArray(orderData)) {
-            setOrders(orderData);
-          }
-        }
+      if (ordersResult.status === 'fulfilled') {
+        const orderData = ordersResult.value;
+        const nextOrders = Array.isArray(orderData?.orders)
+          ? orderData.orders
+          : Array.isArray(orderData) ? orderData : null;
+        if (nextOrders) setOrders(nextOrders);
+      } else {
+        throw ordersResult.reason;
       }
 
-      if (statusRes.ok) {
-        const statusText = await statusRes.text();
-        if (statusText) {
-          const statusData = JSON.parse(statusText);
-          if (Array.isArray(statusData.positions)) {
-            setPositions(statusData.positions);
-            // If positions exist and user hasn't explicitly chosen orders, default to positions
-            if (statusData.positions.length > 0 && orders.length === 0) {
-              setViewTab('positions');
-            }
+      if (statusResult.status === 'fulfilled') {
+        const statusData = statusResult.value;
+        if (Array.isArray(statusData?.positions)) {
+          setPositions(statusData.positions);
+          if (statusData.positions.length > 0 && orders.length === 0) {
+            setViewTab('positions');
           }
         }
+      } else {
+        throw statusResult.reason;
       }
 
       setLastUpdated(new Date().toLocaleTimeString());

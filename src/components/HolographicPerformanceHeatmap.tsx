@@ -10,6 +10,7 @@
  */
 
 import React, { useState, useMemo, useEffect } from 'react';
+import { fetchWithAuth } from '../lib/api.ts';
 import {
   Flame,
   TrendingUp,
@@ -92,31 +93,26 @@ export const HolographicPerformanceHeatmap: React.FC<HolographicPerformanceHeatm
   const fetchOrderHistory = async () => {
     setIsLoading(true);
     try {
-      const [orderRes, statusRes] = await Promise.all([
-        fetch('/api/protected/order-history'),
-        fetch('/api/live-status')
+      const [ordersResult, statusResult] = await Promise.allSettled([
+        fetchWithAuth('/api/protected/order-history'),
+        fetchWithAuth('/api/live-status'),
       ]);
 
-      if (orderRes.ok) {
-        const orderText = await orderRes.text();
-        if (orderText) {
-          const orderData = JSON.parse(orderText);
-          if (orderData.success && Array.isArray(orderData.orders)) {
-            setOrders(orderData.orders);
-          } else if (Array.isArray(orderData)) {
-            setOrders(orderData);
-          }
-        }
+      if (ordersResult.status === 'fulfilled') {
+        const orderData = ordersResult.value;
+        const nextOrders = Array.isArray(orderData?.orders)
+          ? orderData.orders
+          : Array.isArray(orderData) ? orderData : null;
+        if (nextOrders) setOrders(nextOrders);
+      } else {
+        throw ordersResult.reason;
       }
 
-      if (statusRes.ok) {
-        const statusText = await statusRes.text();
-        if (statusText) {
-          const statusData = JSON.parse(statusText);
-          if (Array.isArray(statusData.positions)) {
-            setPositions(statusData.positions);
-          }
-        }
+      if (statusResult.status === 'fulfilled') {
+        const statusData = statusResult.value;
+        if (Array.isArray(statusData?.positions)) setPositions(statusData.positions);
+      } else {
+        throw statusResult.reason;
       }
     } catch (err) {
       console.warn('Heatmap history fetch notice:', err);
