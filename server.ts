@@ -255,7 +255,7 @@ function persistOrder(order: any): Promise<unknown> {
   return write;
 }
 pipeline.getOrderGateway().subscribeOrders((order: any) => {
-  if (!cloudDb || order.strategyId !== 'MANUAL_UI') return;
+  if (!cloudDb) return;
   void persistOrder(order).catch(() => {});
 });
 
