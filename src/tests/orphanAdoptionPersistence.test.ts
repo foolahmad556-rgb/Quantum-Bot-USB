@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { TradingPipeline } from '../app/TradingPipeline';
 import { PartialProfitManager } from '../execution/PartialProfitManager';
 const trades = new Map<string, any>();
-const partial = new PartialProfitManager();
+const partial = new PartialProfitManager({} as any);
 const pipeline: any = Object.create(TradingPipeline.prototype);
 let alerts = 0;
 Object.assign(pipeline, {
