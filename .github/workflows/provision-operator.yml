@@ -1,0 +1,26 @@
+name: Provision operator
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  provision:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      - name: Provision operator
+        run: npx tsx scripts/provision-operator.ts
+        env:
+          API_BASE_URL: https://5uq4nr.bot-keep.xyz
+          OPERATOR_SECRET: ${{ secrets.OPERATOR_SECRET }}
+          USER_EMAIL: ${{ secrets.USER_EMAIL }}
+          USER_PASSWORD: ${{ secrets.USER_PASSWORD }}
