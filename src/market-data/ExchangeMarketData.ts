@@ -280,10 +280,9 @@ export class ExchangeMarketData extends EventEmitter {
   }
 
   public async fetchLiveRestPrices(): Promise<void> {
-    const urls = [
-      'https://fapi.binance.com/fapi/v1/ticker/price',
-      'https://api.binance.com/api/v3/ticker/price'
-    ];
+    const baseUrl = this.executionMode === 'TESTNET' ? 'https://testnet.binancefuture.com' : 'https://fapi.binance.com';
+    const urls = [`${baseUrl}/fapi/v1/ticker/price`];
+    // Futures price feed only: never fall back to Spot market.
 
     for (const url of urls) {
       try {

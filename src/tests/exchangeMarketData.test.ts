@@ -14,6 +14,11 @@ assert.doesNotMatch(source, /fetchOrderBookSnapshots\(\)\.catch/);
 assert.doesNotMatch(source, /setInterval\(\(\) => \{\s*this\.fetchOrderBookSnapshots/);
 assert.doesNotMatch(source, /connectSpotWs\(/);
 assert.match(source, /fstream\.binancefuture\.com/);
+assert.match(source, /testnet\.binancefuture\.com/);
+assert.match(source, /\$\{baseUrl\}\/fapi\/v1\/ticker\/price/);
+assert.match(source, /\$\{baseUrl\}\/fapi\/v1\/klines/);
+assert.doesNotMatch(source, /api\.binance\.com\/api\/v3\/ticker\/price/);
+assert.doesNotMatch(source, /https:\/\/fapi\.binance\.com\/fapi\/v1\/ticker\/price/);
 
 const marketData = new ExchangeMarketData(undefined, ['BTC/USDT', 'ETH/USDT'] as AssetSymbol[]);
 const oldFetch = globalThis.fetch;

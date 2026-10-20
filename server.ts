@@ -485,8 +485,11 @@ app.post('/api/protected/trading/stop', requireAuth, async (_req: Request, res: 
 app.get('/api/binance/tickers', requireAuth, async (req: Request, res: Response) => {
   try {
     const symbols = typeof req.query.symbols === 'string' ? req.query.symbols.split(',') : null;
-    const r = await fetch('https://api.binance.com/api/v3/ticker/24hr');
-    if (!r.ok) throw new Error(`Binance ${r.status}`);
+    const baseUrl = String(process.env.EXECUTION_MODE || '').toUpperCase() === 'TESTNET'
+      ? 'https://testnet.binancefuture.com'
+      : 'https://fapi.binance.com';
+    const r = await fetch(`${baseUrl}/fapi/v1/ticker/24hr`);
+    if (!r.ok) throw new Error(`Binance Futures ${r.status}`);
     const all: any[] = await r.json();
     const filtered = symbols ? all.filter((t: any) => symbols.includes(t.symbol)) : all;
     res.json({ success: true, tickers: filtered.slice(0, 200) });
