@@ -31,7 +31,7 @@ export class HybridReconciliationManager {
 
     this.wsManager.on('fallback', async () => {
       console.warn(`⚠️ WebSocket unreliable - falling back to REST polling`);
-      await this.triggerRestFallback();
+      await this.triggerRestFallback().catch(error => console.warn(`Reconciliation unavailable: ${error.message}`));
     });
 
     this.wsManager.on('account', (data: AccountData) => {
@@ -49,7 +49,7 @@ export class HybridReconciliationManager {
       await this.wsManager.connect();
     } catch (e: any) {
       console.error(`❌ Hybrid startup failed: ${e.message}`);
-      await this.triggerRestFallback();
+      await this.triggerRestFallback().catch(error => console.warn(`Reconciliation unavailable: ${error.message}`));
     }
   }
 
@@ -105,6 +105,7 @@ export class HybridReconciliationManager {
     try {
       console.log(`🔄 [REST Fallback] Fetching from Binance API...`);
 
+      this.lastRestFallback = Date.now();
       const timestamp = Date.now();
       const query = new URLSearchParams({
         recvWindow: '5000',
@@ -180,7 +181,7 @@ export class HybridReconciliationManager {
 
   private async triggerRestFallback(): Promise<void> {
     const now = Date.now();
-    if (now - this.lastRestFallback > 10000) { // At least 10s since last attempt
+    if (now - this.lastRestFallback > this.restFallbackInterval) { // At least 10s since last attempt
       await this.restFallback();
     }
   }

@@ -341,7 +341,7 @@ export class TradingPipeline {
             if (insufficientHistory.length > 0) {
               console.warn(`⚠️ Insufficient candle history (<100 candles) for: ${insufficientHistory.join(', ')}`);
             }
-            this.marketData.startStreaming(300, this.config.activeSymbols);
+            this.marketData.startStreaming(300, [...new Set([...this.config.activeSymbols, ...this.userDataStream.getPositions().map(p => p.symbol)])]);
 
       // 3. Start Optimization
       this.runQuantumOptimization();
@@ -401,7 +401,8 @@ export class TradingPipeline {
           const report = this.partialProfitManager.getReport();
           if (report && report.positions) {
             for (const pos of report.positions) {
-              const currentPrice = this.marketData.getPrice(pos.symbol);
+              const currentPrice = this.marketData.getFreshPrice(pos.symbol);
+              if (currentPrice === undefined) continue;
               if (currentPrice > 0) {
                 await this.partialProfitManager.updatePosition(pos.symbol, currentPrice);
               }
@@ -410,11 +411,17 @@ export class TradingPipeline {
 
           // 2. Active Exchange Positions Direct Supervisor & Live Sub-Wallet Floating PnL Sync
           const openPositions = this.userDataStream.getPositions();
+          this.marketData.ensureSymbols(openPositions.map(p => p.symbol));
           let totalUnrealizedPnl = 0;
           let totalUsedMargin = 0;
 
           for (const pos of openPositions) {
-            const currentPrice = this.marketData.getPrice(pos.symbol) || pos.currentPrice;
+            const currentPrice = this.marketData.getFreshPrice(pos.symbol);
+            if (currentPrice === undefined) {
+              totalUnrealizedPnl += pos.unrealizedPnl || 0;
+              totalUsedMargin += pos.marginUsed || 0;
+              continue;
+            }
             if (currentPrice > 0 && pos.entryPrice > 0) {
               const isLong = pos.size > 0;
               const pnl = isLong ? (currentPrice - pos.entryPrice) * pos.size : (pos.entryPrice - currentPrice) * Math.abs(pos.size);
@@ -1424,8 +1431,9 @@ export class TradingPipeline {
               const formattedSymbol = `${baseAsset}/USDT` as AssetSymbol;
               const side = posAmt > 0 ? 'BUY' : 'SELL';
               const qty = Math.abs(posAmt);
-              const entryPrice = typeof p.entryPrice === 'string' ? parseFloat(p.entryPrice) : (p.entryPrice || (this.marketData.getPrice(formattedSymbol) || 1));
-              const currentPrice = typeof p.markPrice === 'string' ? parseFloat(p.markPrice) : (p.markPrice || (this.marketData.getPrice(formattedSymbol) || entryPrice));
+              const entryPrice = Number(p.entryPrice);
+              const currentPrice = Number(p.markPrice) || this.marketData.getFreshPrice(formattedSymbol) || 0;
+              if (!Number.isFinite(entryPrice) || entryPrice <= 0) continue;
               const orphanOrderId = `ADOPTED-${Date.now().toString(36)}-${rawSymbol}`;
 
               console.log(`🛡️ Orphan Position Detected for ${rawSymbol} (${side} ${qty} @ $${entryPrice}). Adopting under algorithmic management...`);
@@ -1771,7 +1779,7 @@ export class TradingPipeline {
       this.config.activeSymbols.push(formatted);
       try {
         await this.marketData.backfillRealCandles([formatted]);
-        this.marketData.startStreaming(300, this.config.activeSymbols);
+        this.marketData.startStreaming(300, [...new Set([...this.config.activeSymbols, ...this.userDataStream.getPositions().map(p => p.symbol)])]);
       } catch (err) {
         console.warn(`⚠️ Added symbol streaming notice for ${formatted}:`, err);
       }

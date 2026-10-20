@@ -118,8 +118,9 @@ export class AssetScreener {
         const symbol = this.toAssetSymbol(symbolInfo.symbol);
         const ticker = tickerData.find((t: any) => t.symbol === symbolInfo.symbol);
 
-        if (!ticker || !['quoteVolume', 'priceChangePercent', 'highPrice', 'lowPrice', 'bidPrice', 'askPrice']
-          .every((key) => Number.isFinite(Number(ticker[key])) && Number(ticker[key]) > 0)) continue;
+        if (!ticker || !['quoteVolume', 'highPrice', 'lowPrice']
+          .every((key) => Number.isFinite(Number(ticker[key])) && Number(ticker[key]) > 0)
+          || ticker.priceChangePercent == null || !Number.isFinite(Number(ticker.priceChangePercent))) continue;
 
         // Require observed book depth; ticker volume cannot stand in for order-book liquidity.
         let depth: { bidDepth: number; askDepth: number; spread: number };

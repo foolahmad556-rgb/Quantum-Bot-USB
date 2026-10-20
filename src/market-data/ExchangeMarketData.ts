@@ -176,6 +176,17 @@ export class ExchangeMarketData extends EventEmitter {
     return price;
   }
 
+  public getFreshPrice(symbol: AssetSymbol, maxAgeMs = 30_000): number | undefined {
+    const price = this.currentPrices.get(symbol);
+    const updatedAt = this.lastUpdateTimes.get(symbol);
+    return price && Number.isFinite(price) && updatedAt && Date.now() - updatedAt <= maxAgeMs ? price : undefined;
+  }
+
+  public ensureSymbols(symbols: AssetSymbol[]): void {
+    const combined = [...new Set([...this.activeCryptoSymbols, ...symbols])];
+    if (combined.length !== this.activeCryptoSymbols.length) this.startStreaming(300, combined);
+  }
+
   public getLastUpdateTime(symbol: AssetSymbol): number {
     return this.lastUpdateTimes.get(symbol) || 0;
   }
