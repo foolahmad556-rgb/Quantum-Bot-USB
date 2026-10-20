@@ -8,6 +8,7 @@ export interface TradeRecord {
     timestamp: number;
     symbol: string;
     side: 'BUY' | 'SELL';
+    positionSide?: 'BOTH' | 'LONG' | 'SHORT';
     quantity: number;
     price: number;
     strategy: string;

@@ -1450,6 +1450,14 @@ export class TradingPipeline {
 
               // تسجيل الصفقة اليتيمة في قاعدة البيانات
               // 🔥 Record orphan position to DurableStateManager (HOT)
+              // Persist adoption in the same store queried by the next reconciliation.
+              // Without this record every snapshot treats the same position as new.
+              await this.db.saveTrade({
+                id: orphanOrderId, timestamp: Date.now(), symbol: formattedSymbol,
+                side, quantity: qty, price: entryPrice, strategy: 'Exchange Reconciliation', status: 'OPEN',
+                positionSide: p.positionSide === 'LONG' || p.positionSide === 'SHORT' ? p.positionSide : 'BOTH',
+              });
+              knownDbSymbols.add(`${rawSymbol}:${p.positionSide || 'BOTH'}`);
               durableStateManager.recordTrade({
                 id: orphanOrderId,
                 symbol: formattedSymbol,
