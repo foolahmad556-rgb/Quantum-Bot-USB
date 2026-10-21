@@ -68,13 +68,13 @@ export const RiskEngineView: React.FC<RiskEngineViewProps> = ({
       >
         {/* Background Scanline for Banner */}
         <div className="absolute inset-0 quantum-scanline opacity-10 pointer-events-none" />
-        
+
         <div className="flex flex-col lg:flex-row items-center justify-between gap-8 relative z-10">
           <div className="flex items-center gap-6">
             <div
               className={`p-5 rounded-3xl ${
-                metrics.killSwitchActive 
-                  ? 'bg-rose-600 text-white shadow-[0_0_30px_rgba(244,63,94,0.5)]' 
+                metrics.killSwitchActive
+                  ? 'bg-rose-600 text-white shadow-[0_0_30px_rgba(244,63,94,0.5)]'
                   : 'bg-cyan-500/10 text-cyan-400 border border-cyan-500/20 shadow-[0_0_20px_rgba(6,182,212,0.1)]'
               }`}
             >
@@ -91,13 +91,31 @@ export const RiskEngineView: React.FC<RiskEngineViewProps> = ({
                   {metrics.killSwitchLevel}
                 </div>
               </div>
-              <p className="text-sm font-medium text-slate-400">
-                {metrics.killSwitchActive
-                  ? `${isAr ? 'تم تفعيل الحظر بسبب:' : 'CRITICAL_HALT_REASON:'} ${metrics.killSwitchReason}`
-                  : isAr
-                  ? 'الأنظمة تعمل بكفاءة كاملة - المعايير ضمن النطاق الكمي'
-                  : 'SYSTEMS_OPERATIONAL - RISK_VECTORS_WITHIN_NOMINAL_TOLERANCE'}
-              </p>
+              {metrics.killSwitchActive && metrics.killSwitchLevel === 'HARD_HALT' && metrics.killSwitchReason?.includes('Real-time market data stale') ? (
+                <div role="alert" className="mt-3 max-w-2xl rounded-2xl border border-rose-400/30 bg-rose-950/40 p-4 text-sm text-rose-100 shadow-inner shadow-rose-950/40">
+                  <div className="flex flex-wrap items-center gap-2 font-black">
+                    <span aria-hidden="true">🛡️</span>
+                    <span>{isAr ? 'درع الطوارئ مفعّل — الدخول الجديد متوقف' : 'EMERGENCY SHIELD ACTIVE — NEW ENTRIES BLOCKED'}</span>
+                    <span className="rounded-md border border-rose-300/30 bg-rose-500/15 px-2 py-0.5 font-mono text-[10px] tracking-wider">HARD_HALT</span>
+                  </div>
+                  <p className="mt-2 text-xs leading-6 text-rose-100/80">
+                    <span className="font-bold text-rose-200">{isAr ? 'السبب:' : 'Reason:'}</span>{' '}
+                    {metrics.killSwitchReason}
+                  </p>
+                  <div className="mt-2 flex flex-wrap items-center gap-2 text-[10px] font-bold tracking-wide text-rose-200/70">
+                    <span>{isAr ? 'المصدر' : 'SOURCE'}</span>
+                    <span className="rounded-md border border-rose-300/20 bg-black/20 px-2 py-1 font-mono">HEALTH_HEARTBEAT_LOSS</span>
+                  </div>
+                </div>
+              ) : (
+                <p className="text-sm font-medium text-slate-400">
+                  {metrics.killSwitchActive
+                    ? `${isAr ? 'تم تفعيل الحظر بسبب:' : 'CRITICAL_HALT_REASON:'} ${metrics.killSwitchReason}`
+                    : isAr
+                    ? 'الأنظمة تعمل بكفاءة كاملة - المعايير ضمن النطاق الكمي'
+                    : 'SYSTEMS_OPERATIONAL - RISK_VECTORS_WITHIN_NOMINAL_TOLERANCE'}
+                </p>
+              )}
             </div>
           </div>
 
@@ -145,7 +163,7 @@ export const RiskEngineView: React.FC<RiskEngineViewProps> = ({
               <span className="text-rose-400">{limits.maxDrawdownPct}%</span>
             </div>
             <div className="h-1.5 bg-slate-900 rounded-full overflow-hidden">
-              <div 
+              <div
                 className={`h-full transition-all duration-1000 ${ddProgress > 80 ? 'bg-rose-500 shadow-[0_0_10px_rgba(244,63,94,0.5)]' : 'bg-cyan-500'}`}
                 style={{ width: `${ddProgress}%` }}
               />

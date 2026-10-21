@@ -207,16 +207,22 @@ export class TradingPipeline {
       if (this.killSwitch.isActive()) {
         return { allowed: false, reason: `New entry blocked by Kill Switch (${this.killSwitch.getLevel()})` };
       }
-      if (this.runtimeSafetyGuard && Date.now() - this.marketData.getLastUpdateTime(order.symbol) > 15000) {
-        return { allowed: false, reason: 'Market data stale; entry rejected' };
+      if (!this.marketData.isEntryMarketDataFresh(order.symbol)) {
+        const reason = 'stale market data for symbol; live aggTrade and depth required';
+        console.warn(`⛔ ${reason}: ${order.symbol}`);
+        return { allowed: false, reason };
       }
       const marketPrice = this.marketData.getPrice(order.symbol);
       if (!Number.isFinite(marketPrice) || marketPrice <= 0) {
         return { allowed: false, reason: 'No valid market price available for pre-trade risk check' };
       }
-      const book = this.orderBookBuilder.getBook(order.symbol);
-      if (!book || !Number.isFinite(book.midPrice) || book.midPrice <= 0 || !book.asks?.[0] || !book.bids?.[0]) {
-        return { allowed: false, reason: 'Order book unavailable; entry rejected' };
+      const book = this.marketData.getFreshOrderBook(order.symbol);
+      if (!book || !Number.isFinite(book.midPrice) || book.midPrice <= 0 || !book.asks?.[0] || !book.bids?.[0]
+        || !Number.isFinite(book.asks[0].price) || book.asks[0].price <= 0
+        || !Number.isFinite(book.bids[0].price) || book.bids[0].price <= 0) {
+        const reason = 'stale market data for symbol; fresh real order book required';
+        console.warn(`⛔ ${reason}: ${order.symbol}`);
+        return { allowed: false, reason };
       }
       const spreadPct = ((book.asks[0].price - book.bids[0].price) / book.midPrice) * 100;
       const riskPrice = Math.max(marketPrice, order.price);
@@ -471,21 +477,10 @@ export class TradingPipeline {
 
         // Verify market data feeds are active and fresh
         const now = Date.now();
-        let staleCount = 0;
         for (const sym of this.config.activeSymbols) {
-          const lastUp = this.marketData.getLastUpdateTime(sym);
-          if (now - lastUp > 15000) {
-            staleCount++;
+          if (!this.marketData.isEntryMarketDataFresh(sym, now)) {
+            console.warn(`⚠️ stale market data for symbol ${sym}; new entries blocked for this symbol until live feeds recover`);
           }
-        }
-
-        if (staleCount > 0) {
-          this.killSwitch.trigger(
-            'HARD_HALT',
-            `Real-time market data stale or unavailable for ${staleCount} active symbol(s)`,
-            'HEALTH_HEARTBEAT_LOSS'
-          );
-          return;
         }
       } catch (e) {
         // Watchdog resilience

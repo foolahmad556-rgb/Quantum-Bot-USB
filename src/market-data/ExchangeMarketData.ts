@@ -26,6 +26,14 @@ export interface SymbolConfig {
   lotSize: number;
 }
 
+export interface MarketDataSourceFreshness {
+  aggTrade: number;
+  kline: number;
+  depth: number;
+}
+
+const ENTRY_MARKET_DATA_MAX_AGE_MS = 15_000;
+
 export const DEFAULT_SYMBOLS: Record<AssetSymbol, SymbolConfig> = {
   'BTC/USDT': {
     symbol: 'BTC/USDT',
@@ -112,6 +120,7 @@ export const DEFAULT_SYMBOLS: Record<AssetSymbol, SymbolConfig> = {
 export class ExchangeMarketData extends EventEmitter {
   private currentPrices: Map<AssetSymbol, number> = new Map();
   private lastUpdateTimes: Map<AssetSymbol, number> = new Map();
+  private sourceFreshness: Map<AssetSymbol, MarketDataSourceFreshness> = new Map();
   private hawkesIntensity: Map<AssetSymbol, number> = new Map();
   private candleHistory: Map<AssetSymbol, Candle[]> = new Map();
   private orderBookBuilder: OrderBookBuilder;
@@ -191,6 +200,35 @@ export class ExchangeMarketData extends EventEmitter {
     return this.lastUpdateTimes.get(symbol) || 0;
   }
 
+  public getSourceFreshness(symbol: AssetSymbol): MarketDataSourceFreshness {
+    return { ...(this.sourceFreshness.get(symbol) || { aggTrade: 0, kline: 0, depth: 0 }) };
+  }
+
+  public isEntryMarketDataFresh(symbol: AssetSymbol, now: number = Date.now()): boolean {
+    const freshness = this.getSourceFreshness(symbol);
+    const book = this.orderBookBuilder.getBook(symbol);
+    const tradeAge = now - freshness.aggTrade;
+    const depthAge = now - freshness.depth;
+    return freshness.aggTrade > 0 && freshness.depth > 0
+      && tradeAge >= 0 && tradeAge <= ENTRY_MARKET_DATA_MAX_AGE_MS
+      && depthAge >= 0 && depthAge <= ENTRY_MARKET_DATA_MAX_AGE_MS
+      && !!book && now - book.timestamp >= 0 && now - book.timestamp <= ENTRY_MARKET_DATA_MAX_AGE_MS
+      && Number.isFinite(book.bids?.[0]?.price) && book.bids[0].price > 0
+      && Number.isFinite(book.asks?.[0]?.price) && book.asks[0].price > 0
+      && book.asks[0].price > book.bids[0].price;
+  }
+
+  public getFreshOrderBook(symbol: AssetSymbol, now: number = Date.now()) {
+    if (!this.isEntryMarketDataFresh(symbol, now)) return undefined;
+    return this.orderBookBuilder.getBook(symbol);
+  }
+
+  private markSourceFresh(symbol: AssetSymbol, source: keyof MarketDataSourceFreshness, now: number): void {
+    const freshness = this.sourceFreshness.get(symbol) || { aggTrade: 0, kline: 0, depth: 0 };
+    freshness[source] = now;
+    this.sourceFreshness.set(symbol, freshness);
+  }
+
   public getAllPrices(): Record<AssetSymbol, number> {
     const res: Partial<Record<AssetSymbol, number>> = {};
     for (const [sym, price] of this.currentPrices.entries()) {
@@ -242,8 +280,6 @@ export class ExchangeMarketData extends EventEmitter {
           this.candleHistory.set(sym, candles);
           const latestPrice = candles[candles.length - 1].close;
           this.currentPrices.set(sym, latestPrice);
-          this.lastUpdateTimes.set(sym, Date.now());
-          this.orderBookBuilder.initialize(sym, latestPrice);
           this.emit('market_update', sym);
           console.log(`✅ ExchangeMarketData: Loaded ${candles.length} real candles for ${sym} (Latest Price: $${latestPrice})`);
         }
@@ -505,6 +541,7 @@ export class ExchangeMarketData extends EventEmitter {
       const bids = data.b || data.bids;
       const asks = data.a || data.asks;
       if (bids && asks) {
+        this.markSourceFresh(symbol, 'depth', Date.now());
         this.orderBookBuilder.update(symbol, bids, asks);
         this.emit('market_update', symbol);
       }
@@ -512,6 +549,8 @@ export class ExchangeMarketData extends EventEmitter {
 
     // 2. Candlestick Kline Update
     if (stream.includes('@kline') && data.k) {
+      const receivedAt = Date.now();
+      this.markSourceFresh(symbol, 'kline', receivedAt);
       const candle: Candle = {
         timestamp: data.k.t,
         open: parseFloat(data.k.o),
@@ -538,7 +577,7 @@ export class ExchangeMarketData extends EventEmitter {
       }
 
       this.currentPrices.set(symbol, candle.close);
-      this.lastUpdateTimes.set(symbol, Date.now());
+      this.lastUpdateTimes.set(symbol, receivedAt);
 
       this.emit('market_update', symbol);
       if (data.k.x) {
@@ -548,12 +587,16 @@ export class ExchangeMarketData extends EventEmitter {
 
     // 3. Trade Ticks Update
     if (stream.includes('@aggTrade')) {
+      const receivedAt = Date.now();
       const tickPrice = parseFloat(data.p);
       const tickSize = parseFloat(data.q);
       const side = data.m ? 'sell' : 'buy';
 
+      if (!Number.isFinite(tickPrice) || tickPrice <= 0 || !Number.isFinite(tickSize) || tickSize <= 0) return;
+      this.markSourceFresh(symbol, 'aggTrade', receivedAt);
+
       this.currentPrices.set(symbol, tickPrice);
-      this.lastUpdateTimes.set(symbol, Date.now());
+      this.lastUpdateTimes.set(symbol, receivedAt);
 
       const tick: Tick = {
         symbol,
