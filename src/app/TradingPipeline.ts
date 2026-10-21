@@ -615,6 +615,7 @@ export class TradingPipeline {
 
     // Forward KillSwitch events to journal & persist to DB
     this.killSwitch.subscribe((evt) => {
+      console.warn(`[KillSwitch] ${evt.toLevel}: ${evt.reason}`);
       this.eventJournal.record(
         evt.toLevel === 'NORMAL' ? 'INFO' : 'CRITICAL',
         'KILL_SWITCH',

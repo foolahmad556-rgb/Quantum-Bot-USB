@@ -94,6 +94,7 @@ export default function CyberPulseNexusApp() {
   const [isRunning, setIsRunning] = useState<boolean>(false);
   const [executionMode, setExecutionMode] = useState<'PAPER' | 'TESTNET' | 'LIVE'>('TESTNET');
   const [backendReady, setBackendReady] = useState(false);
+  const [safetyStop, setSafetyStop] = useState<{ level: string; reason: string; source?: string } | null>(null);
   const [markets, setMarkets] = useState<HolographicAsset[]>(INITIAL_MARKETS);
   const [selectedAsset, setSelectedAsset] = useState<HolographicAsset>(INITIAL_MARKETS[0]);
   const [isConnected, setIsConnected] = useState<boolean>(false);
@@ -163,6 +164,8 @@ export default function CyberPulseNexusApp() {
           setExecutionMode(data.executionMode);
           setBackendReady(true);
         }
+        setSafetyStop(data.killSwitchLevel && data.killSwitchLevel !== 'NORMAL'
+          ? { level: data.killSwitchLevel, reason: data.killSwitchEvent?.reason || '', source: data.killSwitchEvent?.triggeredBy } : null);
         if (data.balance) {
           setAccountState({
             totalEquity: data.balance.totalEquity || 0,
@@ -693,6 +696,11 @@ export default function CyberPulseNexusApp() {
       {/* 3. MAIN DASHBOARD VIEWPORT */}
       <Suspense fallback={<div className="quant-card p-6 text-cyan-300">Loading dashboard...</div>}>
       <main className="max-w-[1700px] mx-auto px-3 sm:px-6 lg:px-8 py-3.5 sm:py-6 space-y-4 sm:space-y-6 relative z-10 pb-mobile-nav">
+        {backendReady && safetyStop && <section role="alert" className="rounded-xl border border-red-500/50 bg-red-950/40 p-4 text-red-100 space-y-2">
+          <h2 className="font-bold">{isAr ? 'درع الطوارئ مفعّل — الدخول الجديد متوقف' : 'Safety stop active — new entries blocked'} ({safetyStop.level})</h2>
+          <p>{isAr ? 'السبب: ' : 'Reason: '}{safetyStop.reason || (isAr ? 'السبب غير متاح من الخادم' : 'Reason unavailable from server')}</p>
+          {safetyStop.source && <p className="text-xs">{isAr ? 'المصدر: ' : 'Source: '}{safetyStop.source}</p>}
+        </section>}
 
         {/* Account performance strip */}
         <div className="quant-card p-3 sm:p-4 border border-cyan-500/20 flex flex-wrap items-center justify-between gap-3 text-xs font-mono">

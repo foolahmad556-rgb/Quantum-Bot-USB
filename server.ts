@@ -168,8 +168,8 @@ async function requireCloudStorage(res: Response): Promise<boolean> {
   return false;
 }
 
-const supervisor = cloudDb ? new RuntimeSupervisor(cloudDb, process.env.EXCHANGE_ACCOUNT_ID || '', async () => {
-  pipeline.getKillSwitch().trigger('HARD_HALT', 'Execution lease or storage lost', 'HEALTH_HEARTBEAT_LOSS');
+const supervisor = cloudDb ? new RuntimeSupervisor(cloudDb, process.env.EXCHANGE_ACCOUNT_ID || '', async (reason) => {
+  pipeline.getKillSwitch().trigger('HARD_HALT', reason, 'HEALTH_HEARTBEAT_LOSS');
   await pipeline.stop();
 }) : null;
 pipeline.setRuntimeSafetyGuard(() => !!pipeline.isRunning && !!supervisor?.canEnter());
@@ -355,6 +355,7 @@ app.get('/api/live-status', requireAuth, async (_req: Request, res: Response) =>
       positions: Array.isArray(positions) ? positions : [],
       orders: Array.isArray(orders) ? orders : [],
       killSwitchLevel: ksLevel,
+      killSwitchEvent: ks.getHistory()[0] ?? null,
       boardOfDirectors: { ...board.getStatusReport(), councilMembers: board.getCouncilStructure() },
       prices: pipeline.getMarketData().getAllPrices(),
       timestamp: Date.now(),

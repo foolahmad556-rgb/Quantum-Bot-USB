@@ -1,5 +1,9 @@
 import { DatabaseService, TradeRecord, SignalRecord, BalanceSnapshot, PriceRecord } from './DatabaseService.ts';
 
+export class D1ApiError extends Error {
+  constructor(public readonly status: number) { super(`D1 API ${status}`); }
+}
+
 /** Remote D1-backed storage through Cloudflare Worker HTTP API. */
 export class D1DatabaseService extends DatabaseService {
   private readonly base: string;
@@ -16,7 +20,7 @@ export class D1DatabaseService extends DatabaseService {
     if (this.secret) headers.set('Authorization', `Bearer ${this.secret}`);
     const r = await fetch(`${this.base}${path}`, { ...init, headers, signal: AbortSignal.timeout(5000) });
     const body = await r.json().catch(() => ({}));
-    if (!r.ok) throw new Error(`D1 API ${r.status}: ${JSON.stringify(body)}`);
+    if (!r.ok) throw new D1ApiError(r.status);
     return body as T;
   }
   async ping() { return this.call<{ ok: boolean }>('/d1/health'); }
@@ -35,7 +39,12 @@ export class D1DatabaseService extends DatabaseService {
     return (await this.call<{ items: any[] }>(`/d1/council/shadow?limit=${Math.max(1, Math.min(1000, limit))}`)).items;
   }
   async acquireLease(name: string, owner: string) {
-    return this.call<{ acquired: boolean; expiresAt: number }>(`/d1/leases/${encodeURIComponent(name)}`, { method: 'PUT', body: JSON.stringify({ owner }) });
+    try {
+      return await this.call<{ acquired: boolean; expiresAt: number }>(`/d1/leases/${encodeURIComponent(name)}`, { method: 'PUT', body: JSON.stringify({ owner }) });
+    } catch (error) {
+      if (error instanceof D1ApiError && error.status === 409) return { acquired: false, expiresAt: 0 };
+      throw error;
+    }
   }
   async releaseLease(name: string, owner: string) {
     return this.call(`/d1/leases/${encodeURIComponent(name)}`, { method: 'DELETE', headers: { 'X-Lease-Owner': owner } });

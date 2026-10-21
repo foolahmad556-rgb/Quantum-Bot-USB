@@ -69,6 +69,10 @@ try {
   assert.equal((await post('/api/board/learn',{pnl:100,symbol:'BTC/USDT'},token)).status,409);
   assert.equal((await post('/api/protected/trading/start',{},token)).status,409);
   assert.equal((await post('/webhook/telegram',{})).status,503);
+  assert.equal((await post('/api/protected/killswitch/trigger',{level:'HARD_HALT',reason:'test diagnostic halt'},token)).status,200);
+  const halted = await (await fetch(base+'/api/live-status',{headers:{Authorization:`Bearer ${token}`}})).json();
+  assert.equal(halted.killSwitchLevel,'HARD_HALT');
+  assert.equal(halted.killSwitchEvent.reason,'test diagnostic halt');
   for(let i=0;i<22;i++) await post('/api/auth/login',{email:account.email,password:'wrong'});
   assert.equal((await post('/api/auth/login',account)).status,429);
   console.log('PASS real HTTP auth provisioning, operator authorization, private assets, readiness, learning boundary and rate limits');
