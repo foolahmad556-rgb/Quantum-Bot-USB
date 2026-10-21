@@ -49,6 +49,19 @@ describe('HybridReconciliationManager fail-closed snapshots', () => {
     await assert.rejects(() => hybrid.getReconciliation(), /No valid reconciliation snapshot/);
   });
 
+  it('does not start REST cooldown when fallback request fails', async () => {
+    const hybrid = makeHybrid({ connected: false, account: null, positions: [], hasSnapshot: false });
+    (hybrid as any).lastRestFallback = 0;
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = async () => { throw new Error('network unavailable'); };
+    try {
+      await assert.rejects(() => hybrid.getReconciliation(), /No valid reconciliation snapshot/);
+      assert.equal((hybrid as any).lastRestFallback, 0);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
   it('requireCachedSnapshot returns verified cache data when available', () => {
     const hybrid = makeHybrid({ connected: true, account, positions: [position], hasSnapshot: true });
     const cached = (hybrid as any).requireCachedSnapshot();

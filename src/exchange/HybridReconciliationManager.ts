@@ -5,7 +5,9 @@ import crypto from 'crypto';
 export class HybridReconciliationManager {
   private wsManager: BinanceWebSocketManager;
   private lastRestFallback: number = 0;
-  private restFallbackInterval = 60000; // 60 seconds
+  private lastRestAttempt: number = 0;
+  private restFallbackInterval = 60000; // Refresh successful REST snapshots every 60 seconds
+  private restRetryInterval = 5000; // Retry failed REST snapshots after 5 seconds
   private failureCount = 0;
   private maxFailures = 3;
 
@@ -76,7 +78,9 @@ export class HybridReconciliationManager {
 
     // Fallback to REST if needed
     const now = Date.now();
-    if (now - this.lastRestFallback > this.restFallbackInterval) {
+    const snapshotExpired = now - this.lastRestFallback > this.restFallbackInterval;
+    const retryAllowed = now - this.lastRestAttempt >= this.restRetryInterval;
+    if (snapshotExpired && retryAllowed) {
       return await this.restFallback();
     }
 
@@ -105,7 +109,7 @@ export class HybridReconciliationManager {
     try {
       console.log(`🔄 [REST Fallback] Fetching from Binance API...`);
 
-      this.lastRestFallback = Date.now();
+      this.lastRestAttempt = Date.now();
       const timestamp = Date.now();
       const query = new URLSearchParams({
         recvWindow: '5000',
@@ -182,7 +186,9 @@ export class HybridReconciliationManager {
 
   private async triggerRestFallback(): Promise<void> {
     const now = Date.now();
-    if (now - this.lastRestFallback > this.restFallbackInterval) { // At least 10s since last attempt
+    const snapshotExpired = now - this.lastRestFallback > this.restFallbackInterval;
+    const retryAllowed = now - this.lastRestAttempt >= this.restRetryInterval;
+    if (snapshotExpired && retryAllowed) {
       await this.restFallback();
     }
   }
