@@ -147,7 +147,8 @@ export class HybridReconciliationManager {
 
       const account: AccountData = {
         totalWalletBalance: parseFloat(accountData.totalWalletBalance),
-        totalUnrealizedProfit: positionsData.reduce((sum: number, p: any) => sum + parseFloat(p.unrealizedProfit || 0), 0),
+        availableBalance: parseFloat(accountData.availableBalance),
+        totalUnrealizedProfit: parseFloat(accountData.totalUnrealizedProfit),
         totalInitialMargin: parseFloat(accountData.totalInitialMargin),
         totalMaintMargin: parseFloat(accountData.totalMaintMargin),
         timestamp: Date.now()
@@ -160,7 +161,7 @@ export class HybridReconciliationManager {
           positionAmt: parseFloat(p.positionAmt),
           entryPrice: parseFloat(p.entryPrice),
           markPrice: parseFloat(p.markPrice),
-          unRealizedProfit: parseFloat(p.unrealizedProfit),
+          unRealizedProfit: parseFloat(p.unRealizedProfit ?? p.unrealizedProfit),
           positionSide: p.positionSide,
           timestamp: Date.now()
         }));

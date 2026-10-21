@@ -322,17 +322,8 @@ export class TradingPipeline {
       this.portfolioSizer.updateBalance(this.userDataStream.getBalance().totalEquity);
       this.config.activeSymbols = this.portfolioSizer.getAllowedSymbols();
 
-      // 2. Start Market Data Stream
-      try {
-              await this.marketData.backfillRealCandles(this.config.activeSymbols);
-            } catch (e: any) {
-              console.warn('⚠️ Non-blocking candle backfill notice:', e.message);
-            }
-            const insufficientHistory = this.marketData.getInsufficientHistory(100);
-            if (insufficientHistory.length > 0) {
-              console.warn(`⚠️ Insufficient candle history (<100 candles) for: ${insufficientHistory.join(', ')}`);
-            }
-            this.marketData.startStreaming(300, [...new Set([...this.config.activeSymbols, ...this.userDataStream.getPositions().map(p => p.symbol)])]);
+      // 2. Warm up every subscribed symbol, including existing exchange positions.
+      await this.initializeMarketData();
 
       // 3. Start Optimization
       this.runQuantumOptimization();
@@ -892,6 +883,14 @@ export class TradingPipeline {
     });
   }
 
+  private warmupWarnings = new Map<AssetSymbol, number>();
+
+  private async initializeMarketData() {
+    const symbols = [...new Set([...this.config.activeSymbols, ...this.userDataStream.getPositions().map(p => p.symbol)])];
+    await this.marketData.backfillRealCandles(symbols);
+    this.marketData.startStreaming(300, symbols);
+  }
+
   private async evaluateSignalAndExecute(symbol: AssetSymbol, features: any, book?: OrderBook, regime?: any) {
     // Strict Stale Market Data Check (منع التداول على بيانات قديمة أو ميتة)
     const dataAge = Date.now() - this.marketData.getLastUpdateTime(symbol);
@@ -904,9 +903,15 @@ export class TradingPipeline {
     // until enough candles exist (backfill failure must not become a bogus signal).
     const historyLen = this.marketData.getCandles(symbol).length;
     if (historyLen < 30) {
-      console.warn(`⚠️ [${symbol}] Insufficient candle history (${historyLen}/30). Signal evaluation skipped.`);
+      const now = Date.now();
+      if (!this.warmupWarnings.has(symbol) || now - this.warmupWarnings.get(symbol)! >= 60_000) {
+        this.warmupWarnings.set(symbol, now);
+        console.warn(`⚠️ [${symbol}] Insufficient candle history (${historyLen}/30). Signal evaluation skipped.`);
+      }
       return;
     }
+
+    this.warmupWarnings.delete(symbol);
 
     // 0. Dynamic Risk Check
     const lastDecision = this.dynamicRiskManager.getLastDecision();
@@ -1379,7 +1384,8 @@ export class TradingPipeline {
           positionCount: positions.length
         });
 
-        const realEquity = account.totalWalletBalance;
+        const unrealizedPnl = account.totalUnrealizedProfit ?? 0;
+        const realEquity = account.totalWalletBalance + unrealizedPnl;
         if (!failClosedOnInvalidEquity(realEquity, this.killSwitch)) {
           return;
         }
@@ -1391,8 +1397,14 @@ export class TradingPipeline {
         if (dbState && Math.abs(realEquity - dbState.equity) > 1) {
           console.log(`📊 Balance reconciled: Real: $${realEquity.toFixed(2)}, DB: $${dbState.equity.toFixed(2)}. Updating state.`);
         }
-        // 🔥 Update DurableStateManager instead of D1
-        durableStateManager.updateBalance(realEquity, 0, 0);
+        // Persist the same equity definition we compare next time; never zero live margin/PnL.
+        const freeMargin = Number.isFinite(account.availableBalance)
+          ? account.availableBalance! : this.userDataStream.getBalance().freeMargin;
+        await this.db.saveState('last_balance', {
+          equity: realEquity, walletBalance: account.totalWalletBalance,
+          freeMargin, unrealizedPnl, timestamp: Date.now(),
+        });
+        durableStateManager.updateBalance(realEquity, freeMargin, unrealizedPnl);
 
         if (Array.isArray(positions)) {
           const realOpenPositions = positions.filter((p: any) => p.positionAmt !== 0);

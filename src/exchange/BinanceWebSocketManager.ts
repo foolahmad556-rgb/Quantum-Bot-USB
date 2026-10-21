@@ -14,6 +14,7 @@ export interface PositionData {
 }
 
 export interface AccountData {
+  availableBalance?: number;
   totalWalletBalance: number;
   totalUnrealizedProfit: number;
   totalInitialMargin: number;

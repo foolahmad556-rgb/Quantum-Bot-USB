@@ -14,7 +14,7 @@ Object.assign(pipeline, {
   },
   orderGateway: {getApiKey: () => 'test', getApiSecret: () => 'test', getApiBaseUrl: () => 'unused', getExecutionMode: () => 'TESTNET'},
   hybridReconciliationManager: {getReconciliation: async () => ({
-    source: 'rest', account: {totalWalletBalance: 1000},
+    source: 'rest', account: {totalWalletBalance: 1000, totalUnrealizedProfit: 0, availableBalance: 900},
     positions: [{symbol: 'SUNUSDT', positionAmt: -1818, entryPrice: 0.016496, markPrice: 0.0165, positionSide: 'SHORT'}],
   })},
   portfolioSizer: {updateBalance: () => {}},
