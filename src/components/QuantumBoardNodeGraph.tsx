@@ -465,7 +465,7 @@ export const QuantumBoardNodeGraph: React.FC<QuantumBoardNodeGraphProps> = ({
               fill="none"
               stroke={coreColors.border}
               strokeWidth="5"
-              strokeDasharray={`${(approvalRatio || 0.74) * 465} 465`}
+              strokeDasharray={`${(approvalRatio ?? 0) * 465} 465`}
               strokeLinecap="round"
               transform="rotate(-90)"
               className="transition-all duration-700"
@@ -481,7 +481,7 @@ export const QuantumBoardNodeGraph: React.FC<QuantumBoardNodeGraphProps> = ({
             </text>
 
             <text y={10} fill="#ffffff" fontSize="22" fontFamily="monospace" fontWeight="bold" textAnchor="middle">
-              {Math.round((approvalRatio || 0.74) * 100)}%
+              {Math.round((approvalRatio ?? 0) * 100)}%
             </text>
 
             <text y={28} fill="#94a3b8" fontSize="10" fontFamily="monospace" textAnchor="middle">

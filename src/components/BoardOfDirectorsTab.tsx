@@ -320,7 +320,8 @@ export const BoardOfDirectorsTab: React.FC<BoardOfDirectorsTabProps> = ({
       </div>
 
       {/* 🕸️ SUB-TAB: QUANTUM NODE GRAPH VISUALIZATION */}
-      {activeSubTab === 'node_graph' && (
+      {activeSubTab === 'node_graph' && !latestDecision && <p className="holo-panel rounded-2xl p-6 text-slate-400">{isAr ? 'بانتظار أول قرار من المجلس لعرض التصويت.' : 'Waiting for the first council decision to display votes.'}</p>}
+      {activeSubTab === 'node_graph' && latestDecision && (
         <QuantumBoardNodeGraph
           agents={agents}
           latestDecision={latestDecision}
