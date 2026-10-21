@@ -1,3 +1,4 @@
+import { isChunkLoadError, recoverChunkLoad, reloadLatestPage } from '../lib/chunkRecovery';
 import React, { Component, ErrorInfo, ReactNode } from 'react';
 
 interface Props {
@@ -23,11 +24,21 @@ export class ErrorBoundary extends Component<Props, State> {
 
   public componentDidCatch(error: Error, errorInfo: ErrorInfo) {
     console.error("💥 ErrorBoundary caught an unhandled error during hydration or render:", error, errorInfo);
+    recoverChunkLoad(error);
     this.setState({ error, errorInfo });
   }
 
   public render() {
     if (this.state.hasError) {
+      if (isChunkLoadError(this.state.error)) return (
+        <main dir="rtl" className="min-h-screen bg-[#070b14] text-slate-100 flex items-center justify-center p-6">
+          <section className="max-w-lg space-y-4">
+            <h1 className="text-xl font-bold">تعذّر تحميل جزء من الواجهة</h1>
+            <p>قد تكون هناك نسخة أحدث أو مشكلة اتصال. تحقق من الإنترنت ثم أعد تحميل الصفحة. جلسة الدخول وبيانات الحساب محفوظة.</p>
+            <button onClick={reloadLatestPage} className="rounded bg-cyan-700 px-5 py-3">تحميل أحدث نسخة / Reload latest version</button>
+          </section>
+        </main>
+      );
       return (
         <div className="min-h-screen bg-[#070b14] text-slate-100 flex items-center justify-center p-6 font-sans">
           <div className="max-w-2xl w-full bg-[#0d1527] border border-red-500/30 rounded-xl p-8 shadow-2xl">
@@ -74,7 +85,7 @@ export class ErrorBoundary extends Component<Props, State> {
             </div>
 
             <button
-              onClick={() => window.location.reload()}
+              onClick={reloadLatestPage}
               className="w-full sm:w-auto px-6 py-3 bg-red-500 hover:bg-red-600 transition-colors rounded-lg font-semibold text-sm shadow-lg shadow-red-500/10 flex items-center justify-center gap-2"
             >
               <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">

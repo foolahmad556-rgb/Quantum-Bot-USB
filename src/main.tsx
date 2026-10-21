@@ -4,6 +4,11 @@ import App from './App.tsx';
 import { ErrorBoundary } from './components/ErrorBoundary.tsx';
 import { AuthProvider } from './contexts/AuthContext.tsx';
 import './index.css';
+import { recoverChunkLoad } from './lib/chunkRecovery';
+
+window.addEventListener('vite:preloadError', (event) => {
+  if (recoverChunkLoad((event as Event & { payload: unknown }).payload)) event.preventDefault();
+});
 
 try {
   const diag = document.getElementById('raw-diagnostic-log');
