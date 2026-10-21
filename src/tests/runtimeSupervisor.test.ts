@@ -41,3 +41,23 @@ try {
  await assert.rejects(db.acquireLease('account','owner'),/D1 API 503/);
 } finally {globalThis.fetch=originalFetch;}
 console.log('PASS transient failure blocks entries, bounded recovery, deadline halt, no silent rearming, conflict immediate halt, HTTP 409 classification');
+
+let resolveRenewal!: (value: { acquired: boolean; expiresAt: number }) => void;
+let acquireCount=0, shutdownLosses=0;
+const stopping = new RuntimeSupervisor({
+ async ping(){return {ok:true}},
+ async acquireLease(){
+  if (++acquireCount === 1) return {acquired:true,expiresAt:now+30000};
+  return new Promise(resolve=>{resolveRenewal=resolve});
+ },
+ async releaseLease(){},
+},'account',async()=>{shutdownLosses++},()=>now);
+await stopping.start();
+const pending=stopping.heartbeat();
+while(!resolveRenewal) await new Promise(resolve=>setTimeout(resolve,0));
+const shutdown=stopping.stop();
+resolveRenewal({acquired:true,expiresAt:now+30000});
+await pending; await shutdown;
+assert.equal(shutdownLosses,0,'Intentional stop during renewal must not trigger an emergency');
+assert.equal(stopping.canEnter(),false);
+console.log('PASS intentional shutdown during lease renewal does not raise a false emergency');

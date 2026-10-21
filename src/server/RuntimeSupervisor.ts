@@ -44,6 +44,7 @@ export class RuntimeSupervisor {
       await this.renew();
     }
     catch (error) {
+      if (this.stopped) return; // An intentional stop may interrupt an in-flight renewal.
       this.healthy = false; // Block all entries immediately, even during bounded retry.
       const detail = error instanceof Error ? error.message : 'Unknown renewal failure';
       if (!(error instanceof LeaseConflictError) && this.validUntil > this.now()) {
