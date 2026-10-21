@@ -362,6 +362,16 @@ export class ExchangeMarketData extends EventEmitter {
     }
   }
 
+  public getLatestFeedUpdate(): number {
+    return Math.max(0, ...this.activeCryptoSymbols.map(symbol => this.getLastUpdateTime(symbol)));
+  }
+
+  public reconnectStalledFeed(): void {
+    if (!this.isRunning) return;
+    this.stopStreaming();
+    this.startStreaming();
+  }
+
   public stopStreaming() {
     this.isRunning = false;
     if (this.intervalId) {
@@ -369,11 +379,11 @@ export class ExchangeMarketData extends EventEmitter {
       this.intervalId = null;
     }
     if (this.marketWs) {
-      this.marketWs.close();
+      this.marketWs.removeAllListeners('close'); this.marketWs.terminate();
       this.marketWs = null;
     }
     if (this.depthWs) {
-      this.depthWs.close();
+      this.depthWs.removeAllListeners('close'); this.depthWs.terminate();
       this.depthWs = null;
     }
     if (this.reconnectTimer) {
@@ -409,7 +419,7 @@ export class ExchangeMarketData extends EventEmitter {
 
   private connectMarketWs(url: string) {
     if (this.marketWs) {
-      try { this.marketWs.close(); } catch (e) {}
+      try { this.marketWs.removeAllListeners('close'); this.marketWs.terminate(); } catch (e) {}
     }
 
     try {
@@ -446,7 +456,7 @@ export class ExchangeMarketData extends EventEmitter {
 
   private connectDepthWs(url: string) {
     if (this.depthWs) {
-      try { this.depthWs.close(); } catch (e) {}
+      try { this.depthWs.removeAllListeners('close'); this.depthWs.terminate(); } catch (e) {}
     }
 
     try {

@@ -255,19 +255,10 @@ export class TradingPipeline {
 
 
     this.watchdog = new SystemWatchdog({
-      getFeedLastUpdate: () => {
-        const activeSymbols = this.config.activeSymbols || ['BTC/USDT'];
-        let maxTime = 0;
-        for (const s of activeSymbols) {
-          const t = this.marketData.getLastUpdateTime(s);
-          if (t > maxTime) maxTime = t;
-        }
-        return maxTime > 0 ? maxTime : Date.now();
-      },
+      getFeedLastUpdate: () => this.isRunning ? this.marketData.getLatestFeedUpdate() : Date.now(),
       onFeedStall: async () => {
-        // Never replace live Futures WebSocket with REST during a stall.
-        // Entry checks reject stale ticks; open-position risk checks remain active.
-        this.eventJournal.record('WARN', 'SYSTEM', 'Market WebSocket stalled; new entries remain blocked until live feed recovers');
+        this.eventJournal.record('WARN', 'SYSTEM', 'Market WebSocket stale; reconnecting while fresh-price entry checks remain enforced');
+        this.marketData.reconnectStalledFeed();
       },
       getInFlightLocks: () => this.inFlightSymbols,
       onClearStaleLocks: (stale) => {

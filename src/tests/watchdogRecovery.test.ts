@@ -1,0 +1,32 @@
+import assert from 'node:assert/strict';
+import { SystemWatchdog } from '../monitoring/SystemWatchdog';
+import { ExchangeMarketData } from '../market-data/ExchangeMarketData';
+const originalNow = Date.now;
+let now = 100_000;
+Date.now = () => now;
+try {
+  let last = 1, attempts = 0;
+  const watchdog: any = new SystemWatchdog({getFeedLastUpdate: () => last, onFeedStall: async () => { attempts++; }});
+  await watchdog.performWatchdogCheck();
+  assert.equal(watchdog.getStatus().feedStatus, 'DEGRADED', 'callback completion is not evidence of recovery');
+  now += 2500;
+  await watchdog.performWatchdogCheck();
+  assert.equal(attempts, 1, 'reconnect attempts must be throttled');
+  now += 30_000;
+  watchdog.onFeedStall = async () => { attempts++; last = now; };
+  await watchdog.performWatchdogCheck();
+  assert.equal(watchdog.getStatus().feedStatus, 'HEALED');
+  const market: any = new ExchangeMarketData(undefined, ['BTC/USDT']);
+  let stops = 0, starts = 0;
+  market.stopStreaming = () => { stops++; };
+  market.startStreaming = () => { starts++; };
+  market.reconnectStalledFeed();
+  assert.equal(starts, 0, 'intentional stop must not restart');
+  market.isRunning = true;
+  market.reconnectStalledFeed();
+  assert.equal(stops, 1);
+  assert.equal(starts, 1);
+  market.lastUpdateTimes.set('BTC/USDT', now);
+  assert.equal(market.getLatestFeedUpdate(), now);
+} finally { Date.now = originalNow; }
+console.log('PASS watchdog requires fresh data, throttles recovery, reconnects active streams only');

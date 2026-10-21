@@ -34,6 +34,9 @@ export class SystemWatchdog extends EventEmitter {
   private consecutiveHealthyTicks: number = 0;
   private feedStatus: 'HEALTHY' | 'DEGRADED' | 'HEALED' = 'HEALTHY';
 
+  private recoveryInFlight = false;
+  private lastRecoveryAttempt = -Infinity;
+
   // Dependency callbacks
   private getFeedLastUpdate?: () => number;
   private onFeedStall?: () => Promise<void>;
@@ -97,17 +100,23 @@ export class SystemWatchdog extends EventEmitter {
         // Feed is lagging (> 8 seconds without fresh tick)
         this.feedStatus = 'DEGRADED';
         this.consecutiveHealthyTicks = 0;
-        this.autoHealEventsCount++;
 
-        console.warn(`⚠️ [WATCHDOG 24/7] Market Data feed stalled (${(elapsedSinceUpdate / 1000).toFixed(1)}s). Triggering Auto-Healing...`);
-
-        if (this.onFeedStall) {
+        if (this.onFeedStall && !this.recoveryInFlight && now - this.lastRecoveryAttempt >= 30_000) {
+          this.lastRecoveryAttempt = now;
+          this.recoveryInFlight = true;
+          this.autoHealEventsCount++;
+          console.warn(`⚠️ [WATCHDOG 24/7] Market feed stale (${(elapsedSinceUpdate / 1000).toFixed(1)}s); requesting reconnection.`);
           try {
             await this.onFeedStall();
-            this.feedStatus = 'HEALED';
-            console.log('✅ [WATCHDOG 24/7] Market Data feed successfully auto-healed.');
+            const recoveredAt = this.getFeedLastUpdate();
+            if (recoveredAt > lastUpdate && Date.now() - recoveredAt <= 8000) {
+              this.feedStatus = 'HEALED';
+              console.log('✅ [WATCHDOG 24/7] Fresh market data confirmed after recovery.');
+            }
           } catch (err) {
             console.error('❌ [WATCHDOG 24/7] Auto-healing feed error:', err);
+          } finally {
+            this.recoveryInFlight = false;
           }
         }
       } else {
