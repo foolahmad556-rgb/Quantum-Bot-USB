@@ -1,0 +1,11 @@
+import assert from 'node:assert/strict';
+import { getFuturesEndpoints, readTickerSnapshot } from '../lib/marketEndpoints';
+assert.equal(getFuturesEndpoints('TESTNET').rest, 'https://testnet.binancefuture.com');
+assert.equal(getFuturesEndpoints('TESTNET').websocket, 'wss://fstream.binancefuture.com');
+assert.equal(getFuturesEndpoints('LIVE').rest, 'https://fapi.binance.com');
+assert.throws(() => getFuturesEndpoints('UNKNOWN'));
+const tickers = [{symbol:'BTCUSDT', lastPrice:'100'}];
+assert.deepEqual(readTickerSnapshot({success:true,tickers}), tickers);
+assert.deepEqual(readTickerSnapshot(tickers), tickers);
+assert.deepEqual(readTickerSnapshot({success:false,error:'unavailable'}), []);
+console.log('PASS dashboard Futures environment and wrapped ticker response');

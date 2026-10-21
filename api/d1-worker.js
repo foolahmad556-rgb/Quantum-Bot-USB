@@ -31,6 +31,25 @@ export default {
         await rows(env, 'SELECT name FROM runtime_leases LIMIT 1');
         return json({ ok: true, storage: 'cloudflare-d1' });
       }
+      // Private account API: never expose password hashes through public status/state.
+      if (path === '/d1/auth/health' && method === 'GET') {
+        const result = await rows(env, 'SELECT COUNT(*) AS count FROM auth_users');
+        return json({ count: result[0].count });
+      }
+      if (path === '/d1/auth/lookup' && method === 'POST') {
+        if (typeof body.email !== 'string' || body.email.length > 320) return json({ error: 'Invalid email' }, 400);
+        const found = await rows(env, 'SELECT id,email,password_hash,created_at FROM auth_users WHERE email=?', [body.email.trim().toLowerCase()]);
+        return json({ user: found[0] || null });
+      }
+      if (path === '/d1/auth/users' && method === 'POST') {
+        if (!validId(body.id) || typeof body.email !== 'string' || !body.email.includes('@') || body.email.length > 320 ||
+            typeof body.password_hash !== 'string' || !/^\$2[aby]\$\d{2}\$[./A-Za-z0-9]{53}$/.test(body.password_hash) ||
+            !Number.isSafeInteger(body.created_at) || body.created_at < 0) return json({ error: 'Invalid account' }, 400);
+        const result = await run(env, `INSERT INTO auth_users(id,email,password_hash,created_at)
+          SELECT ?,?,?,? WHERE ?=0 OR NOT EXISTS(SELECT 1 FROM auth_users)
+          ON CONFLICT DO NOTHING`, [body.id, body.email.trim().toLowerCase(), body.password_hash, body.created_at, body.bootstrapOnly === true ? 1 : 0]);
+        return json({ created: result.meta.changes === 1 });
+      }
       const lease = path.match(/^\/d1\/leases\/([^/]+)$/);
       if (lease && method === 'PUT') {
         const name = decodeURIComponent(lease[1]), owner = body.owner;

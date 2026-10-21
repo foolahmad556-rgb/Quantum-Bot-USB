@@ -87,11 +87,12 @@ export const BoardOfDirectorsTab: React.FC<BoardOfDirectorsTabProps> = ({
   };
 
   const getVerdictBadge = (verdict?: string) => {
+    if (!verdict) return <span className="text-slate-400 text-xs">{isAr ? 'لا قرار مسجل بعد' : 'No decision recorded'}</span>;
     if (verdict === 'APPROVED') {
       return (
         <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-emerald-500/20 border border-emerald-500/50 text-emerald-400 font-bold text-xs shadow-[0_0_15px_rgba(16,185,129,0.3)]">
           <CheckCircle2 className="w-4 h-4" />
-          <span>{isAr ? 'موافقة كاملة (100% حجم)' : 'APPROVED (100% Size)'}</span>
+          <span>{isAr ? `موافقة (${Math.round((latestDecision?.sizeMultiplier ?? 0) * 100)}% حجم)` : `APPROVED (${Math.round((latestDecision?.sizeMultiplier ?? 0) * 100)}% Size)`}</span>
         </div>
       );
     }
@@ -99,7 +100,7 @@ export const BoardOfDirectorsTab: React.FC<BoardOfDirectorsTabProps> = ({
       return (
         <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-amber-500/20 border border-amber-500/50 text-amber-300 font-bold text-xs shadow-[0_0_15px_rgba(245,158,11,0.3)]">
           <AlertTriangle className="w-4 h-4" />
-          <span>{isAr ? 'موافقة مشروطة (50% حجم)' : 'CONDITIONAL (50% Size)'}</span>
+          <span>{isAr ? `موافقة مشروطة (${Math.round((latestDecision?.sizeMultiplier ?? 0) * 100)}% حجم)` : `CONDITIONAL (${Math.round((latestDecision?.sizeMultiplier ?? 0) * 100)}% Size)`}</span>
         </div>
       );
     }
@@ -112,13 +113,39 @@ export const BoardOfDirectorsTab: React.FC<BoardOfDirectorsTabProps> = ({
   };
 
   const getVoteIcon = (vote?: string) => {
+    if (!vote) return <span className="text-slate-500">—</span>;
     if (vote === 'approved') return <span className="text-emerald-400 font-bold text-xs flex items-center gap-1"><CheckCircle2 className="w-3.5 h-3.5" /> {isAr ? 'موافق' : 'Approved'}</span>;
     if (vote === 'challenge') return <span className="text-amber-400 font-bold text-xs flex items-center gap-1"><AlertTriangle className="w-3.5 h-3.5" /> {isAr ? 'تحفظ' : 'Challenge'}</span>;
     return <span className="text-rose-400 font-bold text-xs flex items-center gap-1"><XCircle className="w-3.5 h-3.5" /> {isAr ? 'رفض' : 'Rejected'}</span>;
   };
 
+  if (!boardData) return <div role="status" className="holo-panel p-6 text-slate-400">{isAr ? 'بانتظار بيانات المجلس من الخادم…' : 'Waiting for board data from the server…'}</div>;
+
   return (
     <div className="space-y-6">
+      <section className="holo-panel rounded-2xl p-5 space-y-4" aria-label={isAr ? 'سياسة المجلس الحالية' : 'Current council policy'}>
+        <h3 className="text-cyan-300 font-bold">{isAr ? 'إعدادات السياسة الحالية — من الخادم' : 'Current policy settings — from server'}</h3>
+        <p className="text-xs text-slate-400">{isAr ? 'قيم للعرض والتحقق؛ لا تغيّر الواجهة سياسة التنفيذ.' : 'Read-only values; the dashboard does not modify execution policy.'}</p>
+        {boardData.activePolicy ? <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+          {[
+            [isAr ? 'إصدار السياسة' : 'Policy version', boardData.activePolicy.version],
+            [isAr ? 'عتبة الدخول Z' : 'Entry Z threshold', boardData.activePolicy.zScoreEntryThreshold],
+            [isAr ? 'الحد الأقصى للرافعة' : 'Leverage cap', `${boardData.activePolicy.dynamicLeverageCap}×`],
+            [isAr ? 'حد الانزلاق (نقطة أساس)' : 'Slippage cap (bps)', boardData.activePolicy.maxAllowedSlippageBps],
+            [isAr ? 'نصاب الحراس' : 'Guard quorum', boardData.activePolicy.minGuardsQuorum],
+            [isAr ? 'نسبة الموافقة المطلوبة' : 'Required approval', `${Math.round(boardData.activePolicy.minApprovalRatio * 100)}%`],
+            [isAr ? 'معامل وقف الخسارة' : 'Stop-loss multiplier', boardData.activePolicy.stopLossPctMultiplier],
+            [isAr ? 'معامل جني الأرباح' : 'Take-profit multiplier', boardData.activePolicy.takeProfitPctMultiplier],
+            [isAr ? 'انتظار بعد الخسارة (دقيقة)' : 'Loss cooldown (minutes)', boardData.activePolicy.cooldownMinutesAfterLoss],
+            [isAr ? 'حساسية التقلب' : 'Volatility sensitivity', boardData.activePolicy.volatilitySensitivity],
+            [isAr ? 'المداولات المكتملة' : 'Completed deliberations', boardData.activePolicy.totalDeliberationsHeld],
+          ].map(([label, value]) => <div key={label} className="rounded-lg bg-black/40 p-3"><div className="text-xs text-slate-400">{label}</div><div className="font-mono text-white mt-1">{value ?? '—'}</div></div>)}
+        </div> : <p className="text-slate-400">{isAr ? 'بيانات السياسة غير متاحة' : 'Policy data unavailable'}</p>}
+        <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-2">
+          {(boardData.councilMembers ?? []).map(member => <div key={member.id} className="rounded-lg border border-cyan-500/20 p-3 text-sm"><b>{member.name}</b><div className="text-xs text-slate-400 mt-1">{member.hasVeto ? (isAr ? 'يملك حق الرفض الوقائي' : 'Protective veto') : member.canExecute ? (isAr ? 'تحكيم التنفيذ' : 'Execution arbitration') : (isAr ? 'تحليل وتصويت' : 'Analysis and voting')}</div></div>)}
+        </div>
+        {(boardData.recentDeliberations ?? []).slice(0, 3).map(session => <div key={session.id} className="border-t border-white/10 pt-3 text-sm"><b>{session.symbol}</b><p className="text-slate-300">{isAr ? session.consensusVerdictAr : session.consensusVerdictEn}</p><p className="text-xs text-slate-400">{isAr ? session.policyMutationSummaryAr : session.policyMutationSummaryEn}</p></div>)}
+      </section>
       {/* 🏛️ Top Header Panel */}
       <div className="holo-panel rounded-2xl p-6 border border-[rgba(0,243,255,0.3)] shadow-[0_0_30px_rgba(0,243,255,0.1)] relative overflow-hidden bg-gradient-to-br from-black/90 via-[#030712] to-black/90">
         <div className="absolute top-0 right-0 w-80 h-80 bg-cyan-500/5 rounded-full blur-3xl pointer-events-none" />
@@ -133,7 +160,7 @@ export const BoardOfDirectorsTab: React.FC<BoardOfDirectorsTabProps> = ({
                   {isAr ? 'مجلس الإدارة الكمي (Quantum Board of Directors)' : 'Quantum Board of Directors v6.0'}
                 </h2>
                 <span className="px-2 py-0.5 rounded text-[10px] font-mono bg-cyan-500/10 border border-cyan-500/30 text-cyan-300">
-                  {isAr ? '7 أعضاء: ملفان لكل عضو' : '7 Council Members · 2 Files Each'}
+                  {isAr ? `${boardData.councilMembers?.length ?? 0} أعضاء مجلس التنفيذ` : `${boardData.councilMembers?.length ?? 0} Execution Council Members`}
                 </span>
                 {isSyncing && (
                   <span className="px-2 py-0.5 rounded text-[10px] font-mono bg-amber-500/20 text-amber-300 border border-amber-500/40 flex items-center gap-1 animate-pulse">
@@ -202,16 +229,16 @@ export const BoardOfDirectorsTab: React.FC<BoardOfDirectorsTabProps> = ({
             </span>
             <div className="flex items-baseline gap-2 mt-1">
               <span className="text-2xl font-bold font-mono text-cyan-300">
-                {latestDecision ? `${Math.round(latestDecision.approvalRatio * 100)}%` : '74%'}
+                {latestDecision ? `${Math.round(latestDecision.approvalRatio * 100)}%` : '—'}
               </span>
               <span className="text-[11px] text-[var(--muted)] font-mono">
-                {isAr ? 'مطلوب ≥ 60%' : 'Required ≥ 60%'}
+                {isAr ? `المطلوب ≥ ${Math.round((boardData.activePolicy?.minApprovalRatio ?? 0) * 100)}%` : `Required ≥ ${Math.round((boardData.activePolicy?.minApprovalRatio ?? 0) * 100)}%`}
               </span>
             </div>
             <div className="w-full bg-white/10 h-1.5 rounded-full mt-2 overflow-hidden">
               <div
                 className="h-full bg-gradient-to-r from-cyan-500 to-emerald-400 rounded-full transition-all duration-500"
-                style={{ width: `${Math.min(100, Math.max(10, (latestDecision?.approvalRatio || 0.74) * 100))}%` }}
+                style={{ width: `${Math.min(100, Math.max(0, (latestDecision?.approvalRatio ?? 0) * 100))}%` }}
               />
             </div>
           </div>
@@ -222,7 +249,7 @@ export const BoardOfDirectorsTab: React.FC<BoardOfDirectorsTabProps> = ({
             </span>
             <div className="flex items-baseline gap-2 mt-1">
               <span className="text-2xl font-bold font-mono text-emerald-400">
-                {latestDecision ? `${latestDecision.guardsPassed}/8` : '7/8'}
+                {latestDecision ? `${latestDecision.guardsPassed}/8` : '—'}
               </span>
               <span className="text-[11px] text-[var(--muted)] font-mono">
                 {isAr ? 'حراس الأمان' : 'Protection Guards'}

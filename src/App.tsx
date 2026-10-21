@@ -11,6 +11,7 @@
  * Bilingual Support: Arabic (RTL) & English (LTR)
  */
 
+import { getFuturesEndpoints, readTickerSnapshot } from './lib/marketEndpoints';
 import React, { lazy, Suspense, useEffect, useRef, useState } from 'react';
 import {
   Activity,
@@ -90,8 +91,9 @@ export default function CyberPulseNexusApp() {
   const isAr = lang === 'ar';
 
   const [activeTab, setActiveTab] = useState<'matrix' | 'terminal' | 'board' | 'history' | 'strategies' | 'risk'>('matrix');
-  const [isRunning, setIsRunning] = useState<boolean>(true);
-  const [executionMode, setExecutionMode] = useState<'PAPER' | 'TESTNET' | 'LIVE'>('PAPER');
+  const [isRunning, setIsRunning] = useState<boolean>(false);
+  const [executionMode, setExecutionMode] = useState<'PAPER' | 'TESTNET' | 'LIVE'>('TESTNET');
+  const [backendReady, setBackendReady] = useState(false);
   const [markets, setMarkets] = useState<HolographicAsset[]>(INITIAL_MARKETS);
   const [selectedAsset, setSelectedAsset] = useState<HolographicAsset>(INITIAL_MARKETS[0]);
   const [isConnected, setIsConnected] = useState<boolean>(false);
@@ -157,7 +159,10 @@ export default function CyberPulseNexusApp() {
     try {
       const data = await fetchWithAuth('/api/live-status');
       if (data) {
-        if (['PAPER', 'TESTNET', 'LIVE'].includes(data.executionMode)) setExecutionMode(data.executionMode);
+        if (['PAPER', 'TESTNET', 'LIVE'].includes(data.executionMode)) {
+          setExecutionMode(data.executionMode);
+          setBackendReady(true);
+        }
         if (data.balance) {
           setAccountState({
             totalEquity: data.balance.totalEquity || 0,
@@ -189,7 +194,8 @@ export default function CyberPulseNexusApp() {
         }
       }
     } catch {
-      // Backend status polling notice
+      setBackendReady(false);
+      setIsRunning(false);
     }
   };
 
@@ -208,7 +214,7 @@ export default function CyberPulseNexusApp() {
       // Priority 2: Direct Binance API fallback
       if (!rawKlines || !Array.isArray(rawKlines) || rawKlines.length === 0) {
         try {
-          const res = await fetch(`https://api.binance.com/api/v3/klines?symbol=${symUpper}&interval=1m&limit=25`);
+          const res = await fetch(`${getFuturesEndpoints(executionMode).rest}/fapi/v1/klines?symbol=${symUpper}&interval=1m&limit=25`);
           if (res.ok) rawKlines = await res.json();
         } catch {}
       }
@@ -265,7 +271,7 @@ export default function CyberPulseNexusApp() {
       // Priority 2: Direct Binance API
       if (!depthData || !depthData.bids || !depthData.asks) {
         try {
-          const res = await fetch(`https://api.binance.com/api/v3/depth?symbol=${symUpper}&limit=10`);
+          const res = await fetch(`${getFuturesEndpoints(executionMode).rest}/fapi/v1/depth?symbol=${symUpper}&limit=10`);
           if (res.ok) depthData = await res.json();
         } catch {}
       }
@@ -319,9 +325,18 @@ export default function CyberPulseNexusApp() {
     };
   }, []);
 
+  useEffect(() => {
+    if (!user) { setBackendReady(false); return; }
+    fetchLiveServerStatus();
+    const timer = setInterval(fetchLiveServerStatus, 4000);
+    return () => clearInterval(timer);
+  }, [user]);
+
   // Real-Time Binance REST API and WebSocket Integration
   useEffect(() => {
+    if (!user || !backendReady) return;
     let isMounted = true;
+    let reconnectTimer: ReturnType<typeof setTimeout> | undefined;
 
     // Fetch initial 24hr real ticker data with robust multi-stage fallback
     const fetchLiveBinanceTickers = async () => {
@@ -332,7 +347,7 @@ export default function CyberPulseNexusApp() {
         try {
           const res = await authenticatedApiFetch('/api/binance/tickers');
           if (res.ok) {
-            data = await res.json();
+            data = readTickerSnapshot(await res.json());
           }
         } catch {
           // Proceed to next fallback
@@ -341,9 +356,9 @@ export default function CyberPulseNexusApp() {
         // Stage 2: Direct Binance fetch if proxy didn't deliver data
         if (!data || !Array.isArray(data) || data.length === 0) {
           try {
-            const res = await fetch('https://api.binance.com/api/v3/ticker/24hr');
+            const res = await fetch(`${getFuturesEndpoints(executionMode).rest}/fapi/v1/ticker/24hr`);
             if (res.ok) {
-              data = await res.json();
+              data = readTickerSnapshot(await res.json());
             }
           } catch {
             // Handled gracefully below
@@ -404,11 +419,10 @@ export default function CyberPulseNexusApp() {
     };
 
     fetchLiveBinanceTickers();
-    fetchLiveServerStatus();
 
     // Combined Binance WebSocket stream for real tickers
     const streams = INITIAL_MARKETS.map((m) => `${m.binanceSymbol}@ticker`).join('/');
-    const wsUrl = `wss://stream.binance.com:9443/stream?streams=${streams}`;
+    const wsUrl = `${getFuturesEndpoints(executionMode).websocket}/stream?streams=${streams}`;
 
     const connectWebSocket = () => {
       const ws = new WebSocket(wsUrl);
@@ -468,7 +482,7 @@ export default function CyberPulseNexusApp() {
       ws.onclose = () => {
         if (isMounted) {
           setIsConnected(false);
-          setTimeout(connectWebSocket, 3000);
+          reconnectTimer = setTimeout(connectWebSocket, 3000);
         }
       };
     };
@@ -476,17 +490,19 @@ export default function CyberPulseNexusApp() {
     connectWebSocket();
 
     // Poll live server status every 4 seconds to sync real balances & trades
-    const serverPollInterval = setInterval(fetchLiveServerStatus, 4000);
+
 
     return () => {
       isMounted = false;
-      clearInterval(serverPollInterval);
+      clearTimeout(reconnectTimer);
+      setIsConnected(false);
       if (wsRef.current) wsRef.current.close();
     };
-  }, []);
+  }, [user, backendReady, executionMode]);
 
   // Fetch real klines & depth whenever selected asset changes
   useEffect(() => {
+    if (!user || !backendReady) return;
     fetchRealKlines(selectedAsset.binanceSymbol);
     fetchRealDepth(selectedAsset.binanceSymbol);
 
@@ -496,7 +512,7 @@ export default function CyberPulseNexusApp() {
     }, 15000);
 
     return () => clearInterval(klineInterval);
-  }, [selectedAsset.binanceSymbol]);
+  }, [selectedAsset.binanceSymbol, user, backendReady, executionMode]);
 
   // Execute Real Trade through Backend Order Gateway
   const [closingSymbols, setClosingSymbols] = useState<Record<string, boolean>>({});
@@ -520,7 +536,7 @@ export default function CyberPulseNexusApp() {
   };
 
   const handleExecuteTrade = async (side: 'BUY' | 'SELL') => {
-    if (isExecuting || selectedAsset.price <= 0) return;
+    if (!backendReady || isExecuting || selectedAsset.price <= 0) return;
     setIsExecuting(true);
     playHoloTone(side === 'BUY' ? 1200 : 750, 0.12);
 
@@ -646,7 +662,7 @@ export default function CyberPulseNexusApp() {
             }`}
           >
             <Radio className="w-3 h-3 animate-pulse shrink-0" />
-            <span>{executionMode}</span>
+            <span>{backendReady ? executionMode : (isAr ? 'جار التحقق' : 'Checking mode')}</span>
           </div>
 
           {/* Sound Toggle */}

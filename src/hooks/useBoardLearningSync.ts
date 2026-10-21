@@ -1,3 +1,4 @@
+import type { ActiveStrategyPolicy, BoardDeliberationSession, CouncilMemberDefinition } from '../strategies/BoardOfDirectorsEngine';
 import { authenticatedApiFetch } from '../lib/api.ts';
 /**
  * useBoardLearningSync.ts
@@ -77,6 +78,9 @@ export interface TradeLearningEvent {
 }
 
 export interface BoardStatusReport {
+  activePolicy?: ActiveStrategyPolicy;
+  recentDeliberations?: BoardDeliberationSession[];
+  councilMembers?: CouncilMemberDefinition[];
   round: number;
   totalAgents: number;
   alphaAgentsCount: number;
@@ -241,7 +245,7 @@ export function useBoardLearningSync(initialBoardData?: BoardStatusReport | null
   // Sync with incoming server status report if it provides fresher data
   useEffect(() => {
     if (initialBoardData) {
-      if (initialBoardData.agents && initialBoardData.agents.length === 14) {
+      if (initialBoardData.agents && initialBoardData.agents.length > 0) {
         setAgents(prev => {
           // Merge preserving active visual delta cues
           return initialBoardData.agents.map(serverAgent => {
@@ -255,13 +259,11 @@ export function useBoardLearningSync(initialBoardData?: BoardStatusReport | null
           });
         });
       }
-      if (initialBoardData.latestDecision) {
-        setLatestDecision(initialBoardData.latestDecision);
-      }
+      setLatestDecision(initialBoardData.latestDecision ?? null);
       if (initialBoardData.recentHistory) {
         setDecisionHistory(initialBoardData.recentHistory);
       }
-      if (initialBoardData.round) {
+      if (typeof initialBoardData.round === 'number') {
         setRound(initialBoardData.round);
       }
       if (initialBoardData.recentLearningEvents && initialBoardData.recentLearningEvents.length > 0) {

@@ -1,5 +1,5 @@
 /** Botkeep owns the execution engine; Pages hosts the UI; the Worker owns D1.
- * Local user authentication requires a persistent AUTH_DB_PATH outside dist.
+ * User authentication persists in D1; AUTH_DB_PATH is a legacy migration source.
  * Account provisioning uses OPERATOR_SECRET; JWT operators must be in ADMIN_EMAILS.
  */
 
@@ -10,8 +10,9 @@ import express, { Request, Response, NextFunction } from 'express';
 import expressWs from 'express-ws';
 import path from 'path';
 import fs from 'fs';
-import sqlite3 from 'sqlite3';
+import { AuthStore } from './src/storage/AuthStore.ts';
 import { randomUUID } from 'node:crypto';
+import { getFuturesEndpoints } from './src/lib/marketEndpoints.ts';
 import { RuntimeSupervisor } from './src/server/RuntimeSupervisor.ts';
 import { submitManualOrder } from './src/server/manualOrders.ts';
 import { secretEquals, isOperator, rateLimit } from './src/server/security.ts';
@@ -80,30 +81,6 @@ const ok = (res: Response, data: Record<string, any> = {}) =>
 const fail = (res: Response, code: number, error: string, extra: Record<string, any> = {}) =>
   res.status(code).json({ success: false, error, ...extra });
 
-/**
- * Retry helper with exponential backoff for DB operations
- */
-async function retryWithBackoff<T>(
-  operation: () => Promise<T>,
-  maxAttempts: number = 3,
-  initialDelayMs: number = 100
-): Promise<T> {
-  let lastError: Error | null = null;
-  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-    try {
-      return await operation();
-    } catch (err) {
-      lastError = err as Error;
-      if (attempt < maxAttempts) {
-        const delayMs = initialDelayMs * Math.pow(2, attempt - 1);
-        console.warn(`⚠️ DB operation failed (attempt ${attempt}/${maxAttempts}). Retrying in ${delayMs}ms...`, (err as any)?.message);
-        await new Promise(r => setTimeout(r, delayMs));
-      }
-    }
-  }
-  throw lastError || new Error('Max retry attempts exceeded');
-}
-
 /* ------------------------------------------------------------------ */
 /* app bootstrap                                                       */
 /* ------------------------------------------------------------------ */
@@ -121,48 +98,14 @@ app.use((_req, res, next) => {
 app.use('/api/auth', rateLimit(20, 60_000));
 app.use(express.json({ limit: '1mb' }));
 
-// SQLite local DB for users (auth)
+// AUTH_DB_PATH is only a legacy migration source. D1 owns account persistence.
 const dbPath = path.resolve(process.env.AUTH_DB_PATH || 'data/auth/users.db');
 const publicDir = path.resolve(process.env.FRONTEND_DIST_DIR || 'dist');
 if (dbPath === publicDir || dbPath.startsWith(publicDir + path.sep)) {
   throw new Error('AUTH_DB_PATH must be outside FRONTEND_DIST_DIR');
 }
-fs.mkdirSync(path.dirname(dbPath), { recursive: true, mode: 0o700 });
 let authDbReady = false;
-let userDb: sqlite3.Database | null = null;
-
-const initDb = (): Promise<void> => {
-  return new Promise((resolve, reject) => {
-    userDb = new sqlite3.Database(dbPath, (err) => {
-      if (err) {
-        console.error('❌ SQLite init failed:', err.message);
-        reject(err);
-        return;
-      }
-      userDb!.serialize(() => {
-        userDb!.run(`
-          CREATE TABLE IF NOT EXISTS users (
-            id TEXT PRIMARY KEY,
-            email TEXT UNIQUE NOT NULL,
-            password_hash TEXT NOT NULL,
-            created_at INTEGER NOT NULL
-          );
-        `, (err) => {
-          if (err && !err.message.includes('already exists')) {
-            console.error('❌ Table creation failed:', err);
-            reject(err);
-          } else {
-            userDb!.run(`CREATE INDEX IF NOT EXISTS idx_users_email ON users(email)`, () => {
-              authDbReady = true;
-              console.log('✅ SQLite users DB ready');
-              resolve();
-            });
-          }
-        });
-      });
-    });
-  });
-};
+const authStore = new AuthStore();
 
 // Manual CORS (no extra dep — free-tier image stays small).
 app.use((req: Request, res: Response, next: NextFunction) => {
@@ -299,7 +242,7 @@ const bootTime = Date.now();
 
 app.post('/api/auth/register', requireAuth, async (req: Request, res: Response) => {
   try {
-    if (!userDb) return fail(res, 500, 'Database unavailable');
+    if (!authDbReady) return fail(res, 503, 'Authentication storage unavailable');
     const { password } = req.body || {};
     const email = typeof req.body?.email === 'string' ? req.body.email.trim().toLowerCase() : '';
 
@@ -312,36 +255,10 @@ app.post('/api/auth/register', requireAuth, async (req: Request, res: Response) 
 
     if (!isOperator(email)) return fail(res, 403, 'Account must be listed in ADMIN_EMAILS');
 
-    // Check if user already exists (with retry)
-    const existingUser = await retryWithBackoff(() =>
-      new Promise<any>((resolve, reject) => {
-        userDb!.get('SELECT id FROM users WHERE email = ?', [email], (err: any, row: any) => {
-          if (err) reject(err);
-          else resolve(row);
-        });
-      })
-    );
-
-    if (existingUser) {
-      return fail(res, 409, 'Email already registered');
-    }
-
-    // Hash password and insert (with retry)
-    const passwordHash = await hashPassword(password);
-    const userId = `user_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`;
-
-    await retryWithBackoff(() =>
-      new Promise<void>((resolve, reject) => {
-        userDb!.run(
-          `INSERT INTO users (id, email, password_hash, created_at) VALUES (?, ?, ?, ?)`,
-          [userId, email, passwordHash, Date.now()],
-          (err: any) => {
-            if (err) reject(err);
-            else resolve();
-          }
-        );
-      })
-    );
+    if (await authStore.find(email)) return fail(res, 409, 'Email already registered');
+    const userId = randomUUID();
+    const created = await authStore.create({ id: userId, email, password_hash: await hashPassword(password), created_at: Date.now() });
+    if (!created) return fail(res, 409, 'Email already registered');
 
     const token = generateToken({ userId, email }, JWT_SECRET);
     return ok(res, {
@@ -351,13 +268,13 @@ app.post('/api/auth/register', requireAuth, async (req: Request, res: Response) 
     });
   } catch (err: any) {
     console.error('Register error:', err.message);
-    return fail(res, 500, err.message);
+    return fail(res, 503, 'Authentication storage unavailable');
   }
 });
 
 app.post('/api/auth/login', async (req: Request, res: Response) => {
   try {
-    if (!userDb) return fail(res, 500, 'Database unavailable');
+    if (!authDbReady) return fail(res, 503, 'Authentication storage unavailable');
     const { password } = req.body || {};
     const email = typeof req.body?.email === 'string' ? req.body.email.trim().toLowerCase() : '';
 
@@ -367,31 +284,13 @@ app.post('/api/auth/login', async (req: Request, res: Response) => {
 
     if (!isOperator(email)) return fail(res, 401, 'Invalid email or password');
 
-    // Get user from local DB
-    userDb.get('SELECT id, email, password_hash FROM users WHERE email = ?', [email], async (err: any, user: any) => {
-      if (err) {
-        return fail(res, 500, err.message);
-      }
-      if (!user) {
-        return fail(res, 401, 'Invalid email or password');
-      }
-
-      const passwordMatch = await comparePassword(password, user.password_hash);
-
-      if (!passwordMatch) {
-        return fail(res, 401, 'Invalid email or password');
-      }
-
-      const token = generateToken({ userId: user.id, email: user.email }, JWT_SECRET);
-
-      return ok(res, {
-        token,
-        user: { userId: user.id, email: user.email }
-      });
-    });
+    const user = await authStore.find(email);
+    if (!user || !await comparePassword(password, user.password_hash)) return fail(res, 401, 'Invalid email or password');
+    const token = generateToken({ userId: user.id, email: user.email }, JWT_SECRET);
+    return ok(res, { token, user: { userId: user.id, email: user.email } });
   } catch (err: any) {
     console.error('Login error:', err.message);
-    return fail(res, 500, err.message);
+    return fail(res, 503, 'Authentication storage unavailable');
   }
 });
 
@@ -456,6 +355,8 @@ app.get('/api/live-status', requireAuth, async (_req: Request, res: Response) =>
       positions: Array.isArray(positions) ? positions : [],
       orders: Array.isArray(orders) ? orders : [],
       killSwitchLevel: ksLevel,
+      boardOfDirectors: { ...board.getStatusReport(), councilMembers: board.getCouncilStructure() },
+      prices: pipeline.getMarketData().getAllPrices(),
       timestamp: Date.now(),
     });
   } catch (e: any) {
@@ -497,6 +398,26 @@ app.get('/api/binance/tickers', requireAuth, async (req: Request, res: Response)
     fail(res, 502, e?.message || 'binance proxy failed');
   }
 });
+
+for (const resource of ['klines', 'depth'] as const) {
+  app.get(`/api/binance/${resource}`, requireAuth, async (req, res) => {
+    const symbol = typeof req.query.symbol === 'string' ? req.query.symbol : '';
+    const limit = Number(req.query.limit ?? (resource === 'depth' ? 10 : 25));
+    if (!/^[A-Z0-9]{2,24}$/.test(symbol) || !Number.isInteger(limit) || limit < 1 || limit > 500
+      || (resource === 'depth' && ![5, 10, 20, 50, 100, 500].includes(limit))
+      || (resource === 'klines' && req.query.interval !== undefined && req.query.interval !== '1m')) {
+      return fail(res, 400, 'Invalid market data request');
+    }
+    try {
+      const { rest } = getFuturesEndpoints(pipeline.getOrderGateway().getExecutionMode());
+      const query = new URLSearchParams({ symbol, limit: String(limit) });
+      if (resource === 'klines') query.set('interval', '1m');
+      const response = await fetch(`${rest}/fapi/v1/${resource}?${query}`, { signal: AbortSignal.timeout(8000) });
+      if (!response.ok) return fail(res, 502, `Binance Futures ${response.status}`);
+      res.json(await response.json());
+    } catch { fail(res, 502, 'Market data unavailable'); }
+  });
+}
 
 /* ------------------------------------------------------------------ */
 /* board of directors                                                  */
@@ -809,11 +730,13 @@ const httpServer = app.listen(PORT, process.env.HOST || '0.0.0.0', async () => {
     console.warn('⚠️  [SECURITY] JWT_SECRET is using default value. Set JWT_SECRET env var for production!');
   }
 
-  // Initialize SQLite users DB
+  // Initialize durable accounts before starting the trading engine.
   try {
-    await initDb();
+    await authStore.initialize(dbPath, isOperator);
+    authDbReady = true;
+    console.log('✅ D1 users DB ready');
   } catch (err: any) {
-    console.error('❌ SQLite init failed:', err.message);
+    console.error('❌ Authentication initialization failed:', err.message);
     process.exit(1);
   }
 
@@ -855,7 +778,6 @@ async function shutdown() {
     await pipeline.stop();
     await orderWrites;
     await supervisor?.stop();
-    await new Promise<void>((resolve) => userDb ? userDb.close(() => resolve()) : resolve());
     process.exit(0);
   } catch { process.exit(1); }
 }
