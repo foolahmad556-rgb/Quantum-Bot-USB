@@ -174,6 +174,9 @@ const supervisor = cloudDb ? new RuntimeSupervisor(cloudDb, process.env.EXCHANGE
 }) : null;
 pipeline.setRuntimeSafetyGuard(() => !!pipeline.isRunning && !!supervisor?.canEnter());
 let startInProgress: Promise<void> | null = null;
+let autostartRetryTimer: ReturnType<typeof setTimeout> | null = null;
+let autostartRetryAttempt = 0;
+let autostartEnabled = AUTOSTART;
 async function startTrading() {
   if (pipeline.isRunning) return;
   if (startInProgress) return startInProgress;
@@ -184,6 +187,24 @@ async function startTrading() {
     catch (error) { await supervisor.stop(); throw error; }
   })();
   try { await startInProgress; } finally { startInProgress = null; }
+}
+function scheduleAutostartRetry(error: unknown) {
+  if (!autostartEnabled || pipeline.isRunning || autostartRetryTimer) return;
+  const delayMs = Math.min(60_000, 5_000 * 2 ** Math.min(autostartRetryAttempt, 3));
+  autostartRetryAttempt += 1;
+  const detail = error instanceof Error ? error.message : String(error);
+  console.error(`❌ Trading start failed; retrying in ${Math.ceil(delayMs / 1000)}s: ${detail}`);
+  autostartRetryTimer = setTimeout(async () => {
+    autostartRetryTimer = null;
+    if (!autostartEnabled || pipeline.isRunning) return;
+    try {
+      await startTrading();
+      autostartRetryAttempt = 0;
+      console.log('✅ TradingPipeline started after an automatic retry.');
+    } catch (retryError) {
+      scheduleAutostartRetry(retryError);
+    }
+  }, delayMs);
 }
 
 // Persist order status events in order, including acknowledgments and partial fills.
@@ -319,8 +340,9 @@ app.get('/api/health', (_req, res) => res.json({ status: 'alive', tradingRunning
 app.get('/api/ready', async (_req, res) => {
   const storage = await checkStorage();
   const executionOwner = !pipeline.isRunning || !!supervisor?.canEnter();
-  const ready = authDbReady && storage && executionOwner;
-  res.status(ready ? 200 : 503).json({ ready, auth: authDbReady, storage, executionOwner });
+  const tradingReady = !autostartEnabled || !!pipeline.isRunning;
+  const ready = authDbReady && storage && executionOwner && tradingReady;
+  res.status(ready ? 200 : 503).json({ ready, auth: authDbReady, storage, executionOwner, tradingRunning: !!pipeline.isRunning, tradingReady });
 });
 
 app.get('/api/system-health', requireAuth, async (_req: Request, res: Response) => {
@@ -367,15 +389,23 @@ app.get('/api/live-status', requireAuth, async (_req: Request, res: Response) =>
 
 app.post('/api/protected/trading/start', requireAuth, async (_req: Request, res: Response) => {
   try {
+    autostartEnabled = true;
     await startTrading();
     return ok(res, { isRunning: !!pipeline.isRunning });
   } catch (e: any) {
+    scheduleAutostartRetry(e);
     return fail(res, 409, e?.message || 'trading start failed');
   }
 });
 
 app.post('/api/protected/trading/stop', requireAuth, async (_req: Request, res: Response) => {
   try {
+    autostartEnabled = false;
+    if (autostartRetryTimer) {
+      clearTimeout(autostartRetryTimer);
+      autostartRetryTimer = null;
+    }
+    autostartRetryAttempt = 0;
     await pipeline.stop();
     await supervisor?.stop();
     return ok(res, { isRunning: false });
@@ -749,7 +779,7 @@ const httpServer = app.listen(PORT, process.env.HOST || '0.0.0.0', async () => {
     await startTrading();
     console.log('✅ TradingPipeline started');
   } catch (e: any) {
-    console.error('❌ Pipeline start failed (API still live):', e?.message || e);
+    scheduleAutostartRetry(e);
   }
 });
 
