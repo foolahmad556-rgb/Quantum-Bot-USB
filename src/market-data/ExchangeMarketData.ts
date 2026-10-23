@@ -33,6 +33,13 @@ export interface MarketDataSourceFreshness {
 }
 
 const ENTRY_MARKET_DATA_MAX_AGE_MS = 15_000;
+const MAX_BINANCE_STREAMS_PER_CONNECTION = 1024;
+const MARKET_STREAMS_PER_SYMBOL = 2; // aggTrade + kline_1m
+const MAX_MARKET_SYMBOLS_PER_CONNECTION = Math.floor(
+  MAX_BINANCE_STREAMS_PER_CONNECTION / MARKET_STREAMS_PER_SYMBOL
+);
+const MAX_DEPTH_SYMBOLS_PER_CONNECTION = MAX_BINANCE_STREAMS_PER_CONNECTION;
+const BINANCE_CONNECTION_ROTATION_MS = 23 * 60 * 60 * 1000 + 55 * 60 * 1000;
 
 export const DEFAULT_SYMBOLS: Record<AssetSymbol, SymbolConfig> = {
   'BTC/USDT': {
@@ -133,8 +140,8 @@ export class ExchangeMarketData extends EventEmitter {
   private rng: () => number = mulberry32(0x7ade);
 
   // Live WebSocket variables
-  private marketWs: WebSocket | null = null;
-  private depthWs: WebSocket | null = null;
+  private marketWs: WebSocket[] = [];
+  private depthWs: WebSocket[] = [];
   private executionMode: string;
   private activeCryptoSymbols: AssetSymbol[] = [
     'BTC/USDT',
@@ -152,8 +159,10 @@ export class ExchangeMarketData extends EventEmitter {
     'RENDER/USDT',
   ];
   private reconnectTimer: NodeJS.Timeout | null = null;
+  private connectionRotationTimer: NodeJS.Timeout | null = null;
   private reconnectAttempt = 0;
   private livePollTimer: NodeJS.Timeout | null = null;
+  private readonly pendingWarmupSymbols = new Set<AssetSymbol>();
 
   constructor(orderBookBuilder?: OrderBookBuilder, activeSymbols?: AssetSymbol[]) {
     super();
@@ -193,7 +202,54 @@ export class ExchangeMarketData extends EventEmitter {
 
   public ensureSymbols(symbols: AssetSymbol[]): void {
     const combined = [...new Set([...this.activeCryptoSymbols, ...symbols])];
-    if (combined.length !== this.activeCryptoSymbols.length) this.startStreaming(300, combined);
+    const changed = this.syncSubscriptions(combined);
+    if (changed && !this.isRunning) this.startStreaming(300, combined);
+  }
+
+  /**
+   * Keep the live Binance subscriptions aligned with the pipeline's current universe.
+   * The comparison is set-based so screener ordering changes do not reconnect streams.
+   */
+  public syncSubscriptions(symbols: AssetSymbol[]): boolean {
+    const next = [...new Set(symbols.filter(s => s.endsWith('/USDT')))];
+    const current = new Set(this.activeCryptoSymbols);
+    const changed = next.length !== current.size || next.some(symbol => !current.has(symbol));
+    if (!changed || next.length === 0) return false;
+    if (!this.isRunning) {
+      this.activeCryptoSymbols = next;
+      return true;
+    }
+    this.startStreaming(300, next);
+    return true;
+  }
+
+  /**
+   * Update live subscriptions and warm up symbols newly admitted by the screener.
+   * Pending symbols remain ineligible for entries until their historical candles load.
+   */
+  public async syncSubscriptionsWithBackfill(symbols: AssetSymbol[]): Promise<boolean> {
+    const next = [...new Set(symbols.filter(s => s.endsWith('/USDT')))];
+    const current = new Set(this.activeCryptoSymbols);
+    const added = next.filter(symbol => !current.has(symbol));
+    const retry = [...this.pendingWarmupSymbols].filter(symbol => next.includes(symbol));
+    for (const symbol of [...added, ...retry]) this.pendingWarmupSymbols.add(symbol);
+
+    const changed = this.syncSubscriptions(next);
+    const warmupTargets = [...new Set([...added, ...retry])];
+    if (warmupTargets.length === 0) return changed;
+
+    await this.backfillRealCandles(warmupTargets);
+    let loaded = 0;
+    for (const symbol of warmupTargets) {
+      if ((this.candleHistory.get(symbol)?.length || 0) >= 100) {
+        this.pendingWarmupSymbols.delete(symbol);
+        loaded++;
+      }
+    }
+    if (loaded < warmupTargets.length) {
+      console.warn(`⚠️ ExchangeMarketData: ${warmupTargets.length - loaded} symbol warmups remain pending; entries stay blocked`);
+    }
+    return changed;
   }
 
   public getLastUpdateTime(symbol: AssetSymbol): number {
@@ -205,6 +261,7 @@ export class ExchangeMarketData extends EventEmitter {
   }
 
   public isEntryMarketDataFresh(symbol: AssetSymbol, now: number = Date.now()): boolean {
+    if (this.pendingWarmupSymbols.has(symbol)) return false;
     const freshness = this.getSourceFreshness(symbol);
     const book = this.orderBookBuilder.getBook(symbol);
     const tradeAge = now - freshness.aggTrade;
@@ -308,6 +365,7 @@ export class ExchangeMarketData extends EventEmitter {
 
     // Start WebSocket real-time streams
     this.startWebSocketStreaming();
+    this.scheduleConnectionRotation();
 
     // 5. Fallback heartbeat timer: keeps system health metrics alive
     this.intervalId = setInterval(() => {
@@ -408,23 +466,37 @@ export class ExchangeMarketData extends EventEmitter {
     this.startStreaming();
   }
 
+  private scheduleConnectionRotation(): void {
+    if (this.connectionRotationTimer) clearTimeout(this.connectionRotationTimer);
+    this.connectionRotationTimer = setTimeout(() => {
+      this.connectionRotationTimer = null;
+      if (!this.isRunning) return;
+      console.log('🔄 ExchangeMarketData: Rotating Binance WebSocket connections before the 24-hour limit.');
+      this.reconnectStalledFeed();
+    }, BINANCE_CONNECTION_ROTATION_MS);
+  }
+
   public stopStreaming() {
     this.isRunning = false;
     if (this.intervalId) {
       clearInterval(this.intervalId);
       this.intervalId = null;
     }
-    if (this.marketWs) {
-      this.marketWs.removeAllListeners('close'); this.marketWs.terminate();
-      this.marketWs = null;
+    for (const ws of this.marketWs) {
+      try { ws.removeAllListeners('close'); ws.terminate(); } catch (e) {}
     }
-    if (this.depthWs) {
-      this.depthWs.removeAllListeners('close'); this.depthWs.terminate();
-      this.depthWs = null;
+    for (const ws of this.depthWs) {
+      try { ws.removeAllListeners('close'); ws.terminate(); } catch (e) {}
     }
+    this.marketWs = [];
+    this.depthWs = [];
     if (this.reconnectTimer) {
       clearTimeout(this.reconnectTimer);
       this.reconnectTimer = null;
+    }
+    if (this.connectionRotationTimer) {
+      clearTimeout(this.connectionRotationTimer);
+      this.connectionRotationTimer = null;
     }
     console.log('🔴 ExchangeMarketData: Stopped.');
   }
@@ -436,37 +508,44 @@ export class ExchangeMarketData extends EventEmitter {
 
     const baseWsHost = this.executionMode === 'TESTNET' ? 'wss://fstream.binancefuture.com' : 'wss://fstream.binance.com';
 
-    // 1. Regular market data streams: aggTrade & kline_1m
-    const marketStreams = rawPairs.flatMap(symbol => [
-      `${symbol}@aggTrade`,
-      `${symbol}@kline_1m`
-    ]).join('/');
-    const marketUrl = `${baseWsHost}/stream?streams=${marketStreams}`;
+    const chunk = (items: string[], size: number): string[][] => {
+      const groups: string[][] = [];
+      for (let i = 0; i < items.length; i += size) groups.push(items.slice(i, i + size));
+      return groups;
+    };
 
-    // 2. High-frequency OrderBook depth stream: depth10@100ms
-    const depthStreams = rawPairs.map(symbol => `${symbol}@depth10@100ms`).join('/');
-    const depthUrl = `${baseWsHost}/stream?streams=${depthStreams}`;
+    // Binance allows 1024 streams per connection: two market streams per symbol.
+    const marketGroups = chunk(rawPairs, MAX_MARKET_SYMBOLS_PER_CONNECTION);
+    marketGroups.forEach((group, index) => {
+      const streams = group.flatMap(symbol => [`${symbol}@aggTrade`, `${symbol}@kline_1m`]).join('/');
+      this.connectMarketWs(`${baseWsHost}/stream?streams=${streams}`, index);
+    });
 
-    this.connectMarketWs(marketUrl);
-    this.connectDepthWs(depthUrl);
+    // Depth uses one stream per symbol, so it has the full 1024-symbol capacity.
+    const depthGroups = chunk(rawPairs, MAX_DEPTH_SYMBOLS_PER_CONNECTION);
+    depthGroups.forEach((group, index) => {
+      const streams = group.map(symbol => `${symbol}@depth10@100ms`).join('/');
+      this.connectDepthWs(`${baseWsHost}/stream?streams=${streams}`, index);
+    });
 
   }
 
 
-  private connectMarketWs(url: string) {
-    if (this.marketWs) {
-      try { this.marketWs.removeAllListeners('close'); this.marketWs.terminate(); } catch (e) {}
+  private connectMarketWs(url: string, index: number) {
+    if (this.marketWs[index]) {
+      try { this.marketWs[index].removeAllListeners('close'); this.marketWs[index].terminate(); } catch (e) {}
     }
 
     try {
-      this.marketWs = new WebSocket(url);
+      const ws = new WebSocket(url);
+      this.marketWs[index] = ws;
 
-      this.marketWs.on('open', () => {
+      ws.on('open', () => {
         this.reconnectAttempt = 0;
-        console.log(`✅ ExchangeMarketData: Connected to Binance Futures live trade & kline stream`);
+        console.log(`✅ ExchangeMarketData: Connected to Binance Futures live trade & kline stream (group ${index + 1})`);
       });
 
-      this.marketWs.on('message', (data: any) => {
+      ws.on('message', (data: any) => {
         try {
           const msg = JSON.parse(data.toString());
           this.handleWebSocketMessage(msg);
@@ -475,34 +554,35 @@ export class ExchangeMarketData extends EventEmitter {
         }
       });
 
-      this.marketWs.on('close', () => {
+      ws.on('close', () => {
         if (this.isRunning) {
-          console.log(`⚠️ ExchangeMarketData: Market WebSocket closed. Reconnecting in ${getReconnectDelay(this.reconnectAttempt)}ms...`);
+          console.log(`⚠️ ExchangeMarketData: Market WebSocket group ${index + 1} closed. Reconnecting in ${getReconnectDelay(this.reconnectAttempt)}ms...`);
           this.scheduleReconnect();
         }
       });
 
-      this.marketWs.on('error', (err) => {
-        console.warn('⚠️ ExchangeMarketData: Market WebSocket warning:', err.message);
+      ws.on('error', (err) => {
+        console.warn(`⚠️ ExchangeMarketData: Market WebSocket group ${index + 1} warning:`, err.message);
       });
     } catch (err: any) {
-      console.warn('⚠️ ExchangeMarketData: Could not open market WS:', err.message);
+      console.warn(`⚠️ ExchangeMarketData: Could not open market WS group ${index + 1}:`, err.message);
     }
   }
 
-  private connectDepthWs(url: string) {
-    if (this.depthWs) {
-      try { this.depthWs.removeAllListeners('close'); this.depthWs.terminate(); } catch (e) {}
+  private connectDepthWs(url: string, index: number) {
+    if (this.depthWs[index]) {
+      try { this.depthWs[index].removeAllListeners('close'); this.depthWs[index].terminate(); } catch (e) {}
     }
 
     try {
-      this.depthWs = new WebSocket(url);
+      const ws = new WebSocket(url);
+      this.depthWs[index] = ws;
 
-      this.depthWs.on('open', () => {
-        console.log(`✅ ExchangeMarketData: Connected to Binance Futures live L2 depth stream`);
+      ws.on('open', () => {
+        console.log(`✅ ExchangeMarketData: Connected to Binance Futures live L2 depth stream (group ${index + 1})`);
       });
 
-      this.depthWs.on('message', (data: any) => {
+      ws.on('message', (data: any) => {
         try {
           const msg = JSON.parse(data.toString());
           this.handleWebSocketMessage(msg);
@@ -511,17 +591,17 @@ export class ExchangeMarketData extends EventEmitter {
         }
       });
 
-      this.depthWs.on('close', () => {
+      ws.on('close', () => {
         if (this.isRunning) {
           this.scheduleReconnect();
         }
       });
 
-      this.depthWs.on('error', (err) => {
-        console.warn('⚠️ ExchangeMarketData: Depth WebSocket warning:', err.message);
+      ws.on('error', (err) => {
+        console.warn(`⚠️ ExchangeMarketData: Depth WebSocket group ${index + 1} warning:`, err.message);
       });
     } catch (err: any) {
-      console.warn('⚠️ ExchangeMarketData: Could not open depth WS:', err.message);
+      console.warn(`⚠️ ExchangeMarketData: Could not open depth WS group ${index + 1}:`, err.message);
     }
   }
 

@@ -66,6 +66,7 @@ import {
   toExecutionLedgerFill,
 } from '../execution/ExecutionLedger';
 import { settleTradeRecord } from './TradingPipelineSettlement';
+import { StaleSymbolWarningTracker } from '../market-data/StaleSymbolWarningTracker';
 
 /** Apply a council size decision without ever increasing the risk-sized quantity. */
 export function applyBoardSizeMultiplier(quantity: number, multiplier: number): number {
@@ -108,6 +109,7 @@ export class TradingPipeline {
   private scaleInManager: ScaleInManager;
   private lastSnapshotTime: number = 0;
   private inFlightSymbols: Set<string> = new Set();
+  private readonly staleSymbolWarnings = new StaleSymbolWarningTracker();
   private peakEquityObserved: number = 0;
   private lastRiskDay: string = '';
   private pendingProtection: Map<string, {
@@ -327,6 +329,7 @@ export class TradingPipeline {
       await this.reconcileState();
       this.portfolioSizer.updateBalance(this.userDataStream.getBalance().totalEquity);
       this.config.activeSymbols = this.portfolioSizer.getAllowedSymbols();
+      this.marketData.syncSubscriptions(this.config.activeSymbols);
 
       // 2. Warm up every subscribed symbol, including existing exchange positions.
       await this.initializeMarketData();
@@ -477,9 +480,14 @@ export class TradingPipeline {
 
         // Verify market data feeds are active and fresh
         const now = Date.now();
+        this.staleSymbolWarnings.forgetExcept(this.config.activeSymbols);
         for (const sym of this.config.activeSymbols) {
-          if (!this.marketData.isEntryMarketDataFresh(sym, now)) {
+          const fresh = this.marketData.isEntryMarketDataFresh(sym, now);
+          const warning = this.staleSymbolWarnings.observe(sym, fresh, now);
+          if (warning === 'warn') {
             console.warn(`⚠️ stale market data for symbol ${sym}; new entries blocked for this symbol until live feeds recover`);
+          } else if (warning === 'recovered') {
+            console.log(`✅ market data recovered for symbol ${sym}; new entries unblocked`);
           }
         }
       } catch (e) {
@@ -1721,6 +1729,7 @@ export class TradingPipeline {
     const balance = this.userDataStream.getBalance();
     const currentTier = this.portfolioSizer.updateBalance(this.userDataStream.getBalance().totalEquity);
     this.config.activeSymbols = this.portfolioSizer.getAllowedSymbols();
+    await this.marketData.syncSubscriptionsWithBackfill(this.config.activeSymbols);
 
     this.scaleInManager.updateTier(currentTier);
 
