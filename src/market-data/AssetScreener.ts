@@ -65,6 +65,7 @@ export class AssetScreener {
   private qualifiedAssets: Map<AssetSymbol, AssetMetrics> = new Map();
   private allAssets: Map<AssetSymbol, AssetMetrics> = new Map();
   private lastRefreshTime: number = 0;
+  private refreshInFlight: Promise<number> | null = null;
 
   constructor(apiBaseUrl?: string, apiKey?: string, apiSecret?: string) {
     this.apiBaseUrl = apiBaseUrl || 'https://fapi.binance.com';
@@ -89,6 +90,17 @@ export class AssetScreener {
    * جلب وتحليل جميع العملات (يُستدعى دورياً كل ساعة)
    */
   public async refreshAllAssets(): Promise<number> {
+    if (this.refreshInFlight) return this.refreshInFlight;
+    const refresh = this.refreshAllAssetsInternal();
+    this.refreshInFlight = refresh;
+    try {
+      return await refresh;
+    } finally {
+      if (this.refreshInFlight === refresh) this.refreshInFlight = null;
+    }
+  }
+
+  private async refreshAllAssetsInternal(): Promise<number> {
     console.log('🔍 AssetScreener: Refreshing all assets from exchange API...');
 
     try {
