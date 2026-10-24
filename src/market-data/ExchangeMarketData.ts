@@ -161,7 +161,9 @@ export class ExchangeMarketData extends EventEmitter {
   private reconnectTimer: NodeJS.Timeout | null = null;
   private connectionRotationTimer: NodeJS.Timeout | null = null;
   private reconnectAttempt = 0;
+  private reconnectInFlight = false;
   private livePollTimer: NodeJS.Timeout | null = null;
+  private backfillInFlight = 0;
   private readonly pendingWarmupSymbols = new Set<AssetSymbol>();
 
   constructor(orderBookBuilder?: OrderBookBuilder, activeSymbols?: AssetSymbol[]) {
@@ -216,6 +218,10 @@ export class ExchangeMarketData extends EventEmitter {
     const changed = next.length !== current.size || next.some(symbol => !current.has(symbol));
     if (!changed || next.length === 0) return false;
     if (!this.isRunning) {
+      this.activeCryptoSymbols = next;
+      return true;
+    }
+    if (this.reconnectInFlight) {
       this.activeCryptoSymbols = next;
       return true;
     }
@@ -315,40 +321,49 @@ export class ExchangeMarketData extends EventEmitter {
     const primarySymbols = targetSymbols;
     console.log(`📥 ExchangeMarketData: Backfilling real historical candles for ${primarySymbols.length} pairs (${primarySymbols.slice(0, 6).join(', ')}...)...`);
 
-    for (const sym of primarySymbols) {
-      const binanceSym = sym.replace('/', '').toUpperCase();
-      try {
-        const res = await binanceRateLimiter.fetch(`${baseUrl}/fapi/v1/klines?symbol=${binanceSym}&interval=1m&limit=100`);
-        if (!res.ok) {
-          console.warn(`⚠️ ExchangeMarketData: Could not fetch candles for ${sym}: HTTP ${res.status}`);
-          continue;
+    this.backfillInFlight++;
+    try {
+      for (const sym of primarySymbols) {
+        const binanceSym = sym.replace('/', '').toUpperCase();
+        try {
+          const res = await binanceRateLimiter.fetch(`${baseUrl}/fapi/v1/klines?symbol=${binanceSym}&interval=1m&limit=100`);
+          if (!res.ok) {
+            console.warn(`⚠️ ExchangeMarketData: Could not fetch candles for ${sym}: HTTP ${res.status}`);
+            continue;
+          }
+          const data = await res.json();
+          if (Array.isArray(data) && data.length > 0) {
+            const candles: Candle[] = data.map((k: any) => ({
+              timestamp: Number(k[0]),
+              open: parseFloat(k[1]),
+              high: parseFloat(k[2]),
+              low: parseFloat(k[3]),
+              close: parseFloat(k[4]),
+              volume: parseFloat(k[5]),
+              vwap: parseFloat(k[7]) > 0 && parseFloat(k[5]) > 0 ? parseFloat(k[7]) / parseFloat(k[5]) : parseFloat(k[4])
+            }));
+            this.candleHistory.set(sym, candles);
+            const latestPrice = candles[candles.length - 1].close;
+            this.currentPrices.set(sym, latestPrice);
+            this.emit('market_update', sym);
+            console.log(`✅ ExchangeMarketData: Loaded ${candles.length} real candles for ${sym} (Latest Price: $${latestPrice})`);
+          }
+        } catch (err: any) {
+          console.warn(`⚠️ ExchangeMarketData: Failed to backfill candles for ${sym}:`, err.message);
         }
-        const data = await res.json();
-        if (Array.isArray(data) && data.length > 0) {
-          const candles: Candle[] = data.map((k: any) => ({
-            timestamp: Number(k[0]),
-            open: parseFloat(k[1]),
-            high: parseFloat(k[2]),
-            low: parseFloat(k[3]),
-            close: parseFloat(k[4]),
-            volume: parseFloat(k[5]),
-            vwap: parseFloat(k[7]) > 0 && parseFloat(k[5]) > 0 ? parseFloat(k[7]) / parseFloat(k[5]) : parseFloat(k[4])
-          }));
-          this.candleHistory.set(sym, candles);
-          const latestPrice = candles[candles.length - 1].close;
-          this.currentPrices.set(sym, latestPrice);
-          this.emit('market_update', sym);
-          console.log(`✅ ExchangeMarketData: Loaded ${candles.length} real candles for ${sym} (Latest Price: $${latestPrice})`);
-        }
-      } catch (err: any) {
-        console.warn(`⚠️ ExchangeMarketData: Failed to backfill candles for ${sym}:`, err.message);
       }
+    } finally {
+      this.backfillInFlight = Math.max(0, this.backfillInFlight - 1);
     }
   }
 
   public startStreaming(tickRateMs: number = 300, activeSymbols?: AssetSymbol[]) {
     if (activeSymbols && activeSymbols.length > 0) {
       const nextSymbols = activeSymbols.filter(s => s.endsWith('/USDT'));
+      if (this.isRunning && this.reconnectInFlight) {
+        this.activeCryptoSymbols = nextSymbols;
+        return;
+      }
       if (this.isRunning && nextSymbols.join('|') !== this.activeCryptoSymbols.join('|')) {
         this.stopStreaming();
       }
@@ -379,6 +394,7 @@ export class ExchangeMarketData extends EventEmitter {
         }
       }
       if (!hasLiveFeed) {
+        if (this.backfillInFlight > 0) return;
         this.emit('market_stale');
       }
     }, Math.max(tickRateMs, 1000));
@@ -457,11 +473,13 @@ export class ExchangeMarketData extends EventEmitter {
   }
 
   public getLatestFeedUpdate(): number {
+    if (this.backfillInFlight > 0) return Date.now();
     return Math.max(0, ...this.activeCryptoSymbols.map(symbol => this.getLastUpdateTime(symbol)));
   }
 
   public reconnectStalledFeed(): void {
-    if (!this.isRunning) return;
+    if (!this.isRunning || this.backfillInFlight > 0 || this.reconnectInFlight) return;
+    this.reconnectInFlight = true;
     this.stopStreaming();
     this.startStreaming();
   }
@@ -548,6 +566,7 @@ export class ExchangeMarketData extends EventEmitter {
       ws.on('message', (data: any) => {
         try {
           const msg = JSON.parse(data.toString());
+          this.reconnectInFlight = false;
           this.handleWebSocketMessage(msg);
         } catch (e) {
           console.error('❌ ExchangeMarketData: Error parsing market message', e);
@@ -556,6 +575,7 @@ export class ExchangeMarketData extends EventEmitter {
 
       ws.on('close', () => {
         if (this.isRunning) {
+          this.reconnectInFlight = false;
           console.log(`⚠️ ExchangeMarketData: Market WebSocket group ${index + 1} closed. Reconnecting in ${getReconnectDelay(this.reconnectAttempt)}ms...`);
           this.scheduleReconnect();
         }
@@ -585,6 +605,7 @@ export class ExchangeMarketData extends EventEmitter {
       ws.on('message', (data: any) => {
         try {
           const msg = JSON.parse(data.toString());
+          this.reconnectInFlight = false;
           this.handleWebSocketMessage(msg);
         } catch (e) {
           console.error('❌ ExchangeMarketData: Error parsing depth message', e);
@@ -593,6 +614,7 @@ export class ExchangeMarketData extends EventEmitter {
 
       ws.on('close', () => {
         if (this.isRunning) {
+          this.reconnectInFlight = false;
           this.scheduleReconnect();
         }
       });
@@ -712,7 +734,8 @@ export class ExchangeMarketData extends EventEmitter {
     if (this.reconnectTimer) return;
     this.reconnectTimer = setTimeout(() => {
       this.reconnectTimer = null;
-      if (this.isRunning) {
+      if (this.isRunning && !this.backfillInFlight && !this.reconnectInFlight) {
+        this.reconnectInFlight = true;
         this.startWebSocketStreaming();
       }
     }, getReconnectDelay(this.reconnectAttempt++));
