@@ -171,6 +171,7 @@ async function requireCloudStorage(res: Response): Promise<boolean> {
 const supervisor = cloudDb ? new RuntimeSupervisor(cloudDb, process.env.EXCHANGE_ACCOUNT_ID || '', async (reason) => {
   pipeline.getKillSwitch().trigger('HARD_HALT', reason, 'HEALTH_HEARTBEAT_LOSS');
   await pipeline.stop();
+  scheduleAutostartRetry(new Error(reason));
 }) : null;
 pipeline.setRuntimeSafetyGuard(() => !!pipeline.isRunning && !!supervisor?.canEnter());
 let startInProgress: Promise<void> | null = null;
@@ -183,6 +184,12 @@ async function startTrading() {
   startInProgress = (async () => {
     if (!supervisor) throw new Error('Storage and execution lease are required');
     await supervisor.start();
+    const killSwitch = pipeline.getKillSwitch();
+    const latestKillSwitchEvent = killSwitch.getHistory()[0];
+    if (latestKillSwitchEvent?.triggeredBy === 'HEALTH_HEARTBEAT_LOSS') {
+      killSwitch.reset();
+      console.log('✅ Kill-Switch re-armed after execution lease recovery; risk-triggered halts remain untouched.');
+    }
     try { await pipeline.startAutonomousTrading(); }
     catch (error) { await supervisor.stop(); throw error; }
   })();
