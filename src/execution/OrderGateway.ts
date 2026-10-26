@@ -67,6 +67,7 @@ export class OrderGateway {
   private apiSecret: string = '';
   private apiBaseUrl: string = 'https://fapi.binance.com';
   private executionMode: ExecutionMode = 'PAPER';
+  private hedgeMode = false;
 
   constructor(
     userDataStream: UserDataStream,
@@ -188,7 +189,8 @@ export class OrderGateway {
       });
       if (res.ok) {
         const data = await res.json();
-        if (data && data.dualSidePosition === true) {
+        this.hedgeMode = data?.dualSidePosition === true;
+        if (this.hedgeMode) {
           console.warn('⚠️ Account is in Hedge mode. For One-way trading, One-way mode is recommended.');
           return false;
         }
@@ -1211,12 +1213,17 @@ export class OrderGateway {
     }
     const cleanSymbol = symbol.replace('/', '');
     try {
+      // Binance rejects reduceOnly in Hedge Mode; refresh the account mode before
+      // selecting the authoritative position row and constructing the close order.
+      await this.checkDualSidePosition();
       // Authoritative amount from the exchange (local size may be stale)
       const pr = await this.signedRequest('GET', '/fapi/v2/positionRisk', { symbol: cleanSymbol });
       let amtStr = '';
+      let exchangePositionSide: 'BOTH' | 'LONG' | 'SHORT' = 'BOTH';
       if (pr.ok && Array.isArray(pr.data)) {
-        const p = pr.data.find((x: any) => x.symbol === cleanSymbol);
+        const p = pr.data.find((x: any) => x.symbol === cleanSymbol && Math.abs(parseFloat(x.positionAmt)) > 1e-9);
         amtStr = p ? String(p.positionAmt) : '0';
+        if (p?.positionSide === 'LONG' || p?.positionSide === 'SHORT') exchangePositionSide = p.positionSide;
       } else if (size !== undefined && size !== 0) {
         amtStr = String(formatQuantityToStep(Math.abs(size), this.getSymbolFilter(symbol).stepSize) * (size < 0 ? -1 : 1));
       } else {
@@ -1232,10 +1239,24 @@ export class OrderGateway {
       const closeSide: OrderSide = currentAmt > 0 ? 'SELL' : 'BUY';
       const qtyStr = amtStr.replace('-', ''); // exchange-provided string: already step-aligned
 
-      const order = await this.signedRequest('POST', '/fapi/v1/order', {
+      const hedgeClose = this.hedgeMode || exchangePositionSide !== 'BOTH';
+      const closeParams: Record<string, string | number | boolean> = {
         symbol: cleanSymbol, side: closeSide, type: 'MARKET', quantity: qtyStr,
-        reduceOnly: true, newOrderRespType: 'RESULT',
-      });
+        newOrderRespType: 'RESULT',
+      };
+      if (hedgeClose) closeParams.positionSide = exchangePositionSide;
+      else closeParams.reduceOnly = true;
+
+      let order = await this.signedRequest('POST', '/fapi/v1/order', closeParams);
+      // In one-way mode Binance may reject a reduce-only market close while an
+      // older SL/TP reduce-only order reserves the same position quantity. Only
+      // after that explicit rejection, cancel the stale exit orders and retry
+      // the same authoritative close quantity; never silently remove protection.
+      if (!order.ok && Number(order.data?.code) === -2022 && !hedgeClose) {
+        console.warn(`⚠️ [EXCHANGE CLOSE RETRY] Clearing conflicting reduce-only orders for ${symbol}`);
+        await this.cancelAllOpenOrdersForSymbol(symbol);
+        order = await this.signedRequest('POST', '/fapi/v1/order', closeParams);
+      }
       if (!order.ok) {
         console.warn(`⚠️ [EXCHANGE CLOSE REJECTED] ${symbol}`, order.data);
         return { success: false, qty: 0, error: order.data?.msg || 'Close rejected' };
