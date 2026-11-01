@@ -511,7 +511,12 @@ export class ExchangeMarketData extends EventEmitter {
       this.intervalId = null;
     }
     for (const ws of this.wsSockets.values()) {
-      try { ws.removeAllListeners(); ws.terminate(); } catch { /* best effort */ }
+      try {
+        ws.removeAllListeners('open');
+        ws.removeAllListeners('message');
+        ws.removeAllListeners('close');
+        ws.terminate();
+      } catch { /* best effort */ }
     }
     this.wsSockets.clear();
     this.marketWs = [];
@@ -601,7 +606,12 @@ export class ExchangeMarketData extends EventEmitter {
       return;
     }
     if (existing) {
-      try { existing.removeAllListeners(); existing.terminate(); } catch { /* best effort */ }
+      try {
+        existing.removeAllListeners('open');
+        existing.removeAllListeners('message');
+        existing.removeAllListeners('close');
+        existing.terminate();
+      } catch { /* best effort */ }
       this.wsSockets.delete(key);
     }
 
@@ -615,7 +625,12 @@ export class ExchangeMarketData extends EventEmitter {
       const connectTimeout = setTimeout(() => {
         if (this.wsSockets.get(key) !== ws || ws.readyState !== WebSocket.CONNECTING) return;
         console.warn(`⚠️ ExchangeMarketData: ${kind} WebSocket group ${index + 1} connect timeout after ${WS_CONNECT_TIMEOUT_MS}ms.`);
-        try { ws.removeAllListeners(); ws.terminate(); } catch { /* best effort */ }
+        try {
+          ws.removeAllListeners('open');
+          ws.removeAllListeners('message');
+          ws.removeAllListeners('close');
+          ws.terminate();
+        } catch { /* best effort */ }
         this.wsSockets.delete(key);
         this.scheduleGroupReconnect(kind, index);
       }, WS_CONNECT_TIMEOUT_MS);
