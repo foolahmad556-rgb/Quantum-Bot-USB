@@ -125,6 +125,35 @@ export class OrderGateway {
     return Date.now() + this.timeOffset;
   }
 
+  private logExchangeOrderError(
+    method: string,
+    path: string,
+    params: Record<string, string | number | boolean>,
+    status: number,
+    data: any
+  ): void {
+    const code = Number(data?.code);
+    const message = String(data?.msg || 'Unknown Binance error');
+    const isReduceOnly = code === -2022 || /reduce.?only/i.test(message)
+      || Boolean(params.reduceOnly);
+    if (!isReduceOnly) return;
+
+    // Never log the signed query string, API key, or API secret.
+    const safeParams = Object.fromEntries(Object.entries(params).filter(([key]) =>
+      !['signature', 'timestamp', 'recvWindow'].includes(key.toLowerCase())
+    ));
+    console.error('[BINANCE REDUCE_ONLY_ERROR]', JSON.stringify({
+      method,
+      path,
+      httpStatus: status,
+      binanceCode: Number.isFinite(code) ? code : null,
+      binanceMessage: message,
+      request: safeParams,
+      hedgeMode: this.hedgeMode,
+      observedAt: new Date().toISOString(),
+    }));
+  }
+
   /**
    * Signed REST call: server-time offset, recvWindow, hard timeout and one automatic
    * retry after a clock re-sync when Binance answers -1021 (timestamp outside recvWindow).
@@ -154,6 +183,7 @@ export class OrderGateway {
       });
       let data: any = null;
       try { data = await res.json(); } catch { data = null; }
+      if (!res.ok) this.logExchangeOrderError(method, path, params, res.status, data);
       const used = Number(res.headers.get('x-mbx-used-weight-1m') || 0);
       if (used) this.rateLimiter.syncUsed(used);
       if (res.status === 429 || res.status === 418) {
@@ -1258,7 +1288,17 @@ export class OrderGateway {
         order = await this.signedRequest('POST', '/fapi/v1/order', closeParams);
       }
       if (!order.ok) {
-        console.warn(`⚠️ [EXCHANGE CLOSE REJECTED] ${symbol}`, order.data);
+        console.warn(`⚠️ [EXCHANGE CLOSE REJECTED] ${symbol}`, {
+          httpStatus: order.status,
+          binanceCode: order.data?.code ?? null,
+          binanceMessage: order.data?.msg ?? 'Close rejected',
+          symbol: cleanSymbol,
+          side: closeSide,
+          quantity: qtyStr,
+          positionSide: closeParams.positionSide ?? 'BOTH',
+          reduceOnly: closeParams.reduceOnly ?? false,
+          hedgeMode: this.hedgeMode,
+        });
         return { success: false, qty: 0, error: order.data?.msg || 'Close rejected' };
       }
 

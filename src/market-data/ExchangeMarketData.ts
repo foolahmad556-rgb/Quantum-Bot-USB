@@ -40,6 +40,11 @@ const MAX_MARKET_SYMBOLS_PER_CONNECTION = Math.floor(
 );
 const MAX_DEPTH_SYMBOLS_PER_CONNECTION = MAX_BINANCE_STREAMS_PER_CONNECTION;
 const BINANCE_CONNECTION_ROTATION_MS = 23 * 60 * 60 * 1000 + 55 * 60 * 1000;
+const WS_CONNECT_TIMEOUT_MS = 15_000;
+const WS_RECONNECT_BASE_MS = 5_000;
+const WS_RECONNECT_MAX_MS = 60_000;
+const WS_RECONNECT_JITTER_RATIO = 0.2;
+type WebSocketGroupKind = 'market' | 'depth';
 
 export const DEFAULT_SYMBOLS: Record<AssetSymbol, SymbolConfig> = {
   'BTC/USDT': {
@@ -158,10 +163,15 @@ export class ExchangeMarketData extends EventEmitter {
     'NEAR/USDT',
     'RENDER/USDT',
   ];
-  private reconnectTimer: NodeJS.Timeout | null = null;
   private connectionRotationTimer: NodeJS.Timeout | null = null;
-  private reconnectAttempt = 0;
   private reconnectInFlight = false;
+  // Each market/depth group owns its socket, connect timeout, and retry backoff.
+  // A failure in one group must never cancel or unlock another group.
+  private readonly wsSockets = new Map<string, WebSocket>();
+  private readonly wsUrls = new Map<string, string>();
+  private readonly wsConnectTimeouts = new Map<string, NodeJS.Timeout>();
+  private readonly wsReconnectTimers = new Map<string, NodeJS.Timeout>();
+  private readonly wsReconnectAttempts = new Map<string, number>();
   private livePollTimer: NodeJS.Timeout | null = null;
   private backfillInFlight = 0;
   private readonly pendingWarmupSymbols = new Set<AssetSymbol>();
@@ -500,18 +510,19 @@ export class ExchangeMarketData extends EventEmitter {
       clearInterval(this.intervalId);
       this.intervalId = null;
     }
-    for (const ws of this.marketWs) {
-      try { ws.removeAllListeners('close'); ws.terminate(); } catch (e) {}
+    for (const ws of this.wsSockets.values()) {
+      try { ws.removeAllListeners(); ws.terminate(); } catch { /* best effort */ }
     }
-    for (const ws of this.depthWs) {
-      try { ws.removeAllListeners('close'); ws.terminate(); } catch (e) {}
-    }
+    this.wsSockets.clear();
     this.marketWs = [];
     this.depthWs = [];
-    if (this.reconnectTimer) {
-      clearTimeout(this.reconnectTimer);
-      this.reconnectTimer = null;
-    }
+    for (const timer of this.wsConnectTimeouts.values()) clearTimeout(timer);
+    for (const timer of this.wsReconnectTimers.values()) clearTimeout(timer);
+    this.wsConnectTimeouts.clear();
+    this.wsReconnectTimers.clear();
+    this.wsReconnectAttempts.clear();
+    this.wsUrls.clear();
+    this.reconnectInFlight = false;
     if (this.connectionRotationTimer) {
       clearTimeout(this.connectionRotationTimer);
       this.connectionRotationTimer = null;
@@ -549,82 +560,113 @@ export class ExchangeMarketData extends EventEmitter {
   }
 
 
-  private connectMarketWs(url: string, index: number) {
-    if (this.marketWs[index]) {
-      try { this.marketWs[index].removeAllListeners('close'); this.marketWs[index].terminate(); } catch (e) {}
+  private wsKey(kind: WebSocketGroupKind, index: number): string {
+    return `${kind}:${index}`;
+  }
+
+  private clearWsTimer(map: Map<string, NodeJS.Timeout>, key: string): void {
+    const timer = map.get(key);
+    if (timer) clearTimeout(timer);
+    map.delete(key);
+  }
+
+  private scheduleGroupReconnect(kind: WebSocketGroupKind, index: number): void {
+    if (!this.isRunning || this.backfillInFlight > 0) return;
+    const key = this.wsKey(kind, index);
+    if (this.wsReconnectTimers.has(key)) return;
+
+    const attempt = this.wsReconnectAttempts.get(key) || 0;
+    const baseDelay = Math.min(WS_RECONNECT_MAX_MS, WS_RECONNECT_BASE_MS * (2 ** attempt));
+    const jitter = baseDelay * WS_RECONNECT_JITTER_RATIO * (Math.random() * 2 - 1);
+    const delay = Math.max(250, Math.round(baseDelay + jitter));
+    this.wsReconnectAttempts.set(key, Math.min(attempt + 1, 8));
+    console.warn(`⚠️ ExchangeMarketData: ${kind} WebSocket group ${index + 1} reconnect scheduled in ${delay}ms (attempt ${attempt + 1}).`);
+
+    const timer = setTimeout(() => {
+      this.wsReconnectTimers.delete(key);
+      if (!this.isRunning || this.backfillInFlight > 0) return;
+      const url = this.wsUrls.get(key);
+      if (url) this.connectWebSocketGroup(kind, url, index);
+    }, delay);
+    this.wsReconnectTimers.set(key, timer);
+  }
+
+  private connectWebSocketGroup(kind: WebSocketGroupKind, url: string, index: number): void {
+    const key = this.wsKey(kind, index);
+    this.wsUrls.set(key, url);
+    if (!this.isRunning) return;
+
+    const existing = this.wsSockets.get(key);
+    if (existing && (existing.readyState === WebSocket.OPEN || existing.readyState === WebSocket.CONNECTING)) {
+      return;
+    }
+    if (existing) {
+      try { existing.removeAllListeners(); existing.terminate(); } catch { /* best effort */ }
+      this.wsSockets.delete(key);
     }
 
+    this.clearWsTimer(this.wsConnectTimeouts, key);
     try {
       const ws = new WebSocket(url);
-      this.marketWs[index] = ws;
+      this.wsSockets.set(key, ws);
+      if (kind === 'market') this.marketWs[index] = ws;
+      else this.depthWs[index] = ws;
+
+      const connectTimeout = setTimeout(() => {
+        if (this.wsSockets.get(key) !== ws || ws.readyState !== WebSocket.CONNECTING) return;
+        console.warn(`⚠️ ExchangeMarketData: ${kind} WebSocket group ${index + 1} connect timeout after ${WS_CONNECT_TIMEOUT_MS}ms.`);
+        try { ws.removeAllListeners(); ws.terminate(); } catch { /* best effort */ }
+        this.wsSockets.delete(key);
+        this.scheduleGroupReconnect(kind, index);
+      }, WS_CONNECT_TIMEOUT_MS);
+      this.wsConnectTimeouts.set(key, connectTimeout);
 
       ws.on('open', () => {
-        this.reconnectAttempt = 0;
-        console.log(`✅ ExchangeMarketData: Connected to Binance Futures live trade & kline stream (group ${index + 1})`);
+        if (this.wsSockets.get(key) !== ws) return;
+        this.clearWsTimer(this.wsConnectTimeouts, key);
+        this.wsReconnectAttempts.set(key, 0);
+        console.log(`✅ ExchangeMarketData: Connected to Binance Futures ${kind === 'market' ? 'live trade & kline' : 'live L2 depth'} stream (group ${index + 1})`);
       });
 
       ws.on('message', (data: any) => {
+        if (this.wsSockets.get(key) !== ws) return;
         try {
           const msg = JSON.parse(data.toString());
-          this.reconnectInFlight = false;
           this.handleWebSocketMessage(msg);
         } catch (e) {
-          console.error('❌ ExchangeMarketData: Error parsing market message', e);
+          console.error(`❌ ExchangeMarketData: Error parsing ${kind} message`, e);
         }
       });
 
-      ws.on('close', () => {
+      ws.on('close', (code: number, reason: Buffer) => {
+        if (this.wsSockets.get(key) !== ws) return;
+        this.clearWsTimer(this.wsConnectTimeouts, key);
+        this.wsSockets.delete(key);
         if (this.isRunning) {
-          this.reconnectInFlight = false;
-          console.log(`⚠️ ExchangeMarketData: Market WebSocket group ${index + 1} closed. Reconnecting in ${getReconnectDelay(this.reconnectAttempt)}ms...`);
-          this.scheduleReconnect();
+          const detail = reason?.toString() || 'no reason';
+          console.warn(`⚠️ ExchangeMarketData: ${kind} WebSocket group ${index + 1} closed (code ${code}, ${detail}).`);
+          this.scheduleGroupReconnect(kind, index);
         }
       });
 
       ws.on('error', (err) => {
-        console.warn(`⚠️ ExchangeMarketData: Market WebSocket group ${index + 1} warning:`, err.message);
+        if (this.wsSockets.get(key) === ws) {
+          console.warn(`⚠️ ExchangeMarketData: ${kind} WebSocket group ${index + 1} error:`, err.message);
+        }
+        // close/timeout owns retry scheduling; avoid duplicate reconnects here.
       });
     } catch (err: any) {
-      console.warn(`⚠️ ExchangeMarketData: Could not open market WS group ${index + 1}:`, err.message);
+      console.warn(`⚠️ ExchangeMarketData: Could not open ${kind} WS group ${index + 1}:`, err.message);
+      this.scheduleGroupReconnect(kind, index);
     }
   }
 
+  private connectMarketWs(url: string, index: number) {
+    this.connectWebSocketGroup('market', url, index);
+  }
+
   private connectDepthWs(url: string, index: number) {
-    if (this.depthWs[index]) {
-      try { this.depthWs[index].removeAllListeners('close'); this.depthWs[index].terminate(); } catch (e) {}
-    }
-
-    try {
-      const ws = new WebSocket(url);
-      this.depthWs[index] = ws;
-
-      ws.on('open', () => {
-        console.log(`✅ ExchangeMarketData: Connected to Binance Futures live L2 depth stream (group ${index + 1})`);
-      });
-
-      ws.on('message', (data: any) => {
-        try {
-          const msg = JSON.parse(data.toString());
-          this.reconnectInFlight = false;
-          this.handleWebSocketMessage(msg);
-        } catch (e) {
-          console.error('❌ ExchangeMarketData: Error parsing depth message', e);
-        }
-      });
-
-      ws.on('close', () => {
-        if (this.isRunning) {
-          this.reconnectInFlight = false;
-          this.scheduleReconnect();
-        }
-      });
-
-      ws.on('error', (err) => {
-        console.warn(`⚠️ ExchangeMarketData: Depth WebSocket group ${index + 1} warning:`, err.message);
-      });
-    } catch (err: any) {
-      console.warn(`⚠️ ExchangeMarketData: Could not open depth WS group ${index + 1}:`, err.message);
-    }
+    this.connectWebSocketGroup('depth', url, index);
   }
 
   private handleWebSocketMessage(msg: any) {
@@ -730,15 +772,7 @@ export class ExchangeMarketData extends EventEmitter {
     return upper as AssetSymbol;
   }
 
-  private scheduleReconnect() {
-    if (this.reconnectTimer) return;
-    this.reconnectTimer = setTimeout(() => {
-      this.reconnectTimer = null;
-      if (this.isRunning && !this.backfillInFlight && !this.reconnectInFlight) {
-        this.reconnectInFlight = true;
-        this.startWebSocketStreaming();
-      }
-    }, getReconnectDelay(this.reconnectAttempt++));
-  }
+  // Reconnection is scheduled independently by each WebSocket group.
+
 
 }

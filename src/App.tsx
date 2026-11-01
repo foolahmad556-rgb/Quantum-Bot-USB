@@ -103,6 +103,7 @@ export default function CyberPulseNexusApp() {
   const [showTelegramModal, setShowTelegramModal] = useState<boolean>(false);
   const [showKeepAliveModal, setShowKeepAliveModal] = useState<boolean>(false);
   const [isExecuting, setIsExecuting] = useState<boolean>(false);
+  const [isRestartingTrading, setIsRestartingTrading] = useState<boolean>(false);
 
   // Live orderbook & real klines
   const [realChartData, setRealChartData] = useState<RealChartPoint[]>([]);
@@ -199,6 +200,43 @@ export default function CyberPulseNexusApp() {
     } catch {
       setBackendReady(false);
       setIsRunning(false);
+    }
+  };
+
+  const restartTradingAfterKillSwitch = async () => {
+    if (isRestartingTrading) return;
+    if (!window.confirm(isAr
+      ? 'سيتم إعادة ضبط قاطع الطوارئ ثم تشغيل محرك التداول. تأكد من زوال سبب الإيقاف. متابعة؟'
+      : 'This will reset the Kill-Switch and restart trading. Confirm the safety condition is resolved. Continue?')) return;
+
+    setIsRestartingTrading(true);
+    playHoloTone(720, 0.12);
+    try {
+      await fetchWithAuth('/api/protected/killswitch/reset', { method: 'POST' });
+      const started = await fetchWithAuth('/api/protected/trading/start', { method: 'POST' });
+      if (!started?.isRunning) throw new Error(isAr ? 'لم يبدأ محرك التداول' : 'Trading engine did not start');
+      setIsRunning(true);
+      setSafetyStop(null);
+      setLogs((prev) => [{
+        id: `l-${Date.now()}`,
+        time: new Date().toLocaleTimeString(),
+        textEn: 'Kill-Switch reset and trading engine restarted successfully.',
+        textAr: 'تمت إعادة ضبط قاطع الطوارئ وإعادة تشغيل محرك التداول بنجاح.',
+        type: 'success' as const,
+      }, ...prev]);
+      await fetchLiveServerStatus();
+    } catch (err: any) {
+      setIsRunning(false);
+      setLogs((prev) => [{
+        id: `l-${Date.now()}`,
+        time: new Date().toLocaleTimeString(),
+        textEn: `Trading restart failed: ${err?.message || 'unknown error'}`,
+        textAr: `فشلت إعادة تشغيل التداول: ${err?.message || 'سبب غير معروف'}`,
+        type: 'alert' as const,
+      }, ...prev]);
+      await fetchLiveServerStatus();
+    } finally {
+      setIsRestartingTrading(false);
     }
   };
 
@@ -700,6 +738,15 @@ export default function CyberPulseNexusApp() {
           <h2 className="font-bold">{isAr ? 'درع الطوارئ مفعّل — الدخول الجديد متوقف' : 'Safety stop active — new entries blocked'} ({safetyStop.level})</h2>
           <p>{isAr ? 'السبب: ' : 'Reason: '}{safetyStop.reason || (isAr ? 'السبب غير متاح من الخادم' : 'Reason unavailable from server')}</p>
           {safetyStop.source && <p className="text-xs">{isAr ? 'المصدر: ' : 'Source: '}{safetyStop.source}</p>}
+          <button
+            type="button"
+            onClick={restartTradingAfterKillSwitch}
+            disabled={isRestartingTrading}
+            className="mt-2 inline-flex min-h-[40px] items-center gap-2 rounded-xl border border-amber-300/40 bg-amber-500/15 px-4 py-2 text-xs font-bold text-amber-100 transition hover:bg-amber-500/25 disabled:cursor-wait disabled:opacity-60"
+          >
+            <RefreshCw className={`h-4 w-4 ${isRestartingTrading ? 'animate-spin' : ''}`} />
+            <span>{isRestartingTrading ? (isAr ? 'جاري إعادة التشغيل…' : 'RESTARTING…') : (isAr ? 'إعادة ضبط وتشغيل التداول' : 'RESET & RESTART TRADING')}</span>
+          </button>
         </section>}
 
         {/* Account performance strip */}
