@@ -46,8 +46,13 @@ export class RegimeDetector {
 
     // Continuous classification (البند 41)
     const trendScore = 0.6 * sigmoid(hurstExponent - 0.5, 12) + 0.4 * sigmoid((adx - 22) / 22, 12);
-    const tradingAllowed = trendScore < 0.65;
     const confidence = Math.min(1, Math.abs(trendScore - 0.5) * 2);
+    const isTrending = trendScore >= 0.60;
+    const highConfidenceTrend = confidence >= 0.75;
+    // A strong, confirmed trend is an entry regime for the adaptive breakout
+    // strategy. Only uncertain trends remain blocked; risk and kill-switch
+    // gates are still enforced later in the pipeline.
+    const tradingAllowed = !isTrending || highConfidenceTrend;
     const sizeMultiplier = clamp(1 - Math.max(0, trendScore - 0.45) * 2, 0.25, 1);
 
     let marketRegime: RegimeAnalysis['marketRegime'];
