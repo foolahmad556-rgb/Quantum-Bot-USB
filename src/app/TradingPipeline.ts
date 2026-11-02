@@ -110,6 +110,7 @@ export class TradingPipeline {
   private lastSnapshotTime: number = 0;
   private inFlightSymbols: Set<string> = new Set();
   private readonly staleSymbolWarnings = new StaleSymbolWarningTracker();
+  private readonly entryGateDiagnostics = new Map<string, number>();
   private peakEquityObserved: number = 0;
   private lastRiskDay: string = '';
   private pendingProtection: Map<string, {
@@ -121,6 +122,8 @@ export class TradingPipeline {
     boardVerdict: BoardMeetingDecision['verdict'];
     boardSizeMultiplier: number;
     entryReferencePrice: number;
+    maxHoldMs?: number;
+    stopLossPrice?: number;
     boardVotes: Record<string, string>;
     strategyCouncilVotes: unknown[];
     sevenCouncilVotes: unknown[];
@@ -418,22 +421,10 @@ export class TradingPipeline {
               const pnl = isLong ? (currentPrice - pos.entryPrice) * pos.size : (pos.entryPrice - currentPrice) * Math.abs(pos.size);
               totalUnrealizedPnl += pnl;
 
-              const pnlPct = ((currentPrice - pos.entryPrice) / pos.entryPrice) * (isLong ? 100 : -100);
-              // 1. Full Take Profit Target: +2.8% to +3.5% (High Momentum Runner)
-              if (pnlPct >= 2.8) {
-                console.log(`🎯 [TAKE PROFIT TRIGGER] ${pos.symbol} reached +${pnlPct.toFixed(2)}%. Closing on Binance & Bot...`);
-                await this.closeSinglePositionOnExchange(pos.symbol, `Take Profit Target Hit (+${pnlPct.toFixed(2)}%)`);
-              }
-              // 2. Tactical Scalp Lock: +1.6% (Locks in +5% to +8% ROE on margin before mean-reversion pullbacks)
-              else if (pnlPct >= 1.6) {
-                console.log(`🎯 [TACTICAL PROFIT LOCK] ${pos.symbol} reached +${pnlPct.toFixed(2)}%. Securing solid intraday gain...`);
-                await this.closeSinglePositionOnExchange(pos.symbol, `Tactical Scalp Target Hit (+${pnlPct.toFixed(2)}%)`);
-              }
-              // 3. Stop Loss Target: -1.5% (Strict Risk Discipline, 1:2 R:R Ratio)
-              else if (pnlPct <= -1.5) {
-                console.log(`🛑 [STOP LOSS TRIGGER] ${pos.symbol} reached ${pnlPct.toFixed(2)}%. Closing on Binance & Bot...`);
-                await this.closeSinglePositionOnExchange(pos.symbol, `Stop Loss Triggered (${pnlPct.toFixed(2)}%)`);
-              }
+              // Exit ownership is intentionally delegated to Binance protective
+              // orders plus PartialProfitManager (R-multiple/time-stop policy).
+              // Do not close the whole position here on fixed +1.6%/+2.8%
+              // thresholds; those thresholds previously cut runners short.
             }
             totalUsedMargin += pos.marginUsed || 0;
           }
@@ -723,7 +714,12 @@ export class TradingPipeline {
                 status: 'OPEN',
               });
               this.partialProfitManager.registerPosition(
-                ord.id, ord.symbol, ord.side, fillPrice, ord.filledQuantity
+                ord.id,
+                ord.symbol,
+                ord.side,
+                fillPrice,
+                ord.filledQuantity,
+                { stopLossPrice: pending.stopLossPrice, maxHoldMs: pending.maxHoldMs }
               );
               this.scaleInManager.registerOriginalPosition(
                 ord.id, ord.symbol, ord.side, fillPrice, ord.filledQuantity
@@ -747,12 +743,13 @@ export class TradingPipeline {
    * Places SL/TP for a filled entry and VERIFIES the stop. If the stop cannot be placed the position
    * is closed immediately and the KillSwitch is raised: a leveraged position must never stay naked.
    */
-  private async applyProtection(ord: any, pending: { side: 'BUY' | 'SELL'; ouSigma: number; ouMu: number }): Promise<boolean> {
+  private async applyProtection(ord: any, pending: { side: 'BUY' | 'SELL'; ouSigma: number; ouMu: number; stopLossPrice?: number }): Promise<boolean> {
     const fill = ord.avgFillPrice || ord.price;
     // Stop distance: 2 sigma, clamped to a sane band (0.4%..3% of price) so a degenerate sigma cannot produce a nonsense stop
     const rawDist = 2 * Number(pending.ouSigma);
     const dist = Math.min(Math.max(Number.isFinite(rawDist) ? rawDist : 0, fill * 0.004), fill * 0.03);
     const sl = pending.side === 'BUY' ? fill - dist : fill + dist;
+    pending.stopLossPrice = sl;
     // Target is a price from the strategy, not a duration. Reject invalid/sideways targets;
     // the stop remains mandatory and is verified by OrderGateway.
     const candidateTp = Number(pending.ouMu);
@@ -889,6 +886,15 @@ export class TradingPipeline {
 
   private warmupWarnings = new Map<AssetSymbol, number>();
 
+  private logEntryGate(symbol: AssetSymbol, gate: string, details: string): void {
+    const key = `${symbol}:${gate}`;
+    const now = Date.now();
+    const last = this.entryGateDiagnostics.get(key) || 0;
+    if (now - last < 60_000) return;
+    this.entryGateDiagnostics.set(key, now);
+    console.log(`🔎 [ENTRY_GATE] ${symbol} gate=${gate} ${details}`);
+  }
+
   private async initializeMarketData() {
     const symbols = [...new Set([...this.config.activeSymbols, ...this.userDataStream.getPositions().map(p => p.symbol)])];
     await this.marketData.backfillRealCandles(symbols);
@@ -899,6 +905,8 @@ export class TradingPipeline {
     // Strict Stale Market Data Check (منع التداول على بيانات قديمة أو ميتة)
     const dataAge = Date.now() - this.marketData.getLastUpdateTime(symbol);
     if (dataAge > 3000) {
+      const freshness = this.marketData.getSourceFreshness(symbol);
+      this.logEntryGate(symbol, 'stale', `dataAgeMs=${dataAge} aggTrade=${freshness.aggTrade} depth=${freshness.depth}`);
       console.warn(`⚠️ [${symbol}] Stale market data detected (${dataAge}ms). Execution aborted.`);
       return;
     }
@@ -907,6 +915,7 @@ export class TradingPipeline {
     // until enough candles exist (backfill failure must not become a bogus signal).
     const historyLen = this.marketData.getCandles(symbol).length;
     if (historyLen < 30) {
+      this.logEntryGate(symbol, 'history', `candles=${historyLen} required=30`);
       const now = Date.now();
       if (!this.warmupWarnings.has(symbol) || now - this.warmupWarnings.get(symbol)! >= 60_000) {
         this.warmupWarnings.set(symbol, now);
@@ -920,24 +929,28 @@ export class TradingPipeline {
     // 0. Dynamic Risk Check
     const lastDecision = this.dynamicRiskManager.getLastDecision();
     if (lastDecision?.action === 'STOP' || lastDecision?.action === 'PAUSE') {
+      this.logEntryGate(symbol, 'risk', `action=${lastDecision.action} reason=${lastDecision.reasons[0] || 'dynamic-risk'}`);
       console.log(`🛑 Trading halted/paused for ${symbol}: ${lastDecision.reasons[0] || 'Dynamic risk stop'}`);
       return;
     }
 
     // 0.1 Portfolio Tier & Safety Brake Check
     if (!this.portfolioSizer.isSymbolAllowed(symbol)) {
+      this.logEntryGate(symbol, 'universe', 'symbol-not-allowed-by-portfolio-sizer');
       return;
     }
 
     const openPositionsCount = this.userDataStream.getPositions().length;
     const safetyCheck = this.portfolioSizer.canOpenNewTrade(openPositionsCount);
     if (!safetyCheck.allowed) {
+      this.logEntryGate(symbol, 'capacity', `reason=${safetyCheck.reason}`);
       console.log(`🛑 Trade blocked for ${symbol}: ${safetyCheck.reason}`);
       return;
     }
 
     // Check concurrency lock IMMEDIATELY (البند 2: منع التسابق وحظر الرمز أثناء العمليات غير المتزامنة)
     if (this.inFlightSymbols.has(symbol)) {
+      this.logEntryGate(symbol, 'in-flight', 'symbol-already-being-processed');
       return;
     }
 
@@ -945,6 +958,7 @@ export class TradingPipeline {
     const now = Date.now();
     const lastTime = this.lastOrderTime.get(symbol) || 0;
     if (now - lastTime < 15000) {
+      this.logEntryGate(symbol, 'cooldown', `remainingMs=${15000 - (now - lastTime)}`);
       return;
     }
 
@@ -952,7 +966,10 @@ export class TradingPipeline {
     const tier = this.portfolioSizer.getPortfolioTier();
     // 1. Evaluate Multi-Agent Quant Engine first if active
     const candles = this.marketData.getCandles(symbol) || [];
-    if (candles.length < 60) return;
+    if (candles.length < 60) {
+      this.logEntryGate(symbol, 'history', `candles=${candles.length} required=60`);
+      return;
+    }
     const multiAgentRes = this.strategyManager.getMultiAgentEngine().evaluate(features, regime, candles);
 
     // Fall back to OU Decision Engine
@@ -961,6 +978,7 @@ export class TradingPipeline {
       : this.decisionEngine.decide(symbol, features, tier, regime);
 
     if (!decision.signal || decision.signal.type === 'NEUTRAL' || decision.signal.strength < 0.5) {
+      this.logEntryGate(symbol, 'signal', `result=${decision.signal?.type || 'NONE'} strength=${decision.signal?.strength ?? 0}`);
       return;
     }
 
@@ -973,6 +991,7 @@ export class TradingPipeline {
     const strategyCouncil = decideByCouncil(councilVotes, { quorum: 2, minimumConfidence: 0.52 });
     this.eventJournal.record('INFO', 'STRATEGY', `[STRATEGY_COUNCIL] ${symbol} decision=${strategyCouncil?.side ?? 'ABSTAIN'} votes=${strategyCouncil?.votes ?? 0} executionEnabled=true`);
     if (!strategyCouncil || strategyCouncil.side !== signalType) {
+      this.logEntryGate(symbol, 'strategy-council', `signal=${signalType} consensus=${strategyCouncil?.side ?? 'ABSTAIN'} votes=${strategyCouncil?.votes ?? 0}`);
       this.eventJournal.record('WARN', 'STRATEGY', `[STRATEGY_COUNCIL_REJECTED] ${symbol} signal=${signalType} consensus=${strategyCouncil?.side ?? 'ABSTAIN'}`);
       return;
     }
@@ -1002,6 +1021,7 @@ export class TradingPipeline {
     });
     if (!sevenMemberDecision.executionEnabled || sevenMemberDecision.veto ||
         sevenMemberDecision.action !== signalType || sevenMemberDecision.confidence < 0.5) {
+      this.logEntryGate(symbol, 'seven-member-council', `signal=${signalType} action=${sevenMemberDecision.action} confidence=${sevenMemberDecision.confidence} veto=${sevenMemberDecision.veto}`);
       this.eventJournal.record('WARN', 'STRATEGY', `[SEVEN_MEMBER_COUNCIL_REJECTED] ${symbol} signal=${signalType} action=${sevenMemberDecision.action} confidence=${sevenMemberDecision.confidence} veto=${sevenMemberDecision.veto}`);
       return;
     }
@@ -1029,6 +1049,7 @@ export class TradingPipeline {
     }
 
     if (boardDecision.verdict === 'REJECTED') {
+      this.logEntryGate(symbol, 'board', `action=${boardDecision.action} guards=${boardDecision.guardsPassed}/8`);
       console.log('🏛️ [BOARD REJECTED] ' + symbol + ' signal blocked by Board of Directors: ' + boardDecision.action + ' (Guards: ' + boardDecision.guardsPassed + '/8)');
       this.eventJournal.record('WARN', 'STRATEGY', 'Signal blocked for ' + symbol + ': ' + boardDecision.action);
       return;
@@ -1152,6 +1173,7 @@ export class TradingPipeline {
           this.pendingProtection.set(ord.id, {
             ouSigma: features.ouSigma || (features.currentPrice * 0.005),
             ouMu: sig.takeProfit,
+            maxHoldMs: sig.maxHoldMs,
             side: signalType,
             symbol,
             decisionId: boardDecision.id,
@@ -1729,7 +1751,14 @@ export class TradingPipeline {
     const balance = this.userDataStream.getBalance();
     const currentTier = this.portfolioSizer.updateBalance(this.userDataStream.getBalance().totalEquity);
     this.config.activeSymbols = this.portfolioSizer.getAllowedSymbols();
-    await this.marketData.syncSubscriptionsWithBackfill(this.config.activeSymbols);
+    // Keep open-position feeds subscribed even when the entry universe changes.
+    // Otherwise ensureSymbols() adds them back on the next position tick and
+    // creates a stop/start oscillation in ExchangeMarketData.
+    const subscriptionSymbols = [...new Set([
+      ...this.config.activeSymbols,
+      ...this.userDataStream.getPositions().map(position => position.symbol),
+    ])];
+    await this.marketData.syncSubscriptionsWithBackfill(subscriptionSymbols);
 
     this.scaleInManager.updateTier(currentTier);
 

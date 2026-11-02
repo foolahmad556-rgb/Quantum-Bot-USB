@@ -8,10 +8,12 @@ import { AssetSymbol } from '../domain/types';
 
 export interface PartialProfitConfig {
   enabled: boolean;
-  firstTargetPercent: number;      // الهدف الأول (مثلاً 0.05 = 5%)
-  firstClosePercent: number;       // نسبة الإغلاق الأول (مثلاً 0.50 = 50%)
+  firstTargetR: number;             // الهدف الأول بوحدة R
+  firstClosePercent: number;        // نسبة الإغلاق الأول
   trailingStopPercent: number;     // نسبة Trailing Stop (مثلاً 0.03 = 3%)
   moveStopToBreakEven: boolean;    // نقل الوقف لنقطة الدخول
+  breakEvenOffsetBps: number;       // هامش تغطية الرسوم والانزلاق
+  timeStopProgressR: number;        // أقل تقدم مطلوب عند انتهاء المهلة
 }
 
 export interface PositionState {
@@ -26,6 +28,9 @@ export interface PositionState {
   highestPrice: number;            // أعلى سعر وصلته (للـ BUY)
   lowestPrice: number;             // أدنى سعر وصلته (للـ SELL)
   trailingStopPrice: number;
+  initialStopPrice: number;
+  riskPerUnit: number;
+  bestR: number;
   lastTrailingUpdate?: number;
   registeredAt: number;
   maxHoldMs?: number;
@@ -42,10 +47,12 @@ export class PartialProfitManager {
     this.orderGateway = orderGateway;
     this.config = {
       enabled: true,
-      firstTargetPercent: 0.018,     // هدف تكتيكي أول سريع 1.8% (يعادل +6% إلى +9% على الهامش)
-      firstClosePercent: 0.50,       // إغلاق 50% وقفل الربح
+      firstTargetR: 1.0,
+      firstClosePercent: 0.35,
       trailingStopPercent: 0.008,    // Trailing Stop 0.8% لحماية القمة
-      moveStopToBreakEven: true,     // نقل الوقف لنقطة الدخول فوراً
+      moveStopToBreakEven: true,     // نقل وقف الخسارة لنقطة الدخول فوراً
+      breakEvenOffsetBps: 8,
+      timeStopProgressR: 0.5,
       ...config,
     };
   }
@@ -56,7 +63,7 @@ export class PartialProfitManager {
     side: 'BUY' | 'SELL',
     entryPrice: number,
     quantity: number,
-    maxHoldMs?: number
+    options: { maxHoldMs?: number; stopLossPrice?: number } = {}
   ): void {
     if (!this.config.enabled) return;
 
@@ -68,7 +75,11 @@ export class PartialProfitManager {
       existing.entryPrice = totalCost / totalQty;
       existing.originalQuantity += quantity;
       existing.remainingQuantity = totalQty;
-      if (maxHoldMs) existing.maxHoldMs = maxHoldMs;
+      if (options.maxHoldMs) existing.maxHoldMs = options.maxHoldMs;
+      if (options.stopLossPrice && options.stopLossPrice > 0) {
+        existing.initialStopPrice = options.stopLossPrice;
+        existing.riskPerUnit = Math.max(Math.abs(existing.entryPrice - options.stopLossPrice), existing.entryPrice * 0.001);
+      }
       console.log(`📝 PartialProfitManager: Consolidated position for ${symbol} | New Avg: $${existing.entryPrice.toFixed(2)} | Qty: ${existing.remainingQuantity}`);
       return;
     }
@@ -85,12 +96,22 @@ export class PartialProfitManager {
       highestPrice: entryPrice,
       lowestPrice: entryPrice,
       trailingStopPrice: 0,
+      initialStopPrice: options.stopLossPrice && options.stopLossPrice > 0
+        ? options.stopLossPrice
+        : (side === 'BUY' ? entryPrice * 0.995 : entryPrice * 1.005),
+      riskPerUnit: Math.max(
+        Math.abs(entryPrice - (options.stopLossPrice && options.stopLossPrice > 0
+          ? options.stopLossPrice
+          : (side === 'BUY' ? entryPrice * 0.995 : entryPrice * 1.005))),
+        entryPrice * 0.001,
+      ),
+      bestR: 0,
       registeredAt: Date.now(),
-      maxHoldMs,
+      maxHoldMs: options.maxHoldMs,
       exiting: false,
     });
 
-    console.log(`📝 PartialProfitManager: Position registered [${orderId}] | ${symbol} ${side} @ $${entryPrice} | Qty: ${quantity}${maxHoldMs ? ` | MaxHold: ${(maxHoldMs/60000).toFixed(1)}m` : ''}`);
+    console.log(`📝 PartialProfitManager: Position registered [${orderId}] | ${symbol} ${side} @ $${entryPrice} | Qty: ${quantity}${options.maxHoldMs ? ` | MaxHold: ${(options.maxHoldMs/60000).toFixed(1)}m` : ''}`);
   }
 
   public async updatePosition(orderIdOrSymbol: string, currentPrice: number): Promise<void> {
@@ -112,12 +133,30 @@ export class PartialProfitManager {
       const mutexKey = `${position.symbol}-${position.orderId}`;
       if (this.processingMutex.has(mutexKey)) continue;
 
-      // 0. Time-based Exit Check
-      if (position.maxHoldMs && (Date.now() - position.registeredAt > position.maxHoldMs)) {
-        position.exiting = true; // Synchronously lock to prevent re-entrant exit orders on rapid ticks
+      if (position.side === 'BUY') {
+        position.highestPrice = Math.max(position.highestPrice, currentPrice);
+      } else {
+        position.lowestPrice = Math.min(position.lowestPrice, currentPrice);
+      }
+
+      const currentR = position.riskPerUnit > 0
+        ? (position.side === 'BUY'
+          ? (currentPrice - position.entryPrice)
+          : (position.entryPrice - currentPrice)) / position.riskPerUnit
+        : 0;
+      position.bestR = Math.max(position.bestR, currentR);
+
+      // Close only stagnant trades. Once 1R has been reached, the trailing
+      // stop owns the exit and the position may continue as a runner.
+      const ageMs = Date.now() - position.registeredAt;
+      const pastInitialTimeStop = Boolean(position.maxHoldMs && ageMs > position.maxHoldMs);
+      const pastFinalTimeStop = Boolean(position.maxHoldMs && ageMs > position.maxHoldMs * 1.5);
+      if (position.maxHoldMs && position.bestR < this.config.firstTargetR
+        && (pastFinalTimeStop || (pastInitialTimeStop && currentR < this.config.timeStopProgressR))) {
+        position.exiting = true;
         this.processingMutex.add(mutexKey);
         try {
-          console.log(`⏱️ Time-Based Exit triggered for ${position.symbol} [${position.orderId}] after ${Math.round((Date.now() - position.registeredAt) / 60000)}m`);
+          console.log(`⏱️ Smart Time Stop for ${position.symbol}: age=${Math.round((Date.now() - position.registeredAt) / 60000)}m bestR=${position.bestR.toFixed(2)} currentR=${currentR.toFixed(2)}`);
           await this.executeTimeExit(position, currentPrice);
         } finally {
           this.processingMutex.delete(mutexKey);
@@ -125,19 +164,15 @@ export class PartialProfitManager {
         continue;
       }
 
-      if (position.side === 'BUY') {
-        position.highestPrice = Math.max(position.highestPrice, currentPrice);
-      } else {
-        position.lowestPrice = Math.min(position.lowestPrice, currentPrice);
-      }
-
       // 1. Check Partial Profit Target (e.g. +5%)
       if (!position.partialProfitTaken) {
-        const profitPercent = position.side === 'BUY'
-          ? (currentPrice - position.entryPrice) / position.entryPrice
-          : (position.entryPrice - currentPrice) / position.entryPrice;
+        const profitR = position.riskPerUnit > 0
+          ? (position.side === 'BUY'
+            ? (currentPrice - position.entryPrice)
+            : (position.entryPrice - currentPrice)) / position.riskPerUnit
+          : 0;
 
-        if (profitPercent >= this.config.firstTargetPercent) {
+        if (profitR >= this.config.firstTargetR) {
           this.processingMutex.add(mutexKey);
           try {
             await this.executePartialProfit(position, currentPrice);
@@ -232,7 +267,10 @@ export class PartialProfitManager {
 
     await this.orderGateway.cancelProtectiveOrders(position.symbol, position.orderId);
 
-    const stopPrice = position.entryPrice;
+    const offset = position.entryPrice * (this.config.breakEvenOffsetBps / 10_000);
+    const stopPrice = position.side === 'BUY'
+      ? position.entryPrice + offset
+      : position.entryPrice - offset;
     const closeSide = position.side === 'BUY' ? 'SELL' : 'BUY';
 
     await this.orderGateway.sendStopLoss(
@@ -335,6 +373,10 @@ export class PartialProfitManager {
         partialProfitTaken: p.partialProfitTaken,
         breakEvenActivated: p.breakEvenActivated,
         trailingStopPrice: p.trailingStopPrice,
+        initialStopPrice: p.initialStopPrice,
+        riskPerUnit: p.riskPerUnit,
+        bestR: p.bestR,
+        maxHoldMs: p.maxHoldMs,
         unrealizedPnl: p.side === 'BUY'
           ? (p.highestPrice - p.entryPrice) * p.remainingQuantity
           : (p.entryPrice - p.lowestPrice) * p.remainingQuantity,

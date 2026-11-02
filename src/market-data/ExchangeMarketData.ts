@@ -175,6 +175,8 @@ export class ExchangeMarketData extends EventEmitter {
   private livePollTimer: NodeJS.Timeout | null = null;
   private backfillInFlight = 0;
   private readonly pendingWarmupSymbols = new Set<AssetSymbol>();
+  private subscriptionSyncInFlight: Promise<boolean> | null = null;
+  private pendingSubscriptionSymbols: AssetSymbol[] | null = null;
 
   constructor(orderBookBuilder?: OrderBookBuilder, activeSymbols?: AssetSymbol[]) {
     super();
@@ -214,6 +216,12 @@ export class ExchangeMarketData extends EventEmitter {
 
   public ensureSymbols(symbols: AssetSymbol[]): void {
     const combined = [...new Set([...this.activeCryptoSymbols, ...symbols])];
+    if (this.subscriptionSyncInFlight) {
+      // Defer position-feed additions until the current backfill/sync finishes.
+      // Reconnecting here would undo the single-flight protection above.
+      this.pendingSubscriptionSymbols = combined;
+      return;
+    }
     const changed = this.syncSubscriptions(combined);
     if (changed && !this.isRunning) this.startStreaming(300, combined);
   }
@@ -245,27 +253,49 @@ export class ExchangeMarketData extends EventEmitter {
    */
   public async syncSubscriptionsWithBackfill(symbols: AssetSymbol[]): Promise<boolean> {
     const next = [...new Set(symbols.filter(s => s.endsWith('/USDT')))];
-    const current = new Set(this.activeCryptoSymbols);
-    const added = next.filter(symbol => !current.has(symbol));
-    const retry = [...this.pendingWarmupSymbols].filter(symbol => next.includes(symbol));
-    for (const symbol of [...added, ...retry]) this.pendingWarmupSymbols.add(symbol);
+    if (this.subscriptionSyncInFlight) {
+      // Coalesce overlapping risk/position refreshes. The active operation will
+      // process the latest universe once, instead of starting duplicate
+      // backfills and repeatedly replacing the WebSocket connections.
+      this.pendingSubscriptionSymbols = next;
+      return this.subscriptionSyncInFlight;
+    }
 
-    const changed = this.syncSubscriptions(next);
-    const warmupTargets = [...new Set([...added, ...retry])];
-    if (warmupTargets.length === 0) return changed;
+    let changed = false;
+    const run = (async () => {
+      let desired: AssetSymbol[] | null = next;
+      while (desired) {
+        const current = new Set(this.activeCryptoSymbols);
+        const added = desired.filter(symbol => !current.has(symbol));
+        const retry = [...this.pendingWarmupSymbols].filter(symbol => desired!.includes(symbol));
+        for (const symbol of [...added, ...retry]) this.pendingWarmupSymbols.add(symbol);
 
-    await this.backfillRealCandles(warmupTargets);
-    let loaded = 0;
-    for (const symbol of warmupTargets) {
-      if ((this.candleHistory.get(symbol)?.length || 0) >= 100) {
-        this.pendingWarmupSymbols.delete(symbol);
-        loaded++;
+        changed = this.syncSubscriptions(desired) || changed;
+        const warmupTargets = [...new Set([...added, ...retry])];
+        if (warmupTargets.length > 0) {
+          await this.backfillRealCandles(warmupTargets);
+          let loaded = 0;
+          for (const symbol of warmupTargets) {
+            if ((this.candleHistory.get(symbol)?.length || 0) >= 100) {
+              this.pendingWarmupSymbols.delete(symbol);
+              loaded++;
+            }
+          }
+          if (loaded < warmupTargets.length) {
+            console.warn(`⚠️ ExchangeMarketData: ${warmupTargets.length - loaded} symbol warmups remain pending; entries stay blocked`);
+          }
+        }
+        desired = this.pendingSubscriptionSymbols;
+        this.pendingSubscriptionSymbols = null;
       }
+      return changed;
+    })();
+    this.subscriptionSyncInFlight = run;
+    try {
+      return await run;
+    } finally {
+      if (this.subscriptionSyncInFlight === run) this.subscriptionSyncInFlight = null;
     }
-    if (loaded < warmupTargets.length) {
-      console.warn(`⚠️ ExchangeMarketData: ${warmupTargets.length - loaded} symbol warmups remain pending; entries stay blocked`);
-    }
-    return changed;
   }
 
   public getLastUpdateTime(symbol: AssetSymbol): number {
