@@ -139,6 +139,9 @@ export class TradingPipeline {
   private heartbeatIntervalTimer: NodeJS.Timeout | null = null;
   private heartbeatIntervalMs: number = 30 * 60 * 1000;
   private lastHeartbeatSent: number = 0;
+  private reconciliationHealthy = false;
+  private reconciliationFailureCount = 0;
+  private lastSuccessfulReconciliationAt = 0;
 
   private config: RuntimeConfigState;
   private isRunning: boolean = false;
@@ -209,6 +212,7 @@ export class TradingPipeline {
       }
 
       if (this.runtimeSafetyGuard && !this.runtimeSafetyGuard()) return { allowed: false, reason: 'Execution lease or storage readiness unavailable' };
+      if (!this.reconciliationHealthy) return { allowed: false, reason: 'Exchange reconciliation is temporarily unavailable; entries remain blocked until account state is verified' };
       if (this.killSwitch.isActive()) {
         return { allowed: false, reason: `New entry blocked by Kill Switch (${this.killSwitch.getLevel()})` };
       }
@@ -1397,6 +1401,7 @@ export class TradingPipeline {
 
         if (!account || positions === null) {
           console.warn(`⚠️ No reconciliation data available (source: ${source})`);
+          this.reconciliationHealthy = false;
           return;
         }
 
@@ -1531,15 +1536,52 @@ export class TradingPipeline {
           }
 
           console.log(`✅ State Reconciliation complete. In sync with Binance Futures (${executionMode}). Equity: $${realEquity.toFixed(2)}, Open positions: ${realOpenPositions.length}`);
+          this.reconciliationHealthy = true;
+          this.reconciliationFailureCount = 0;
+          this.lastSuccessfulReconciliationAt = Date.now();
+
+          // A transient reconciliation/lease halt must not remain latched after
+          // the exchange confirms a flat account. Preserve genuine risk halts.
+          const latestKill = this.killSwitch.getHistory()[0];
+          const transientReason = latestKill?.reason || '';
+          const transientHalt = /reconciliation|execution lease|heartbeat|snapshot unavailable/i.test(transientReason);
+          if (realOpenPositions.length === 0 && this.killSwitch.isActive() && transientHalt) {
+            this.killSwitch.reset();
+            await this.db.saveState('killswitch_state', {
+              level: 'NORMAL', active: false,
+              reason: 'Auto-recovered after verified flat exchange account and healthy reconciliation',
+            });
+            console.warn('✅ Cleared transient KillSwitch after verified flat account reconciliation.');
+          }
         }
       } catch (error) {
         const reason = `Reconciliation failed: ${error instanceof Error ? error.message : String(error)}`;
         console.error(`🚨 ${reason}`);
+        this.reconciliationHealthy = false;
+        this.reconciliationFailureCount += 1;
+        const localPositions = this.userDataStream.getPositions();
+        const recentlyVerified = Date.now() - this.lastSuccessfulReconciliationAt < 120_000;
+
+        // A missing snapshot is not proof of a risk event. Keep the process and
+        // exit supervisor alive, but fail closed for new entries until recovery.
+        if (localPositions.length === 0) {
+          console.warn(`⚠️ ${reason}; no local positions detected. Entries blocked temporarily; KillSwitch unchanged (failure ${this.reconciliationFailureCount}).`);
+          return;
+        }
+        if (recentlyVerified && this.reconciliationFailureCount < 3) {
+          console.warn(`⚠️ ${reason}; using bounded recovery grace with ${localPositions.length} tracked position(s). KillSwitch unchanged.`);
+          return;
+        }
         this.killSwitch.trigger('HARD_HALT', reason, 'AUTO_RISK_ENGINE');
       }
     } catch (error) {
       console.error(`🚨 Outer reconciliation error: ${error instanceof Error ? error.message : String(error)}`);
-      this.killSwitch.trigger('HARD_HALT', `Outer reconciliation failed: ${error instanceof Error ? error.message : String(error)}`, 'AUTO_RISK_ENGINE');
+      this.reconciliationHealthy = false;
+      if (this.userDataStream.getPositions().length > 0) {
+        this.killSwitch.trigger('HARD_HALT', `Outer reconciliation failed: ${error instanceof Error ? error.message : String(error)}`, 'AUTO_RISK_ENGINE');
+      } else {
+        console.warn('⚠️ Outer reconciliation failed while account is locally flat; KillSwitch unchanged and entries remain blocked.');
+      }
     }
   }
 

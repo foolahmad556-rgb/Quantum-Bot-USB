@@ -169,7 +169,17 @@ async function requireCloudStorage(res: Response): Promise<boolean> {
 }
 
 const supervisor = cloudDb ? new RuntimeSupervisor(cloudDb, process.env.EXCHANGE_ACCOUNT_ID || '', async (reason) => {
-  pipeline.getKillSwitch().trigger('HARD_HALT', reason, 'HEALTH_HEARTBEAT_LOSS');
+  const positions = pipeline.getUserDataStream?.()?.getPositions?.() || [];
+  if (positions.length === 0) {
+    // Lease loss blocks new entries through the runtime safety guard, but a
+    // transient storage heartbeat must not latch the global KillSwitch while
+    // the exchange account is verified flat.
+    console.warn(`⚠️ ${reason}; account is flat, keeping KillSwitch unchanged and recovering lease in background.`);
+    scheduleLeaseRecovery(reason);
+    return;
+  } else {
+    pipeline.getKillSwitch().trigger('HARD_HALT', reason, 'HEALTH_HEARTBEAT_LOSS');
+  }
   await pipeline.stop();
   scheduleAutostartRetry(new Error(reason));
 }) : null;
@@ -177,6 +187,8 @@ pipeline.setRuntimeSafetyGuard(() => !!pipeline.isRunning && !!supervisor?.canEn
 let startInProgress: Promise<void> | null = null;
 let autostartRetryTimer: ReturnType<typeof setTimeout> | null = null;
 let autostartRetryAttempt = 0;
+let leaseRecoveryTimer: ReturnType<typeof setTimeout> | null = null;
+let leaseRecoveryAttempt = 0;
 let autostartEnabled = AUTOSTART;
 async function startTrading() {
   if (pipeline.isRunning) return;
@@ -210,6 +222,23 @@ function scheduleAutostartRetry(error: unknown) {
       console.log('✅ TradingPipeline started after an automatic retry.');
     } catch (retryError) {
       scheduleAutostartRetry(retryError);
+    }
+  }, delayMs);
+}
+function scheduleLeaseRecovery(reason: string) {
+  if (!autostartEnabled || !supervisor || supervisor.canEnter() || leaseRecoveryTimer) return;
+  const delayMs = Math.min(60_000, 5_000 * 2 ** Math.min(leaseRecoveryAttempt, 3));
+  leaseRecoveryAttempt += 1;
+  console.warn(`⚠️ Lease recovery scheduled in ${Math.ceil(delayMs / 1000)}s: ${reason}`);
+  leaseRecoveryTimer = setTimeout(async () => {
+    leaseRecoveryTimer = null;
+    if (!autostartEnabled || supervisor.canEnter()) return;
+    try {
+      await supervisor.start();
+      leaseRecoveryAttempt = 0;
+      console.log('✅ Execution lease recovered in background; trading pipeline remained online.');
+    } catch (error) {
+      scheduleLeaseRecovery(error instanceof Error ? error.message : String(error));
     }
   }, delayMs);
 }
