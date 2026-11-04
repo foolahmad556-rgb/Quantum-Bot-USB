@@ -40,6 +40,8 @@ if (!configuredJwtSecret || configuredJwtSecret.length < 32 || configuredJwtSecr
 }
 const JWT_SECRET: string = configuredJwtSecret;
 const AUTOSTART = String(process.env.AUTOSTART_TRADING || process.env.AUTO_START_TRADING || '').toLowerCase() === 'true';
+const READY_STORAGE_TIMEOUT_MS = Math.max(1000, Math.min(10_000, Number(process.env.READY_STORAGE_TIMEOUT_MS || 4000)));
+const READY_STORAGE_CACHE_MS = Math.max(1000, Math.min(30_000, Number(process.env.READY_STORAGE_CACHE_MS || 5000)));
 
 /* ------------------------------------------------------------------ */
 /* helpers                                                             */
@@ -138,6 +140,8 @@ const board: any = BoardOfDirectorsEngine.getInstance();
 // Persistent storage: Cloudflare D1 is mandatory for server operation.
 let cloudDb: D1DatabaseService | null = null;
 let cloudStorageOk = false;
+let cloudStorageCheckedAt = 0;
+let cloudStorageCheckInFlight: Promise<boolean> | null = null;
 let storageInitError: Error | null = null;
 try {
   console.log(`🔐 D1 env: URL=${process.env.D1_API_URL ? 'set' : 'missing'} SECRET=${process.env.D1_API_SECRET ? 'set' : 'missing'}`);
@@ -156,10 +160,33 @@ try {
 }
 
 async function checkStorage(): Promise<boolean> {
-  try {
-    cloudStorageOk = !!cloudDb && (await cloudDb.ping()).ok === true;
-  } catch { cloudStorageOk = false; }
-  return cloudStorageOk;
+  const now = Date.now();
+  if (cloudStorageCheckedAt > 0 && now - cloudStorageCheckedAt < READY_STORAGE_CACHE_MS) {
+    return cloudStorageOk;
+  }
+  if (cloudStorageCheckInFlight) return cloudStorageCheckInFlight;
+
+  cloudStorageCheckInFlight = (async () => {
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    try {
+      if (!cloudDb) return false;
+      const timeoutPromise = new Promise<never>((_, reject) => {
+        timeout = setTimeout(() => reject(new Error(`D1 readiness timeout after ${READY_STORAGE_TIMEOUT_MS}ms`)), READY_STORAGE_TIMEOUT_MS);
+      });
+      const result = await Promise.race([cloudDb.ping(), timeoutPromise]);
+      cloudStorageOk = result.ok === true;
+      return cloudStorageOk;
+    } catch (error: any) {
+      cloudStorageOk = false;
+      console.warn(`⚠️ D1 readiness check failed: ${error?.message || String(error)}`);
+      return false;
+    } finally {
+      if (timeout) clearTimeout(timeout);
+      cloudStorageCheckedAt = Date.now();
+      cloudStorageCheckInFlight = null;
+    }
+  })();
+  return cloudStorageCheckInFlight;
 }
 
 async function requireCloudStorage(res: Response): Promise<boolean> {
@@ -374,11 +401,23 @@ app.get('/api/auth/validate', async (req: Request, res: Response) => {
 
 app.get('/api/health', (_req, res) => res.json({ status: 'alive', tradingRunning: !!pipeline.isRunning, autostart: AUTOSTART }));
 app.get('/api/ready', async (_req, res) => {
+  const startedAt = Date.now();
   const storage = await checkStorage();
   const executionOwner = !pipeline.isRunning || !!supervisor?.canEnter();
   const tradingReady = !autostartEnabled || !!pipeline.isRunning;
   const ready = authDbReady && storage && executionOwner && tradingReady;
-  res.status(ready ? 200 : 503).json({ ready, auth: authDbReady, storage, executionOwner, tradingRunning: !!pipeline.isRunning, tradingReady });
+  res.setHeader('Cache-Control', 'no-store');
+  res.setHeader('X-Readiness-Latency-Ms', String(Date.now() - startedAt));
+  res.status(ready ? 200 : 503).json({
+    ready,
+    auth: authDbReady,
+    storage,
+    executionOwner,
+    tradingRunning: !!pipeline.isRunning,
+    tradingReady,
+    checkedAt: new Date().toISOString(),
+    storageCacheAgeMs: cloudStorageCheckedAt ? Date.now() - cloudStorageCheckedAt : null,
+  });
 });
 
 app.get('/api/system-health', requireAuth, async (_req: Request, res: Response) => {
