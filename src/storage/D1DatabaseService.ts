@@ -1,4 +1,4 @@
-import { DatabaseService, TradeRecord, SignalRecord, BalanceSnapshot, PriceRecord } from './DatabaseService.ts';
+import { DatabaseService, TradeRecord, TradeFillRecord, SignalRecord, BalanceSnapshot, PriceRecord } from './DatabaseService.ts';
 
 export class D1ApiError extends Error {
   constructor(public readonly status: number) { super(`D1 API ${status}`); }
@@ -25,6 +25,14 @@ export class D1DatabaseService extends DatabaseService {
   }
   async ping() { return this.call<{ ok: boolean }>('/d1/health'); }
   async saveTrade(trade: TradeRecord) { await this.call('/d1/trades', { method: 'POST', body: JSON.stringify(trade) }); }
+  async saveTradeFill(fill: TradeFillRecord) {
+    const result = await this.call<{ created: boolean }>('/d1/trade-fills', { method: 'POST', body: JSON.stringify(fill) });
+    return result.created;
+  }
+  async getTradeFills(parentTradeId?: string) {
+    const query = parentTradeId ? `?parentTradeId=${encodeURIComponent(parentTradeId)}` : '';
+    return (await this.call<{ items: TradeFillRecord[] }>(`/d1/trade-fills${query}`)).items;
+  }
   async getOpenTrades(symbol?: string) { const q = symbol ? `?symbol=${encodeURIComponent(symbol)}` : ''; return (await this.call<{ items: TradeRecord[] }>(`/d1/trades/open${q}`)).items; }
   async getAllTrades(symbol?: string) { const q = symbol ? `?symbol=${encodeURIComponent(symbol)}` : ''; return (await this.call<{ items: TradeRecord[] }>(`/d1/trades${q}`)).items; }
   async closeTrade(id: string, pnl: number, exitPrice?: number, fee?: number, details?: Partial<TradeRecord>) { await this.call(`/d1/trades/${encodeURIComponent(id)}`, { method: 'PATCH', body: JSON.stringify({ pnl, exitPrice, fee, ...details }) }); }

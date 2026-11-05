@@ -29,6 +29,7 @@ export default {
         await rows(env, 'SELECT key FROM bot_state LIMIT 1');
         await rows(env, 'SELECT id FROM orders LIMIT 1');
         await rows(env, 'SELECT name FROM runtime_leases LIMIT 1');
+        await rows(env, 'SELECT id FROM trade_fills LIMIT 1');
         return json({ ok: true, storage: 'cloudflare-d1' });
       }
       // Private account API: never expose password hashes through public status/state.
@@ -98,6 +99,36 @@ export default {
         if (!validId(body.id) || !validId(body.symbol)) return json({ error: 'Trade id and symbol required' }, 400);
         await run(env, 'INSERT OR REPLACE INTO trades(id,payload,updated_at) VALUES(?,?,?)', [body.id, JSON.stringify(body), Date.now()]);
         return json({ ok: true });
+      }
+      if (path === '/d1/trade-fills' && method === 'POST') {
+        if (!validId(body.id) || !validId(body.parentTradeId) || !validId(body.orderId) ||
+            !validId(body.fillId) || !validId(body.symbol) ||
+            !['BUY', 'SELL'].includes(body.side) ||
+            !['ENTRY', 'SCALE_IN', 'EXIT'].includes(body.fillType) ||
+            !Number.isFinite(body.quantity) || body.quantity <= 0 ||
+            !Number.isFinite(body.price) || body.price <= 0 ||
+            !Number.isFinite(body.timestamp)) {
+          return json({ error: 'Invalid trade fill' }, 400);
+        }
+        const payload = { ...body, createdAt: Date.now() };
+        const result = await run(env, `INSERT OR IGNORE INTO trade_fills
+          (id,parent_trade_id,order_id,fill_id,payload,created_at)
+          VALUES(?,?,?,?,?,?)`, [
+          payload.id, payload.parentTradeId, payload.orderId, payload.fillId,
+          JSON.stringify(payload), Date.now()
+        ]);
+        return json({ ok: true, created: result.meta.changes === 1, id: payload.id });
+      }
+      if (path === '/d1/trade-fills' && method === 'GET') {
+        const parentTradeId = url.searchParams.get('parentTradeId');
+        const orderId = url.searchParams.get('orderId');
+        const filters = [], params = [];
+        if (parentTradeId) { filters.push('parent_trade_id=?'); params.push(parentTradeId); }
+        if (orderId) { filters.push('order_id=?'); params.push(orderId); }
+        const where = filters.length ? `WHERE ${filters.join(' AND ')}` : '';
+        const result = await rows(env, `SELECT payload FROM trade_fills ${where}
+          ORDER BY created_at ASC LIMIT ?`, [...params, boundedLimit(url.searchParams.get('limit'))]);
+        return json({ items: payloads(result) });
       }
       if ((path === '/d1/trades' || path === '/d1/trades/open') && method === 'GET') {
         const symbol = url.searchParams.get('symbol'), filters = [], params = [];

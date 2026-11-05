@@ -30,6 +30,7 @@ export interface ScaleInState {
   originalOrderId: string;
   symbol: AssetSymbol;
   side: 'BUY' | 'SELL';
+  strategyId: string;
   originalEntryPrice: number;
   originalQuantity: number;
   currentTotalQuantity: number;
@@ -134,12 +135,17 @@ export class ScaleInManager {
     symbol: AssetSymbol,
     side: 'BUY' | 'SELL',
     entryPrice: number,
-    quantity: number
+    quantity: number,
+    strategyId = 'UNKNOWN-STRATEGY'
   ): void {
+    const normalizedStrategyId = typeof strategyId === 'string' && strategyId.trim().length > 0
+      ? strategyId.trim()
+      : 'UNKNOWN-STRATEGY';
     this.activePositions.set(orderId, {
       originalOrderId: orderId,
       symbol,
       side,
+      strategyId: normalizedStrategyId,
       originalEntryPrice: entryPrice,
       originalQuantity: quantity,
       currentTotalQuantity: quantity,
@@ -150,7 +156,7 @@ export class ScaleInManager {
       scaleInHistory: [],
       lockedProfitAmount: 0,
     });
-    console.log(`📝 ScaleInManager registered original position: ${orderId} (${symbol} ${side} ${quantity} @ $${entryPrice})`);
+    console.log(`📝 ScaleInManager registered original position: ${orderId} (${symbol} ${side} ${quantity} @ $${entryPrice}) strategy=${normalizedStrategyId}`);
   }
 
   public setLockedProfit(orderId: string, lockedProfitAmount: number): void {
@@ -270,7 +276,7 @@ export class ScaleInManager {
     const position = this.activePositions.get(originalOrderId);
     if (!position) return null;
 
-    console.log(`🚀 SCALE-IN #${position.scaleInCount + 1} [${this.currentTier}]: Adding ${quantity.toFixed(6)} ${position.symbol} @ $${currentPrice}`);
+    console.log(`🚀 SCALE-IN #${position.scaleInCount + 1} [${this.currentTier}] [${position.strategyId}]: Adding ${quantity.toFixed(6)} ${position.symbol} @ $${currentPrice}`);
 
     const scaleInOrder = this.orderGateway.submitOrder({
       symbol: position.symbol,
@@ -278,7 +284,8 @@ export class ScaleInManager {
       type: 'MARKET',
       quantity: Number(quantity.toFixed(6)),
       price: currentPrice,
-      strategyId: 'SCALE_IN',
+      strategyId: position.strategyId,
+      executionTag: 'SCALE_IN',
     });
 
     if (scaleInOrder.status === 'REJECTED') {

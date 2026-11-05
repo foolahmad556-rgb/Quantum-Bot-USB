@@ -42,7 +42,7 @@ import { KillSwitch } from '../risk/KillSwitch';
 import { RiskEngine } from '../risk/RiskEngine';
 import { EventJournal } from '../storage/EventJournal';
 import { INITIAL_RUNTIME_CONFIG, RuntimeConfigState } from './RuntimeConfig';
-import { DatabaseService } from '../storage/DatabaseService';
+import { DatabaseService, TradeFillRecord } from '../storage/DatabaseService';
 import { ShadowComparisonThrottle } from '../storage/ShadowComparisonThrottle';
 import { CorrelationRiskManager } from '../risk/CorrelationRiskManager';
 import { TelegramService } from '../services/TelegramService';
@@ -118,6 +118,7 @@ export class TradingPipeline {
     ouMu: number;
     side: 'BUY' | 'SELL';
     symbol: AssetSymbol;
+    strategyId: string;
     decisionId: string;
     boardVerdict: BoardMeetingDecision['verdict'];
     boardSizeMultiplier: number;
@@ -128,6 +129,11 @@ export class TradingPipeline {
     strategyCouncilVotes: unknown[];
     sevenCouncilVotes: unknown[];
   }> = new Map();
+  private readonly scaleInParentByOrderId = new Map<string, {
+    parentTradeId: string;
+    strategyId: string;
+    scaleInIndex: number;
+  }>();
   private executionLedger: Map<string, { entryFills: ExecutionLedgerFill[]; exitFills: ExecutionLedgerFill[] }> = new Map();
   private lastAlertState: Map<string, { value: string; ts: number }> = new Map();
   private signalHistory: TradingSignal[] = [];
@@ -545,6 +551,35 @@ export class TradingPipeline {
     // actual price, quantity, commission and exchange timestamp (not candle marks).
     this.userDataStream.subscribeFills((fill) => {
       const mapped = toExecutionLedgerFill(fill);
+      const scaleInMeta = this.scaleInParentByOrderId.get(fill.orderId);
+      if (scaleInMeta) {
+        const fillRecord: TradeFillRecord = {
+          id: `FILL-${fill.orderId}-${fill.fillId}`,
+          parentTradeId: scaleInMeta.parentTradeId,
+          orderId: fill.orderId,
+          fillId: fill.fillId,
+          symbol: fill.symbol,
+          side: fill.side,
+          quantity: fill.quantity,
+          price: fill.price,
+          commission: fill.commission,
+          commissionAsset: fill.commissionAsset,
+          timestamp: fill.timestamp,
+          isMaker: fill.isMaker,
+          strategyId: scaleInMeta.strategyId,
+          executionTag: 'SCALE_IN',
+          fillType: 'SCALE_IN',
+          scaleInIndex: scaleInMeta.scaleInIndex,
+          metadata: { source: 'BINANCE_USER_DATA_STREAM', receivedAt: Date.now() },
+        };
+        void this.db.saveTradeFill(fillRecord).then((created) => {
+          if (created) {
+            console.log(`✅ SCALE_IN fill persisted: ${fill.symbol} order=${fill.orderId} fill=${fill.fillId} parent=${scaleInMeta.parentTradeId}`);
+          }
+        }).catch((error) => {
+          console.error(`❌ Failed to persist SCALE_IN fill ${fill.fillId}:`, error);
+        });
+      }
       const pending = this.pendingProtection.get(fill.orderId);
       const ledger = this.executionLedger.get(fill.symbol) || { entryFills: [], exitFills: [] };
       if (pending) {
@@ -726,7 +761,12 @@ export class TradingPipeline {
                 { stopLossPrice: pending.stopLossPrice, maxHoldMs: pending.maxHoldMs }
               );
               this.scaleInManager.registerOriginalPosition(
-                ord.id, ord.symbol, ord.side, fillPrice, ord.filledQuantity
+                ord.id,
+                ord.symbol,
+                ord.side,
+                fillPrice,
+                ord.filledQuantity,
+                pending.strategyId || ord.strategyId || 'UNKNOWN-STRATEGY'
               );
             }
           }
@@ -989,6 +1029,9 @@ export class TradingPipeline {
     const sig = decision.signal;
     const signalType = sig.type as 'BUY' | 'SELL';
     const strength = sig.strength;
+    const strategyId = typeof sig.strategy === 'string' && sig.strategy.trim().length > 0
+      ? sig.strategy.trim()
+      : multiAgentRes?.strategyName || 'OU-DECISION-ENGINE';
 
     // StrategyCouncil is an execution gate: only closed, contiguous candles may vote.
     const councilVotes = evaluateCandleCouncil(candles, { intervalMs: 60_000, asOf: Date.now() });
@@ -1166,7 +1209,7 @@ export class TradingPipeline {
             type: 'MARKET',
             quantity: qty,
             price: features.currentPrice,
-            strategyId: 'OU-DECISION-ENGINE',
+            strategyId,
           });
 
           if (ord.status === 'REJECTED') {
@@ -1180,6 +1223,7 @@ export class TradingPipeline {
             maxHoldMs: sig.maxHoldMs,
             side: signalType,
             symbol,
+            strategyId,
             decisionId: boardDecision.id,
             boardVerdict: boardDecision.verdict,
             boardSizeMultiplier: boardDecision.sizeMultiplier,
@@ -1248,6 +1292,12 @@ export class TradingPipeline {
             );
 
             if (scaleInOrderId) {
+              const scaleInIndex = this.scaleInManager.getState(scaleInState.originalOrderId)?.scaleInCount || 1;
+              this.scaleInParentByOrderId.set(scaleInOrderId, {
+                parentTradeId: scaleInState.originalOrderId,
+                strategyId: scaleInState.strategyId,
+                scaleInIndex,
+              });
               this.partialProfitManager.registerPosition(
                 scaleInOrderId,
                 symbol,

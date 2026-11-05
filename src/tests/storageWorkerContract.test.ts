@@ -13,6 +13,18 @@ try {
   assert.equal((await call('/d1/trades', 'POST', { symbol: 'BTC/USDT' })).status, 400);
   assert.equal((await call('/d1/trades', 'POST', { id: 'trade/a', symbol: 'BTC/USDT', status: 'OPEN' })).status, 200);
   assert.equal((await (await call('/d1/trades/open')).json()).items.length, 1);
+  const scaleFill = {
+    id: 'fill-scale-1', parentTradeId: 'trade/a', orderId: 'scale-order-1', fillId: 'binance-fill-1',
+    symbol: 'BTC/USDT', side: 'BUY', quantity: 0.01, price: 101, commission: 0.01,
+    commissionAsset: 'USDT', timestamp: Date.now(), isMaker: false,
+    strategyId: 'MultiAgent_TrendFollowing_Long', executionTag: 'SCALE_IN', fillType: 'SCALE_IN', scaleInIndex: 1,
+  };
+  assert.equal((await call('/d1/trade-fills', 'POST', scaleFill)).status, 200);
+  assert.equal((await call('/d1/trade-fills', 'POST', scaleFill)).status, 200);
+  const fills = await (await call('/d1/trade-fills?parentTradeId=trade%2Fa')).json();
+  assert.equal(fills.items.length, 1);
+  assert.equal(fills.items[0].parentTradeId, 'trade/a');
+  assert.equal(fills.items[0].fillType, 'SCALE_IN');
   assert.equal((await call('/d1/trades/trade%2Fa', 'PATCH', { pnl: 2, exitPrice: 102 })).status, 200);
   assert.equal((await (await call('/d1/trades/open')).json()).items.length, 0);
   await call('/d1/state/test', 'PUT', { value: { stopped: true } });

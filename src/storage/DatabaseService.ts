@@ -35,6 +35,26 @@ export interface TradeRecord {
     exitFills?: unknown[];
 }
 
+export interface TradeFillRecord {
+    id: string;
+    parentTradeId: string;
+    orderId: string;
+    fillId: string;
+    symbol: string;
+    side: 'BUY' | 'SELL';
+    quantity: number;
+    price: number;
+    commission: number;
+    commissionAsset: string;
+    timestamp: number;
+    isMaker: boolean;
+    strategyId?: string;
+    executionTag?: string;
+    fillType: 'ENTRY' | 'SCALE_IN' | 'EXIT';
+    scaleInIndex?: number;
+    metadata?: Record<string, unknown>;
+}
+
 export interface SignalRecord {
     id: string;
     timestamp: number;
@@ -62,6 +82,7 @@ export class DatabaseService {
     private filePath: string;
     private data: {
         trades: Record<string, TradeRecord>;
+        tradeFills: Record<string, TradeFillRecord>;
         signals: SignalRecord[];
         balanceSnapshots: BalanceSnapshot[];
         prices: Record<string, PriceRecord[]>;
@@ -72,6 +93,7 @@ export class DatabaseService {
         this.filePath = path.join(process.cwd(), dbPath);
         this.data = {
             trades: {},
+            tradeFills: {},
             signals: [],
             balanceSnapshots: [],
             prices: {},
@@ -92,6 +114,7 @@ export class DatabaseService {
                 const parsed = JSON.parse(raw);
                 this.data = {
                     trades: parsed.trades || {},
+                    tradeFills: parsed.tradeFills || {},
                     signals: parsed.signals || [],
                     balanceSnapshots: parsed.balanceSnapshots || [],
                     prices: parsed.prices || {},
@@ -145,6 +168,23 @@ export class DatabaseService {
     public async saveTrade(trade: TradeRecord) {
         this.data.trades[trade.id] = trade;
         this.save();
+    }
+
+    public async saveTradeFill(fill: TradeFillRecord): Promise<boolean> {
+        const duplicate = Object.values(this.data.tradeFills).some((existing) =>
+            existing.orderId === fill.orderId && existing.fillId === fill.fillId
+        );
+        if (duplicate) return false;
+        this.data.tradeFills[fill.id] = fill;
+        this.save();
+        return true;
+    }
+
+    public async getTradeFills(parentTradeId?: string): Promise<TradeFillRecord[]> {
+        const fills = Object.values(this.data.tradeFills);
+        return fills
+            .filter((fill) => !parentTradeId || fill.parentTradeId === parentTradeId)
+            .sort((a, b) => a.timestamp - b.timestamp);
     }
 
     public async getOpenTrades(symbol?: string): Promise<TradeRecord[]> {
