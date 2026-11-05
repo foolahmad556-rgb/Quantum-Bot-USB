@@ -6,6 +6,8 @@ import { durableStateManager } from '../storage/DurableStateManager';
 const pipeline: any = Object.create(TradingPipeline.prototype);
 let warmed: string[] = [], streamed: string[] = [];
 pipeline.config = {activeSymbols:['BTC/USDT']};
+pipeline.entryGateDiagnostics = new Map();
+pipeline.staleSymbolWarnings = { shouldWarn: () => false };
 pipeline.userDataStream = {getPositions:()=>[{symbol:'SUN/USDT'},{symbol:'BTC/USDT'}]};
 pipeline.marketData = {backfillRealCandles: async (symbols:string[])=>{warmed=symbols},startStreaming:(_:number,symbols:string[])=>{streamed=symbols}};
 await pipeline.initializeMarketData();

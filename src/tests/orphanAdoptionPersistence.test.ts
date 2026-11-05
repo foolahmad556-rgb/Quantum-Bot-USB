@@ -18,11 +18,14 @@ Object.assign(pipeline, {
     positions: [{symbol: 'SUNUSDT', positionAmt: -1818, entryPrice: 0.016496, markPrice: 0.0165, positionSide: 'SHORT'}],
   })},
   portfolioSizer: {updateBalance: () => {}},
-  userDataStream: {adoptPosition: () => {}},
+  userDataStream: {adoptPosition: () => {}, getPositions: () => []},
   partialProfitManager: partial,
   scaleInManager: {registerOriginalPosition: () => {}},
   telegramService: {sendMessage: async () => { alerts++; }},
-  killSwitch: {trigger: (_: unknown, reason: string) => { throw new Error(reason); }},
+  killSwitch: {
+    trigger: (_: unknown, reason: string) => { throw new Error(reason); },
+    getHistory: () => [],
+  },
 });
 await pipeline.reconcileState();
 await pipeline.reconcileState();
