@@ -18,7 +18,7 @@ Object.assign(pipeline, {
  orderGateway:{getApiKey:()=> 'test',getApiSecret:()=> 'test',getApiBaseUrl:()=> 'unused',getExecutionMode:()=> 'TESTNET'},
  hybridReconciliationManager:{getReconciliation:async()=>({account:{totalWalletBalance:1000,totalUnrealizedProfit:-25,availableBalance:800},positions:[],source:'rest'})},
  portfolioSizer:{updateBalance:(equity:number)=>assert.equal(equity,975)},
- killSwitch:{trigger:(_:unknown,reason:string)=>{throw new Error(reason)}},
+	 killSwitch:{trigger:(_:unknown,reason:string)=>{throw new Error(reason)}, isActive:()=>false, getHistory:()=>[], reset:()=>({success:true,message:'reset'})},
 });
 const originalLog=console.log, originalWarn=console.warn; const messages:string[]=[];
 try {

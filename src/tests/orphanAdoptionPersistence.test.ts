@@ -25,6 +25,8 @@ Object.assign(pipeline, {
   killSwitch: {
     trigger: (_: unknown, reason: string) => { throw new Error(reason); },
     getHistory: () => [],
+    isActive: () => false,
+    reset: () => ({ success: true, message: 'reset' }),
   },
 });
 await pipeline.reconcileState();

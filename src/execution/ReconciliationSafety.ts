@@ -15,6 +15,15 @@ export function watchdogMayRestart(isRunning: boolean, killSwitch: KillSwitch): 
   return !isRunning && !killSwitch.isActive();
 }
 
+/** Clear only a halt caused by a transient reconciliation/lease outage after a verified snapshot. */
+export function recoverTransientReconciliationHalt(killSwitch: KillSwitch): boolean {
+  if (!killSwitch.isActive()) return false;
+  const reason = killSwitch.getHistory()[0]?.reason || '';
+  if (!/reconciliation|execution lease|heartbeat|snapshot unavailable/i.test(reason)) return false;
+  killSwitch.reset();
+  return true;
+}
+
 export function restorePersistentKillSwitch(
   savedState: { level: Parameters<KillSwitch['trigger']>[0]; active: boolean; reason: string } | null,
   killSwitch: KillSwitch,

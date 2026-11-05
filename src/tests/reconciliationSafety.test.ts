@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { KillSwitch } from '../risk/KillSwitch';
-import { failClosedOnInvalidEquity, watchdogMayRestart } from '../execution/ReconciliationSafety';
+import { failClosedOnInvalidEquity, recoverTransientReconciliationHalt, watchdogMayRestart } from '../execution/ReconciliationSafety';
 
 const killSwitch = new KillSwitch();
 assert.equal(failClosedOnInvalidEquity('0', killSwitch), false);
@@ -17,5 +17,15 @@ assert.equal(failClosedOnInvalidEquity('250', halted), true);
 assert.equal(halted.getLevel(), 'HARD_HALT');
 assert.equal(halted.isActive(), true);
 assert.equal(watchdogMayRestart(false, halted), false);
+
+const transient = new KillSwitch();
+transient.trigger('HARD_HALT', 'Reconciliation failed: snapshot unavailable', 'AUTO_RISK_ENGINE');
+assert.equal(recoverTransientReconciliationHalt(transient), true);
+assert.equal(transient.isActive(), false);
+
+const genuine = new KillSwitch();
+genuine.trigger('HARD_HALT', 'Risk limit breached', 'AUTO_RISK_ENGINE');
+assert.equal(recoverTransientReconciliationHalt(genuine), false);
+assert.equal(genuine.isActive(), true);
 
 console.log('reconciliation safety test passed');

@@ -52,7 +52,7 @@ import { PortfolioSizer } from '../risk/PortfolioSizer';
 import { PartialProfitManager } from '../execution/PartialProfitManager';
 import { HybridReconciliationManager } from '../exchange/HybridReconciliationManager';
 import { ScaleInManager } from '../execution/ScaleInManager';
-import { failClosedOnInvalidEquity, restorePersistentKillSwitch, watchdogMayRestart } from '../execution/ReconciliationSafety';
+import { failClosedOnInvalidEquity, recoverTransientReconciliationHalt, restorePersistentKillSwitch, watchdogMayRestart } from '../execution/ReconciliationSafety';
 import { AssetScreener } from '../market-data/AssetScreener';
 import { StrategyManager } from '../strategies/StrategyManager';
 import { SystemWatchdog, WatchdogStatus } from '../monitoring/SystemWatchdog';
@@ -1590,18 +1590,15 @@ export class TradingPipeline {
           this.reconciliationFailureCount = 0;
           this.lastSuccessfulReconciliationAt = Date.now();
 
-          // A transient reconciliation/lease halt must not remain latched after
-          // the exchange confirms a flat account. Preserve genuine risk halts.
-          const latestKill = this.killSwitch.getHistory()[0];
-          const transientReason = latestKill?.reason || '';
-          const transientHalt = /reconciliation|execution lease|heartbeat|snapshot unavailable/i.test(transientReason);
-          if (realOpenPositions.length === 0 && this.killSwitch.isActive() && transientHalt) {
-            this.killSwitch.reset();
+          // A verified account/position snapshot proves the exchange state is usable again.
+          // Clear only a halt caused by a transient reconciliation/lease outage; genuine
+          // risk, manual, and liquidation halts remain latched.
+          if (recoverTransientReconciliationHalt(this.killSwitch)) {
             await this.db.saveState('killswitch_state', {
               level: 'NORMAL', active: false,
-              reason: 'Auto-recovered after verified flat exchange account and healthy reconciliation',
+              reason: 'Auto-recovered after verified exchange snapshot and healthy reconciliation',
             });
-            console.warn('✅ Cleared transient KillSwitch after verified flat account reconciliation.');
+            console.warn('✅ Cleared transient KillSwitch after verified exchange reconciliation.');
           }
         }
       } catch (error) {
