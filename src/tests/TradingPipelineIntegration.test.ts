@@ -12,8 +12,11 @@ import { DurableStateManager } from '../storage/DurableStateManager';
 describe('TradingPipeline Integration with DurableStateManager', () => {
   it('does not pass take-profit price as a holding-time duration', () => {
     const source = readFileSync(fileURLToPath(new URL('../app/TradingPipeline.ts', import.meta.url)), 'utf8');
-    assert.match(source, /registerPosition\(\s*ord\.id,\s*ord\.symbol,\s*ord\.side,\s*fillPrice,\s*ord\.filledQuantity\s*\)/);
-    assert.doesNotMatch(source, /registerPosition\([\s\S]{0,180}pending\.ouMu/);
+    assert.match(
+      source,
+      /registerPosition\(\s*ord\.id\s*,\s*ord\.symbol\s*,\s*ord\.side\s*,\s*fillPrice\s*,\s*ord\.filledQuantity\s*,\s*\{[\s\S]{0,220}stopLossPrice:\s*pending\.stopLossPrice[\s\S]{0,220}maxHoldMs:\s*pending\.maxHoldMs[\s\S]{0,80}\}\s*\)/
+    );
+    assert.doesNotMatch(source, /registerPosition\([\s\S]{0,260}pending\.ouMu/);
   });
 
 
