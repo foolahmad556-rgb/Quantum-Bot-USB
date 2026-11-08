@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import { HybridReconciliationManager } from '../exchange/HybridReconciliationManager';
+import { binanceRateLimiter } from '../utils/RateLimiter';
 
 function makeHybrid(stub: Partial<{
   connected: boolean;
@@ -26,7 +27,7 @@ const position = {
   markPrice: 40100, unRealizedProfit: 10, positionSide: 'BOTH', timestamp: 1,
 };
 
-describe('HybridReconciliationManager fail-closed snapshots', () => {
+describe('HybridReconciliationManager fail-closed snapshots', { concurrency: false }, () => {
   it('returns websocket source only with account AND a verified position snapshot', async () => {
     const hybrid = makeHybrid({ connected: true, account, positions: [position], hasSnapshot: true });
     const result = await hybrid.getReconciliation();
@@ -68,5 +69,30 @@ describe('HybridReconciliationManager fail-closed snapshots', () => {
     assert.equal(cached.source, 'websocket');
     assert.equal(cached.positions.length, 1);
     assert.equal(cached.account, account);
+  });
+
+  it('coalesces concurrent REST reconciliation calls into one account/position pair', async () => {
+    const hybrid = makeHybrid({ connected: false, account: null, positions: [], hasSnapshot: false });
+    (hybrid as any).lastRestFallback = 0;
+    let calls = 0;
+    const originalFetch = binanceRateLimiter.fetch;
+    binanceRateLimiter.fetch = async (url: any) => {
+      calls++;
+      await new Promise(resolve => setTimeout(resolve, 5));
+      return new Response(String(url).includes('/account?')
+        ? JSON.stringify({ totalWalletBalance: '1000', availableBalance: '900', totalUnrealizedProfit: '0', totalInitialMargin: '100', totalMaintMargin: '5' })
+        : JSON.stringify([]), { status: 200 });
+    };
+    try {
+      const [first, second] = await Promise.all([
+        hybrid.getReconciliation(),
+        hybrid.getReconciliation(),
+      ]);
+      assert.equal(first.source, 'rest');
+      assert.equal(second.source, 'rest');
+      assert.equal(calls, 2, 'single-flight must issue only one account and one position request');
+    } finally {
+      binanceRateLimiter.fetch = originalFetch;
+    }
   });
 });

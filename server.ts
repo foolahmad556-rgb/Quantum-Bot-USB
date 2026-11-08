@@ -30,6 +30,7 @@ import { TelegramService } from './src/services/TelegramService.ts';
 import { D1DatabaseService } from './src/storage/D1DatabaseService.ts';
 import { BacktestEngine } from './src/backtest/BacktestEngine.ts';
 import { generateToken, verifyToken, hashPassword, comparePassword } from './src/lib/jwt-auth.ts';
+import { binanceRateLimiter } from './src/utils/RateLimiter.ts';
 
 const PORT = Number(process.env.PORT || process.env.SERVER_PORT || 3000);
 const OPERATOR_SECRET = (process.env.OPERATOR_SECRET || process.env.ADMIN_API_KEY || '').trim();
@@ -495,7 +496,7 @@ app.get('/api/binance/tickers', requireAuth, async (req: Request, res: Response)
     const baseUrl = String(process.env.EXECUTION_MODE || '').toUpperCase() === 'TESTNET'
       ? 'https://testnet.binancefuture.com'
       : 'https://fapi.binance.com';
-    const r = await fetch(`${baseUrl}/fapi/v1/ticker/24hr`);
+    const r = await binanceRateLimiter.fetch(`${baseUrl}/fapi/v1/ticker/24hr`, undefined, 1, 'market');
     if (!r.ok) throw new Error(`Binance Futures ${r.status}`);
     const all: any[] = await r.json();
     const filtered = symbols ? all.filter((t: any) => symbols.includes(t.symbol)) : all;
@@ -518,7 +519,7 @@ for (const resource of ['klines', 'depth'] as const) {
       const { rest } = getFuturesEndpoints(pipeline.getOrderGateway().getExecutionMode());
       const query = new URLSearchParams({ symbol, limit: String(limit) });
       if (resource === 'klines') query.set('interval', '1m');
-      const response = await fetch(`${rest}/fapi/v1/${resource}?${query}`, { signal: AbortSignal.timeout(8000) });
+      const response = await binanceRateLimiter.fetch(`${rest}/fapi/v1/${resource}?${query}`, { signal: AbortSignal.timeout(8000) }, resource === 'depth' ? 5 : 1, 'market');
       if (!response.ok) return fail(res, 502, `Binance Futures ${response.status}`);
       res.json(await response.json());
     } catch { fail(res, 502, 'Market data unavailable'); }

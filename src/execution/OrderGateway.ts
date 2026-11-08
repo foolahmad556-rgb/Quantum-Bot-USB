@@ -108,7 +108,7 @@ export class OrderGateway {
 
   public async syncTime(): Promise<void> {
     try {
-      const res = await fetch(`${this.apiBaseUrl}/fapi/v1/time`);
+      const res = await this.rateLimiter.fetch(`${this.apiBaseUrl}/fapi/v1/time`, undefined, 1, 'maintenance');
       if (res.ok) {
         const data = await res.json();
         if (data && data.serverTime) {
@@ -172,29 +172,20 @@ export class OrderGateway {
       .map(([k, v]) => `${k}=${encodeURIComponent(String(v))}`)
       .join('&');
     const signature = crypto.createHmac('sha256', this.apiSecret).update(qs).digest('hex');
-    await this.rateLimiter.acquire(path, 1);
-    const controller = new AbortController();
+      const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
     try {
-      const res = await fetch(`${this.apiBaseUrl}${path}?${qs}&signature=${signature}`, {
+      const res = await this.rateLimiter.fetch(`${this.apiBaseUrl}${path}?${qs}&signature=${signature}`, {
         method,
         headers: { 'X-MBX-APIKEY': this.apiKey },
         signal: controller.signal,
-      });
+      }, path === '/fapi/v1/order' ? 1 : 5, method === 'POST' && path === '/fapi/v1/order' ? 'exit' : 'account');
       let data: any = null;
       try { data = await res.json(); } catch { data = null; }
       if (!res.ok) this.logExchangeOrderError(method, path, params, res.status, data);
       const used = Number(res.headers.get('x-mbx-used-weight-1m') || 0);
       if (used) this.rateLimiter.syncUsed(used);
-      if (res.status === 429 || res.status === 418) {
-        const retryAfterRaw = res.headers.get('retry-after');
-        const retryAfterSeconds = Number(retryAfterRaw);
-        const retryAfterMs = Number.isFinite(retryAfterSeconds) && retryAfterSeconds > 0
-          ? retryAfterSeconds * 1000
-          : 60_000;
-        this.rateLimiter.blockFor(retryAfterMs);
-        return { ok: false, status: res.status, data };
-      }
+      if (res.status === 429 || res.status === 418) return { ok: false, status: res.status, data };
       if (!res.ok && data && Number(data.code) === -1021 && !isRetry) {
         await this.syncTime();
         return this.signedRequest(method, path, params, timeoutMs, true);
@@ -210,13 +201,12 @@ export class OrderGateway {
   public async checkDualSidePosition(): Promise<boolean> {
     if (this.executionMode === 'PAPER' || !this.apiKey || !this.apiSecret) return true;
     try {
-      await this.rateLimiter.acquire('/fapi/v1/positionSide/dual', 1);
       const timestamp = this.ts();
       const q = `timestamp=${timestamp}`;
       const sig = crypto.createHmac('sha256', this.apiSecret).update(q).digest('hex');
-      const res = await fetch(`${this.apiBaseUrl}/fapi/v1/positionSide/dual?${q}&signature=${sig}`, {
+      const res = await this.rateLimiter.fetch(`${this.apiBaseUrl}/fapi/v1/positionSide/dual?${q}&signature=${sig}`, {
         headers: { 'X-MBX-APIKEY': this.apiKey },
-      });
+      }, 1, 'account');
       if (res.ok) {
         const data = await res.json();
         this.hedgeMode = data?.dualSidePosition === true;
@@ -240,15 +230,11 @@ export class OrderGateway {
       queryParts.push(`recvWindow=5000`);
       const queryStr = queryParts.join('&');
       const sig = crypto.createHmac('sha256', this.apiSecret).update(queryStr).digest('hex');
-      const res = await fetch(`${this.apiBaseUrl}${endpoint}?${queryStr}&signature=${sig}`, {
+      const res = await this.rateLimiter.fetch(`${this.apiBaseUrl}${endpoint}?${queryStr}&signature=${sig}`, {
         headers: { 'X-MBX-APIKEY': this.apiKey },
-      });
+      }, 5, 'account');
       const used = Number(res.headers.get('x-mbx-used-weight-1m') || 0);
       this.rateLimiter.syncUsed(used);
-      if (res.status === 429 || res.status === 418) {
-        const retryAfter = Number(res.headers.get('retry-after') || 60) * 1000;
-        await this.rateLimiter.backoff(retryAfter);
-      }
       return await res.json();
     } catch (e) {
       console.error(`❌ signedGet failed for ${endpoint}:`, e);
@@ -295,10 +281,10 @@ export class OrderGateway {
       try {
         const marginQuery = `symbol=${cleanSymbol}&marginType=${marginType}&timestamp=${timestamp}`;
         const marginSig = crypto.createHmac('sha256', this.apiSecret).update(marginQuery).digest('hex');
-        await fetch(`${this.apiBaseUrl}/fapi/v1/marginType?${marginQuery}&signature=${marginSig}`, {
+        await this.rateLimiter.fetch(`${this.apiBaseUrl}/fapi/v1/marginType?${marginQuery}&signature=${marginSig}`, {
           method: 'POST',
           headers,
-        });
+        }, 1, 'account');
       } catch (mErr) {
         // تجاهل أخطاء نوع الهامش إذا كان مفعلاً بالفعل
       }
@@ -307,10 +293,10 @@ export class OrderGateway {
       const levQuery = `symbol=${cleanSymbol}&leverage=${roundedLev}&timestamp=${Date.now()}`;
       const levSig = crypto.createHmac('sha256', this.apiSecret).update(levQuery).digest('hex');
 
-      const res = await fetch(`${this.apiBaseUrl}/fapi/v1/leverage?${levQuery}&signature=${levSig}`, {
+      const res = await this.rateLimiter.fetch(`${this.apiBaseUrl}/fapi/v1/leverage?${levQuery}&signature=${levSig}`, {
         method: 'POST',
         headers,
-      });
+      }, 1, 'account');
 
       const data = await res.json();
       if (res.ok) {
@@ -534,21 +520,21 @@ export class OrderGateway {
           // Cancel via algoOrder endpoint
           const qAlgo = `algoId=${tracked.slId}&timestamp=${Date.now()}`;
           const sigAlgo = crypto.createHmac('sha256', this.apiSecret).update(qAlgo).digest('hex');
-          cancelPromises.push(fetch(`${this.apiBaseUrl}/fapi/v1/algoOrder?${qAlgo}&signature=${sigAlgo}`, { method: 'DELETE', headers }).catch(() => null));
+          cancelPromises.push(this.rateLimiter.fetch(`${this.apiBaseUrl}/fapi/v1/algoOrder?${qAlgo}&signature=${sigAlgo}`, { method: 'DELETE', headers }, 1, 'exit').catch(() => null));
 
           // Also attempt legacy order endpoint
           const q = `symbol=${clean}&orderId=${tracked.slId}&timestamp=${Date.now() + 20}`;
           const sig = crypto.createHmac('sha256', this.apiSecret).update(q).digest('hex');
-          cancelPromises.push(fetch(`${this.apiBaseUrl}/fapi/v1/order?${q}&signature=${sig}`, { method: 'DELETE', headers }).catch(() => null));
+          cancelPromises.push(this.rateLimiter.fetch(`${this.apiBaseUrl}/fapi/v1/order?${q}&signature=${sig}`, { method: 'DELETE', headers }, 1, 'exit').catch(() => null));
         }
         if (tracked.tpId) {
           const qAlgo = `algoId=${tracked.tpId}&timestamp=${Date.now() + 50}`;
           const sigAlgo = crypto.createHmac('sha256', this.apiSecret).update(qAlgo).digest('hex');
-          cancelPromises.push(fetch(`${this.apiBaseUrl}/fapi/v1/algoOrder?${qAlgo}&signature=${sigAlgo}`, { method: 'DELETE', headers }).catch(() => null));
+          cancelPromises.push(this.rateLimiter.fetch(`${this.apiBaseUrl}/fapi/v1/algoOrder?${qAlgo}&signature=${sigAlgo}`, { method: 'DELETE', headers }, 1, 'exit').catch(() => null));
 
           const q = `symbol=${clean}&orderId=${tracked.tpId}&timestamp=${Date.now() + 70}`;
           const sig = crypto.createHmac('sha256', this.apiSecret).update(q).digest('hex');
-          cancelPromises.push(fetch(`${this.apiBaseUrl}/fapi/v1/order?${q}&signature=${sig}`, { method: 'DELETE', headers }).catch(() => null));
+          cancelPromises.push(this.rateLimiter.fetch(`${this.apiBaseUrl}/fapi/v1/order?${q}&signature=${sig}`, { method: 'DELETE', headers }, 1, 'exit').catch(() => null));
         }
 
         const results = await Promise.allSettled(cancelPromises);
@@ -594,17 +580,17 @@ export class OrderGateway {
       const query = `symbol=${cleanSymbol}&timestamp=${timestamp}`;
       const signature = crypto.createHmac('sha256', this.apiSecret).update(query).digest('hex');
 
-      const res = await fetch(`${this.apiBaseUrl}${endpoint}?${query}&signature=${signature}`, {
+      const res = await this.rateLimiter.fetch(`${this.apiBaseUrl}${endpoint}?${query}&signature=${signature}`, {
         method: 'DELETE',
         headers: { 'X-MBX-APIKEY': this.apiKey },
-      }).catch(() => null);
+      }, 1, 'exit').catch(() => null);
 
       // Cancel any open algo orders for symbol
       const algoQuery = `symbol=${cleanSymbol}&timestamp=${Date.now()}`;
       const algoSig = crypto.createHmac('sha256', this.apiSecret).update(algoQuery).digest('hex');
-      const openAlgoRes = await fetch(`${this.apiBaseUrl}/fapi/v1/openAlgoOrders?${algoQuery}&signature=${algoSig}`, {
+      const openAlgoRes = await this.rateLimiter.fetch(`${this.apiBaseUrl}/fapi/v1/openAlgoOrders?${algoQuery}&signature=${algoSig}`, {
         headers: { 'X-MBX-APIKEY': this.apiKey },
-      }).catch(() => null);
+      }, 1, 'account').catch(() => null);
 
       if (openAlgoRes && openAlgoRes.ok) {
         const openAlgos = await openAlgoRes.json().catch(() => []);
@@ -613,10 +599,10 @@ export class OrderGateway {
             if (ao.algoId) {
               const cQ = `algoId=${ao.algoId}&timestamp=${Date.now()}`;
               const cSig = crypto.createHmac('sha256', this.apiSecret).update(cQ).digest('hex');
-              await fetch(`${this.apiBaseUrl}/fapi/v1/algoOrder?${cQ}&signature=${cSig}`, {
+              await this.rateLimiter.fetch(`${this.apiBaseUrl}/fapi/v1/algoOrder?${cQ}&signature=${cSig}`, {
                 method: 'DELETE',
                 headers: { 'X-MBX-APIKEY': this.apiKey },
-              }).catch(() => null);
+              }, 1, 'exit').catch(() => null);
             }
           }
         }
@@ -701,14 +687,6 @@ export class OrderGateway {
     }
 
     try {
-      const allowed = await this.rateLimiter.acquire('/fapi/v1/order', 1);
-      if (!allowed) {
-        order.status = 'REJECTED';
-        order.errorMessage = 'Rate limit budget exhausted';
-        this.notifyOrder(order);
-        return;
-      }
-
       const cleanSymbol = params.symbol.replace('/', '');
       const filter = this.getSymbolFilter(params.symbol);
       const timestamp = this.ts();
@@ -741,20 +719,15 @@ export class OrderGateway {
         order.status = 'REJECTED'; order.errorMessage = 'Execution lease expired before exchange submission';
         this.notifyOrder(order); return;
       }
-      const res = await fetch(url, {
+      const res = await this.rateLimiter.fetch(url, {
         method: 'POST',
         headers: {
           'X-MBX-APIKEY': this.apiKey,
         },
-      });
+      }, 1, params.reduceOnly ? 'exit' : 'account');
 
       const used = Number(res.headers.get('x-mbx-used-weight-1m') || 0);
       this.rateLimiter.syncUsed(used);
-      if (res.status === 429 || res.status === 418) {
-        const retryAfter = Number(res.headers.get('retry-after') || 60) * 1000;
-        await this.rateLimiter.backoff(retryAfter);
-      }
-
       const data = await res.json();
       if (!res.ok) {
         console.error('❌ Binance Futures REST Order Rejected:', data);
@@ -971,9 +944,6 @@ export class OrderGateway {
     executionTag?: string;
     reduceOnly?: boolean;
   }): Order {
-    // Check and record rate limit usage
-    this.rateLimiter.checkRateLimit('/fapi/v1/order').catch(err => console.error("RateLimiter error:", err));
-
     this.orderCounter += 1;
     const randomSuffix = crypto.randomBytes(3).toString('hex');
     const orderId = params.orderId || `ORD-${Date.now().toString(36)}-${this.orderCounter}-${randomSuffix}`;
