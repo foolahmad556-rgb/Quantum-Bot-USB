@@ -235,7 +235,7 @@ export class StrategyManager {
       const activeSignal = multiAgentResult?.signal || ouSignal;
 
       // Calculate suitability score (0 - 100)
-      let suitabilityScore = 75;
+      let suitabilityScore = 50;
       if (multiAgentResult && multiAgentResult.mlConfidence > 55) {
         suitabilityScore += 18;
       }
@@ -260,9 +260,9 @@ export class StrategyManager {
       const lastCandle = candles[candles.length - 1];
       const change24h = firstCandle && lastCandle && firstCandle.open > 0
         ? Number((((lastCandle.close - firstCandle.open) / firstCandle.open) * 100).toFixed(2))
-        : (Math.sin(Date.now() / 100000 + symbol.length) * 2.5);
-      const volume24h = candles.reduce((acc, c) => acc + (c.volume || 0) * (c.close || currentPrice), 0) || 45000000;
-      const spreadBps = qualData?.spreadPercent ? Math.round(qualData.spreadPercent * 100) : 3.5;
+        : 0; // no candle data: show 0, never an invented number
+      const volume24h = candles.reduce((acc, c) => acc + (c.volume || 0) * (c.close || currentPrice), 0) || 0;
+      const spreadBps = qualData?.spreadPercent ? Math.round(qualData.spreadPercent * 100) : 0;
       const isQualified = qualData?.isQualified ?? (hurstExponent < 0.65 && spreadBps < 15);
 
       let reason = 'Multi-Agent Quant Alpha with 0.25 Kelly Dynamic Sizing';
@@ -284,7 +284,7 @@ export class StrategyManager {
         ouMu: Number(ouMu.toFixed(2)),
         ouSigma: Number(ouSigma.toFixed(2)),
         spreadBps,
-        liquidityScore: qualData?.liquidityScore || 95,
+        liquidityScore: qualData?.liquidityScore ?? 0,
         suitabilityScore,
         isQualified,
         reason,
