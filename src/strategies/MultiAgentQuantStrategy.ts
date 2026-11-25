@@ -12,7 +12,7 @@
  * ====================================================================
  */
 
-import { AssetSymbol, TradingSignal, SignalType } from '../domain/types';
+import { AssetSymbol, TradingSignal, SignalType, roundPriceSig } from '../domain/types';
 import { CalculatedFeatures } from '../features/FeatureEngine';
 import { RegimeAnalysis } from '../risk/RegimeDetector';
 import { createRng } from '../quantum/seededRng';
@@ -222,12 +222,12 @@ export class MultiAgentQuantEngine {
 
     // Price Targets & True Payoff Ratio
     const stopLossPrice = top.side === 'BUY'
-      ? Number((currentPrice - slDistance).toFixed(2))
-      : Number((currentPrice + slDistance).toFixed(2));
+      ? roundPriceSig(currentPrice - slDistance)
+      : roundPriceSig(currentPrice + slDistance);
 
     const takeProfitPrice = top.side === 'BUY'
-      ? Number((currentPrice + tpDistance).toFixed(2))
-      : Number((currentPrice - tpDistance).toFixed(2));
+      ? roundPriceSig(currentPrice + tpDistance)
+      : roundPriceSig(currentPrice - tpDistance);
 
     const actualSlDist = Math.abs(currentPrice - stopLossPrice);
     const actualTpDist = Math.abs(takeProfitPrice - currentPrice);

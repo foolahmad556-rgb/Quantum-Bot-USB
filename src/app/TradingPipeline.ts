@@ -56,7 +56,7 @@ import { failClosedOnInvalidEquity, recoverTransientReconciliationHalt, restoreP
 import { AssetScreener } from '../market-data/AssetScreener';
 import { StrategyManager } from '../strategies/StrategyManager';
 import { SystemWatchdog, WatchdogStatus } from '../monitoring/SystemWatchdog';
-import { BotStrategy, StrategyScreenerItem, normalizeSignalSide } from '../domain/types';
+import { BotStrategy, StrategyScreenerItem, normalizeSignalSide, floorQty } from '../domain/types';
 import fs from 'fs';
 import {
   appendUniqueFill,
@@ -72,7 +72,7 @@ import { StaleSymbolWarningTracker } from '../market-data/StaleSymbolWarningTrac
 export function applyBoardSizeMultiplier(quantity: number, multiplier: number): number {
   if (!Number.isFinite(quantity) || quantity <= 0) return 0;
   if (!Number.isFinite(multiplier) || multiplier <= 0) return 0;
-  return Number((quantity * Math.min(1, multiplier)).toFixed(4));
+  return floorQty(quantity * Math.min(1, multiplier), 8);
 }
 
 /**
@@ -1170,13 +1170,13 @@ export class TradingPipeline {
         console.log(`⏸️ Trading halted for ${symbol} due to critical correlation risk`);
         return;
       }
-      qty = Number((qty * correlationFactor).toFixed(4));
+      qty = floorQty(qty * correlationFactor, 8);
 
       // Apply Dynamic Position Size Multiplier & Warm-up Multiplier (البند 43)
       const multipliers = this.dynamicRiskManager.getCurrentMultipliers();
       const warmupMul = this.dynamicRiskManager.getWarmupMultiplier(this.eventJournal.getEvents().length);
       const regimeMul = regime?.sizeMultiplier ?? 1;
-      qty = Number((qty * multipliers.positionSize * warmupMul * regimeMul).toFixed(4));
+      qty = floorQty(qty * multipliers.positionSize * warmupMul * regimeMul, 8);
       // CONDITIONAL board approval is a real risk decision, not telemetry.
       qty = applyBoardSizeMultiplier(qty, boardDecision.sizeMultiplier);
 
@@ -1189,7 +1189,7 @@ export class TradingPipeline {
         const bumpAllowed = process.env.ALLOW_MIN_NOTIONAL_BUMP === 'true';
         const bumpedNotional = minNotionalUsd * 1.1;
         if (bumpAllowed && riskSizedNotional > 0 && bumpedNotional <= riskSizedNotional * 3) {
-          qty = Number((bumpedNotional / features.currentPrice).toFixed(6));
+          qty = floorQty(bumpedNotional / features.currentPrice, 8);
         } else {
           console.log(`⏭️ Skipping ${symbol}: risk-sized notional $${riskSizedNotional.toFixed(2)} is below exchange minimum $${minNotionalUsd}`);
           return;

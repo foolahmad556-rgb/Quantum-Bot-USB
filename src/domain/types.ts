@@ -442,6 +442,23 @@ export function roundToStep(value: number, step: number): number {
   return Number((Math.floor(value / step) * step).toFixed(precision));
 }
 
+/**
+ * Round a strategy price (stop / target) keeping about 6 significant digits, so a cheap coin
+ * (e.g. 0.0821) is not flattened to 2 decimals. The exchange tick size is applied again at order time.
+ */
+export function roundPriceSig(price: number, sigDigits = 6): number {
+  if (!Number.isFinite(price) || price === 0) return price;
+  const decimals = Math.min(10, Math.max(2, sigDigits - 1 - Math.floor(Math.log10(Math.abs(price)))));
+  return Number(price.toFixed(decimals));
+}
+
+/** Round a quantity DOWN so risk-sized quantities are never rounded up above the risk budget. */
+export function floorQty(value: number, decimals = 8): number {
+  if (!Number.isFinite(value) || value <= 0) return 0;
+  const f = 10 ** decimals;
+  return Math.floor(value * f + 1e-9) / f;
+}
+
 export function isLiveTradingConfirmed(): boolean {
   const val = (process.env.CONFIRM_LIVE_TRADING || '').trim().toLowerCase();
   return val === 'yes' || val === 'true' || val === '1';

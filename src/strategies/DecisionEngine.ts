@@ -4,7 +4,7 @@
  * يضمن تطابق القرارات بنسبة 100% بين الاختبار التاريخي والتنفيذ الحي.
  */
 
-import { AssetSymbol, TradingSignal } from '../domain/types';
+import { AssetSymbol, TradingSignal, roundPriceSig } from '../domain/types';
 import { CalculatedFeatures } from '../features/FeatureEngine';
 import { RegimeAnalysis } from '../risk/RegimeDetector';
 
@@ -79,9 +79,9 @@ export function decide(input: DecisionInput): TradingSignal | null {
         strength: Number(trendStrength.toFixed(3)),
         zScore,
         halfLife: halfLifePeriods,
-        targetPrice: Number((currentPrice + 2.5 * trendSigma).toFixed(2)),
-        stopLoss: Number((currentPrice - atrTrailingDistance).toFixed(2)),
-        takeProfit: Number((currentPrice + 2.5 * trendSigma).toFixed(2)),
+        targetPrice: roundPriceSig(currentPrice + 2.5 * trendSigma),
+        stopLoss: roundPriceSig(currentPrice - atrTrailingDistance),
+        takeProfit: roundPriceSig(currentPrice + 2.5 * trendSigma),
         reason: `Adaptive Trend Breakout BUY: Continuous Engine riding directional momentum (Hurst ${hurstExponent.toFixed(3)}, ADX ${regime?.adx.toFixed(1) || 24.2}, RSI ${rsi14.toFixed(1)})`,
         strategy: 'Adaptive-Regime-Breakout',
         maxHoldMs: 1800000,
@@ -98,9 +98,9 @@ export function decide(input: DecisionInput): TradingSignal | null {
         strength: Number(trendStrength.toFixed(3)),
         zScore,
         halfLife: halfLifePeriods,
-        targetPrice: Number((currentPrice - 2.5 * trendSigma).toFixed(2)),
-        stopLoss: Number((currentPrice + atrTrailingDistance).toFixed(2)),
-        takeProfit: Number((currentPrice - 2.5 * trendSigma).toFixed(2)),
+        targetPrice: roundPriceSig(currentPrice - 2.5 * trendSigma),
+        stopLoss: roundPriceSig(currentPrice + atrTrailingDistance),
+        takeProfit: roundPriceSig(currentPrice - 2.5 * trendSigma),
         reason: `Adaptive Trend Breakout SELL: Continuous Engine riding directional momentum (Hurst ${hurstExponent.toFixed(3)}, ADX ${regime?.adx.toFixed(1) || 24.2}, RSI ${rsi14.toFixed(1)})`,
         strategy: 'Adaptive-Regime-Breakout',
         maxHoldMs: 1800000,
@@ -164,10 +164,10 @@ export function decide(input: DecisionInput): TradingSignal | null {
   }
 
   const stopLoss = side === 'BUY'
-    ? Number((currentPrice - stopDistance).toFixed(2))
-    : Number((currentPrice + stopDistance).toFixed(2));
+    ? roundPriceSig(currentPrice - stopDistance)
+    : roundPriceSig(currentPrice + stopDistance);
 
-  const takeProfit = Number(ouMu.toFixed(2));
+  const takeProfit = roundPriceSig(ouMu);
 
   // الخروج الزمني بناءً على نصف عمر الارتداد (2 * halfLife)
   const candleMs = params.candleIntervalMs || 60000;
