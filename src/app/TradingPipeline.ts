@@ -76,6 +76,15 @@ export function applyBoardSizeMultiplier(quantity: number, multiplier: number): 
 }
 
 /**
+ * The strategy council and seven-member council have no proven track record yet, so by default they
+ * only RECORD their opinion (shadow mode) and do not block entries. The Board of Directors stays
+ * enforced. Set COUNCIL_ENFORCE=true to let the councils block trades again.
+ */
+export function councilEnforced(): boolean {
+  return (process.env.COUNCIL_ENFORCE || '').trim().toLowerCase() === 'true';
+}
+
+/**
  * The ONE stop distance used both to size the position and to place the exchange stop.
  * 2 sigma, clamped to 0.4%..3% of price so a degenerate sigma cannot produce a nonsense stop.
  */
@@ -1064,9 +1073,9 @@ export class TradingPipeline {
     const strategyCouncil = decideByCouncil(councilVotes, { quorum: 2, minimumConfidence: 0.52 });
     this.eventJournal.record('INFO', 'STRATEGY', `[STRATEGY_COUNCIL] ${symbol} decision=${strategyCouncil?.side ?? 'ABSTAIN'} votes=${strategyCouncil?.votes ?? 0} executionEnabled=true`);
     if (!strategyCouncil || strategyCouncil.side !== signalType) {
-      this.logEntryGate(symbol, 'strategy-council', `signal=${signalType} consensus=${strategyCouncil?.side ?? 'ABSTAIN'} votes=${strategyCouncil?.votes ?? 0}`);
-      this.eventJournal.record('WARN', 'STRATEGY', `[STRATEGY_COUNCIL_REJECTED] ${symbol} signal=${signalType} consensus=${strategyCouncil?.side ?? 'ABSTAIN'}`);
-      return;
+      this.logEntryGate(symbol, 'strategy-council', `signal=${signalType} consensus=${strategyCouncil?.side ?? 'ABSTAIN'} votes=${strategyCouncil?.votes ?? 0} enforce=${councilEnforced()}`);
+      this.eventJournal.record('WARN', 'STRATEGY', `[STRATEGY_COUNCIL_${councilEnforced() ? 'REJECTED' : 'SHADOW_DISAGREES'}] ${symbol} signal=${signalType} consensus=${strategyCouncil?.side ?? 'ABSTAIN'}`);
+      if (councilEnforced()) return;
     }
 
     // 🏛️ Board of Directors v6.0 Evaluation (6 Decision Makers + 8 Anti-Overfitting Guards)
@@ -1095,8 +1104,8 @@ export class TradingPipeline {
     if (!sevenMemberDecision.executionEnabled || sevenMemberDecision.veto ||
         sevenMemberDecision.action !== signalType || sevenMemberDecision.confidence < 0.5) {
       this.logEntryGate(symbol, 'seven-member-council', `signal=${signalType} action=${sevenMemberDecision.action} confidence=${sevenMemberDecision.confidence} veto=${sevenMemberDecision.veto}`);
-      this.eventJournal.record('WARN', 'STRATEGY', `[SEVEN_MEMBER_COUNCIL_REJECTED] ${symbol} signal=${signalType} action=${sevenMemberDecision.action} confidence=${sevenMemberDecision.confidence} veto=${sevenMemberDecision.veto}`);
-      return;
+      this.eventJournal.record('WARN', 'STRATEGY', `[SEVEN_MEMBER_COUNCIL_${councilEnforced() ? 'REJECTED' : 'SHADOW_DISAGREES'}] ${symbol} signal=${signalType} action=${sevenMemberDecision.action} confidence=${sevenMemberDecision.confidence} veto=${sevenMemberDecision.veto}`);
+      if (councilEnforced()) return;
     }
     const councilComparison = this.boardOfDirectors.compareShadowDecision({
       symbol,
