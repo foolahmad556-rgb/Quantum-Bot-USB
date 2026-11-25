@@ -56,7 +56,7 @@ import { failClosedOnInvalidEquity, recoverTransientReconciliationHalt, restoreP
 import { AssetScreener } from '../market-data/AssetScreener';
 import { StrategyManager } from '../strategies/StrategyManager';
 import { SystemWatchdog, WatchdogStatus } from '../monitoring/SystemWatchdog';
-import { BotStrategy, StrategyScreenerItem } from '../domain/types';
+import { BotStrategy, StrategyScreenerItem, normalizeSignalSide, floorQty } from '../domain/types';
 import fs from 'fs';
 import {
   appendUniqueFill,
@@ -72,7 +72,25 @@ import { StaleSymbolWarningTracker } from '../market-data/StaleSymbolWarningTrac
 export function applyBoardSizeMultiplier(quantity: number, multiplier: number): number {
   if (!Number.isFinite(quantity) || quantity <= 0) return 0;
   if (!Number.isFinite(multiplier) || multiplier <= 0) return 0;
-  return Number((quantity * Math.min(1, multiplier)).toFixed(4));
+  return floorQty(quantity * Math.min(1, multiplier), 8);
+}
+
+/**
+ * The strategy council and seven-member council have no proven track record yet, so by default they
+ * only RECORD their opinion (shadow mode) and do not block entries. The Board of Directors stays
+ * enforced. Set COUNCIL_ENFORCE=true to let the councils block trades again.
+ */
+export function councilEnforced(): boolean {
+  return (process.env.COUNCIL_ENFORCE || '').trim().toLowerCase() === 'true';
+}
+
+/**
+ * The ONE stop distance used both to size the position and to place the exchange stop.
+ * 2 sigma, clamped to 0.4%..3% of price so a degenerate sigma cannot produce a nonsense stop.
+ */
+export function computeStopDistance(price: number, ouSigma: number): number {
+  const rawDist = 2 * Number(ouSigma);
+  return Math.min(Math.max(Number.isFinite(rawDist) ? rawDist : 0, price * 0.004), price * 0.03);
 }
 
 export class TradingPipeline {
@@ -125,6 +143,7 @@ export class TradingPipeline {
     entryReferencePrice: number;
     maxHoldMs?: number;
     stopLossPrice?: number;
+    stopDistance?: number;
     boardVotes: Record<string, string>;
     strategyCouncilVotes: unknown[];
     sevenCouncilVotes: unknown[];
@@ -322,9 +341,19 @@ export class TradingPipeline {
     }).catch(() => {});
   }
 
+  /** Strategy Hub numbers come from real closed trades only. */
+  private async refreshStrategyStats(): Promise<void> {
+    try {
+      this.strategyManager.refreshMetricsFromTrades(await this.db.getAllTrades());
+    } catch (err) {
+      console.warn('Could not refresh strategy stats from trades:', err);
+    }
+  }
+
   public async start() {
     if (this.isRunning) return;
     this.isRunning = true;
+    await this.refreshStrategyStats();
 
     console.log('🚀 Starting Basel AlgoCore Autonomous Trading System...');
 
@@ -629,6 +658,7 @@ export class TradingPipeline {
 
 
         this.recordTradeReturn(totalPnl);
+        await this.refreshStrategyStats();
         this.boardOfDirectors.learnFromOutcome(totalPnl, closedSymbol);
 
         await this.telegramService.sendMessage(`
@@ -787,11 +817,11 @@ export class TradingPipeline {
    * Places SL/TP for a filled entry and VERIFIES the stop. If the stop cannot be placed the position
    * is closed immediately and the KillSwitch is raised: a leveraged position must never stay naked.
    */
-  private async applyProtection(ord: any, pending: { side: 'BUY' | 'SELL'; ouSigma: number; ouMu: number; stopLossPrice?: number }): Promise<boolean> {
+  private async applyProtection(ord: any, pending: { side: 'BUY' | 'SELL'; ouSigma: number; ouMu: number; stopLossPrice?: number; stopDistance?: number }): Promise<boolean> {
     const fill = ord.avgFillPrice || ord.price;
     // Stop distance: 2 sigma, clamped to a sane band (0.4%..3% of price) so a degenerate sigma cannot produce a nonsense stop
-    const rawDist = 2 * Number(pending.ouSigma);
-    const dist = Math.min(Math.max(Number.isFinite(rawDist) ? rawDist : 0, fill * 0.004), fill * 0.03);
+    // Same distance that sized the position (falls back to the shared formula if absent, e.g. orphan adoption).
+    const dist = pending.stopDistance && pending.stopDistance > 0 ? pending.stopDistance : computeStopDistance(fill, pending.ouSigma);
     const sl = pending.side === 'BUY' ? fill - dist : fill + dist;
     pending.stopLossPrice = sl;
     // Target is a price from the strategy, not a duration. Reject invalid/sideways targets;
@@ -1027,7 +1057,12 @@ export class TradingPipeline {
     }
 
     const sig = decision.signal;
-    const signalType = sig.type as 'BUY' | 'SELL';
+    const normalizedSide = normalizeSignalSide(sig.type);
+    if (!normalizedSide) {
+      this.logEntryGate(symbol, 'signal-type', `unsupported type=${String(sig.type)}`);
+      return;
+    }
+    const signalType: 'BUY' | 'SELL' = normalizedSide;
     const strength = sig.strength;
     const strategyId = typeof sig.strategy === 'string' && sig.strategy.trim().length > 0
       ? sig.strategy.trim()
@@ -1038,9 +1073,9 @@ export class TradingPipeline {
     const strategyCouncil = decideByCouncil(councilVotes, { quorum: 2, minimumConfidence: 0.52 });
     this.eventJournal.record('INFO', 'STRATEGY', `[STRATEGY_COUNCIL] ${symbol} decision=${strategyCouncil?.side ?? 'ABSTAIN'} votes=${strategyCouncil?.votes ?? 0} executionEnabled=true`);
     if (!strategyCouncil || strategyCouncil.side !== signalType) {
-      this.logEntryGate(symbol, 'strategy-council', `signal=${signalType} consensus=${strategyCouncil?.side ?? 'ABSTAIN'} votes=${strategyCouncil?.votes ?? 0}`);
-      this.eventJournal.record('WARN', 'STRATEGY', `[STRATEGY_COUNCIL_REJECTED] ${symbol} signal=${signalType} consensus=${strategyCouncil?.side ?? 'ABSTAIN'}`);
-      return;
+      this.logEntryGate(symbol, 'strategy-council', `signal=${signalType} consensus=${strategyCouncil?.side ?? 'ABSTAIN'} votes=${strategyCouncil?.votes ?? 0} enforce=${councilEnforced()}`);
+      this.eventJournal.record('WARN', 'STRATEGY', `[STRATEGY_COUNCIL_${councilEnforced() ? 'REJECTED' : 'SHADOW_DISAGREES'}] ${symbol} signal=${signalType} consensus=${strategyCouncil?.side ?? 'ABSTAIN'}`);
+      if (councilEnforced()) return;
     }
 
     // 🏛️ Board of Directors v6.0 Evaluation (6 Decision Makers + 8 Anti-Overfitting Guards)
@@ -1069,8 +1104,8 @@ export class TradingPipeline {
     if (!sevenMemberDecision.executionEnabled || sevenMemberDecision.veto ||
         sevenMemberDecision.action !== signalType || sevenMemberDecision.confidence < 0.5) {
       this.logEntryGate(symbol, 'seven-member-council', `signal=${signalType} action=${sevenMemberDecision.action} confidence=${sevenMemberDecision.confidence} veto=${sevenMemberDecision.veto}`);
-      this.eventJournal.record('WARN', 'STRATEGY', `[SEVEN_MEMBER_COUNCIL_REJECTED] ${symbol} signal=${signalType} action=${sevenMemberDecision.action} confidence=${sevenMemberDecision.confidence} veto=${sevenMemberDecision.veto}`);
-      return;
+      this.eventJournal.record('WARN', 'STRATEGY', `[SEVEN_MEMBER_COUNCIL_${councilEnforced() ? 'REJECTED' : 'SHADOW_DISAGREES'}] ${symbol} signal=${signalType} action=${sevenMemberDecision.action} confidence=${sevenMemberDecision.confidence} veto=${sevenMemberDecision.veto}`);
+      if (councilEnforced()) return;
     }
     const councilComparison = this.boardOfDirectors.compareShadowDecision({
       symbol,
@@ -1125,9 +1160,13 @@ export class TradingPipeline {
       // 3. Portfolio Sizer calculation with 1% Risk-Based Sizing (البند 6 و 8)
       const balance = this.userDataStream.getBalance();
       const subEquity = this.userDataStream.getBalance().totalEquity;
+      const sizingStopDistance = computeStopDistance(features.currentPrice, features.ouSigma || (features.currentPrice * 0.005));
+      const sizingStopPrice = signalType === 'BUY'
+        ? features.currentPrice - sizingStopDistance
+        : features.currentPrice + sizingStopDistance;
       const positionSizing = this.portfolioSizer.calculatePositionSize(
         features.currentPrice,
-        sig.stopLoss,
+        sizingStopPrice,
         subEquity,
         0.01
       );
@@ -1140,13 +1179,13 @@ export class TradingPipeline {
         console.log(`⏸️ Trading halted for ${symbol} due to critical correlation risk`);
         return;
       }
-      qty = Number((qty * correlationFactor).toFixed(4));
+      qty = floorQty(qty * correlationFactor, 8);
 
       // Apply Dynamic Position Size Multiplier & Warm-up Multiplier (البند 43)
       const multipliers = this.dynamicRiskManager.getCurrentMultipliers();
       const warmupMul = this.dynamicRiskManager.getWarmupMultiplier(this.eventJournal.getEvents().length);
       const regimeMul = regime?.sizeMultiplier ?? 1;
-      qty = Number((qty * multipliers.positionSize * warmupMul * regimeMul).toFixed(4));
+      qty = floorQty(qty * multipliers.positionSize * warmupMul * regimeMul, 8);
       // CONDITIONAL board approval is a real risk decision, not telemetry.
       qty = applyBoardSizeMultiplier(qty, boardDecision.sizeMultiplier);
 
@@ -1159,7 +1198,7 @@ export class TradingPipeline {
         const bumpAllowed = process.env.ALLOW_MIN_NOTIONAL_BUMP === 'true';
         const bumpedNotional = minNotionalUsd * 1.1;
         if (bumpAllowed && riskSizedNotional > 0 && bumpedNotional <= riskSizedNotional * 3) {
-          qty = Number((bumpedNotional / features.currentPrice).toFixed(6));
+          qty = floorQty(bumpedNotional / features.currentPrice, 8);
         } else {
           console.log(`⏭️ Skipping ${symbol}: risk-sized notional $${riskSizedNotional.toFixed(2)} is below exchange minimum $${minNotionalUsd}`);
           return;
@@ -1220,6 +1259,7 @@ export class TradingPipeline {
           this.pendingProtection.set(ord.id, {
             ouSigma: features.ouSigma || (features.currentPrice * 0.005),
             ouMu: sig.takeProfit,
+            stopDistance: sizingStopDistance,
             maxHoldMs: sig.maxHoldMs,
             side: signalType,
             symbol,

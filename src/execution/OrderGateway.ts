@@ -11,6 +11,7 @@ import { binanceRateLimiter } from '../utils/RateLimiter';
 import { formatPriceToTick, formatQuantityToStep } from '../market-data/AssetScreener';
 import { EXECUTION } from '../config/execution';
 import crypto from 'crypto';
+import { clampLeverage } from '../config/hardCaps';
 
 export interface GatewayConfig {
   makerFeeBps: number;
@@ -269,7 +270,7 @@ export class OrderGateway {
     if (this.executionMode === 'PAPER' || !this.apiKey || !this.apiSecret) return true;
 
     const cleanSymbol = symbol.replace('/', '');
-    const roundedLev = Math.max(1, Math.min(50, Math.round(leverage)));
+    const roundedLev = clampLeverage(Math.round(leverage));
 
     if (this.currentLeverage.get(cleanSymbol) === roundedLev) return true;
 

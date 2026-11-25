@@ -9,6 +9,7 @@ import { AssetSymbol, BotStrategy, StrategyScreenerItem, TradingSignal } from '.
 import { CalculatedFeatures } from '../features/FeatureEngine';
 import { RegimeAnalysis } from '../risk/RegimeDetector';
 import { decide, StrategyParams } from './DecisionEngine';
+import { emptyStrategyMetrics, computeStrategyMetrics, ClosedTradeLike } from './strategyStats';
 import { MultiAgentQuantEngine, DEFAULT_MULTI_AGENT_CONFIG, MonteCarloSimulationResult, MultiAgentSignalResult } from './MultiAgentQuantStrategy';
 
 export const DEFAULT_BOT_STRATEGIES: BotStrategy[] = [
@@ -21,7 +22,7 @@ export const DEFAULT_BOT_STRATEGIES: BotStrategy[] = [
     category: 'MULTI_AGENT_ML',
     status: 'ACTIVE',
     allocationPct: 30,
-    allocatedCapital: 34446.12,
+    allocatedCapital: 0,
     targetSymbols: ['BTC/USDT', 'ETH/USDT', 'SOL/USDT', 'NEAR/USDT', 'SUI/USDT', 'AVAX/USDT'],
     timeframe: '1h / 4h',
     executionTag: 'MULTI_AGENT_ML_CORE',
@@ -35,21 +36,7 @@ export const DEFAULT_BOT_STRATEGIES: BotStrategy[] = [
       minMlConfidence: 0.52,
       mcIterations: 10000,
     },
-    metrics: {
-      winRatePct: 81.2,
-      totalTrades: 178,
-      winningTrades: 145,
-      losingTrades: 33,
-      realizedPnl: 8140.25,
-      unrealizedPnl: 620.50,
-      dailyPnl: 1450.80,
-      dailyPnlPct: 3.25,
-      profitFactor: 2.95,
-      sharpeRatio: 3.10,
-      maxDrawdownPct: 1.45,
-      avgHoldMinutes: 65,
-      lastSignalTime: Date.now() - 1000 * 60 * 2,
-    },
+    metrics: emptyStrategyMetrics(),
   },
   {
     id: 'ou-mean-reversion',
@@ -60,7 +47,7 @@ export const DEFAULT_BOT_STRATEGIES: BotStrategy[] = [
     category: 'STATISTICAL_ARBITRAGE',
     status: 'ACTIVE',
     allocationPct: 25,
-    allocatedCapital: 28705.11,
+    allocatedCapital: 0,
     targetSymbols: ['BTC/USDT', 'ETH/USDT', 'SOL/USDT', 'BNB/USDT', 'AVAX/USDT'],
     timeframe: '1m / 5m',
     executionTag: 'OU_ARB_CORE',
@@ -74,21 +61,7 @@ export const DEFAULT_BOT_STRATEGIES: BotStrategy[] = [
       stopLossSigma: 2.0,
       takeProfitRatio: 0.85,
     },
-    metrics: {
-      winRatePct: 78.4,
-      totalTrades: 142,
-      winningTrades: 111,
-      losingTrades: 31,
-      realizedPnl: 6420.50,
-      unrealizedPnl: 580.20,
-      dailyPnl: 1120.40,
-      dailyPnlPct: 2.86,
-      profitFactor: 2.45,
-      sharpeRatio: 2.82,
-      maxDrawdownPct: 2.14,
-      avgHoldMinutes: 24,
-      lastSignalTime: Date.now() - 1000 * 60 * 3,
-    },
+    metrics: emptyStrategyMetrics(),
   },
   {
     id: 'quantum-qubo-alpha',
@@ -99,7 +72,7 @@ export const DEFAULT_BOT_STRATEGIES: BotStrategy[] = [
     category: 'QUANTUM_ALPHA',
     status: 'ACTIVE',
     allocationPct: 20,
-    allocatedCapital: 22964.08,
+    allocatedCapital: 0,
     targetSymbols: ['BTC/USDT', 'ETH/USDT', 'SOL/USDT', 'XRP/USDT', 'ADA/USDT', 'LINK/USDT'],
     timeframe: '5m / 15m',
     executionTag: 'QUBO_QAOA_ALLOC',
@@ -111,21 +84,7 @@ export const DEFAULT_BOT_STRATEGIES: BotStrategy[] = [
       annealingSteps: 100,
       rebalanceThresholdPct: 4.5,
     },
-    metrics: {
-      winRatePct: 82.1,
-      totalTrades: 89,
-      winningTrades: 73,
-      losingTrades: 16,
-      realizedPnl: 4890.30,
-      unrealizedPnl: 420.80,
-      dailyPnl: 680.15,
-      dailyPnlPct: 2.42,
-      profitFactor: 3.10,
-      sharpeRatio: 3.15,
-      maxDrawdownPct: 1.65,
-      avgHoldMinutes: 95,
-      lastSignalTime: Date.now() - 1000 * 60 * 12,
-    },
+    metrics: emptyStrategyMetrics(),
   },
   {
     id: 'regime-volatility-breakout',
@@ -136,7 +95,7 @@ export const DEFAULT_BOT_STRATEGIES: BotStrategy[] = [
     category: 'MOMENTUM_BREAKOUT',
     status: 'ACTIVE',
     allocationPct: 15,
-    allocatedCapital: 17223.06,
+    allocatedCapital: 0,
     targetSymbols: ['SOL/USDT', 'DOGE/USDT', 'AVAX/USDT', 'NEAR/USDT'],
     timeframe: '1m / 15m',
     executionTag: 'REGIME_VOL_BREAK',
@@ -147,21 +106,7 @@ export const DEFAULT_BOT_STRATEGIES: BotStrategy[] = [
       trailStopPct: 1.2,
       minVolumeSurgePct: 45,
     },
-    metrics: {
-      winRatePct: 69.5,
-      totalTrades: 95,
-      winningTrades: 66,
-      losingTrades: 29,
-      realizedPnl: 3150.80,
-      unrealizedPnl: 290.40,
-      dailyPnl: 410.20,
-      dailyPnlPct: 2.44,
-      profitFactor: 2.05,
-      sharpeRatio: 2.18,
-      maxDrawdownPct: 2.85,
-      avgHoldMinutes: 45,
-      lastSignalTime: Date.now() - 1000 * 60 * 8,
-    },
+    metrics: emptyStrategyMetrics(),
   },
   {
     id: 'orderbook-imbalance-scalp',
@@ -172,7 +117,7 @@ export const DEFAULT_BOT_STRATEGIES: BotStrategy[] = [
     category: 'ORDERBOOK_MICROSTRUCTURE',
     status: 'ACTIVE',
     allocationPct: 10,
-    allocatedCapital: 11482.04,
+    allocatedCapital: 0,
     targetSymbols: ['BTC/USDT', 'ETH/USDT', 'SOL/USDT'],
     timeframe: 'Tick / 1m',
     executionTag: 'OFI_HFT_SCALP',
@@ -183,21 +128,7 @@ export const DEFAULT_BOT_STRATEGIES: BotStrategy[] = [
       minSpreadBps: 2.0,
       maxSlippageBps: 1.5,
     },
-    metrics: {
-      winRatePct: 86.4,
-      totalTrades: 310,
-      winningTrades: 268,
-      losingTrades: 42,
-      realizedPnl: 2840.10,
-      unrealizedPnl: 145.30,
-      dailyPnl: 340.60,
-      dailyPnlPct: 2.02,
-      profitFactor: 3.40,
-      sharpeRatio: 3.42,
-      maxDrawdownPct: 0.85,
-      avgHoldMinutes: 3,
-      lastSignalTime: Date.now() - 1000 * 60 * 1,
-    },
+    metrics: emptyStrategyMetrics(),
   },
 ];
 
@@ -304,7 +235,7 @@ export class StrategyManager {
       const activeSignal = multiAgentResult?.signal || ouSignal;
 
       // Calculate suitability score (0 - 100)
-      let suitabilityScore = 75;
+      let suitabilityScore = 50;
       if (multiAgentResult && multiAgentResult.mlConfidence > 55) {
         suitabilityScore += 18;
       }
@@ -329,9 +260,9 @@ export class StrategyManager {
       const lastCandle = candles[candles.length - 1];
       const change24h = firstCandle && lastCandle && firstCandle.open > 0
         ? Number((((lastCandle.close - firstCandle.open) / firstCandle.open) * 100).toFixed(2))
-        : (Math.sin(Date.now() / 100000 + symbol.length) * 2.5);
-      const volume24h = candles.reduce((acc, c) => acc + (c.volume || 0) * (c.close || currentPrice), 0) || 45000000;
-      const spreadBps = qualData?.spreadPercent ? Math.round(qualData.spreadPercent * 100) : 3.5;
+        : 0; // no candle data: show 0, never an invented number
+      const volume24h = candles.reduce((acc, c) => acc + (c.volume || 0) * (c.close || currentPrice), 0) || 0;
+      const spreadBps = qualData?.spreadPercent ? Math.round(qualData.spreadPercent * 100) : 0;
       const isQualified = qualData?.isQualified ?? (hurstExponent < 0.65 && spreadBps < 15);
 
       let reason = 'Multi-Agent Quant Alpha with 0.25 Kelly Dynamic Sizing';
@@ -353,7 +284,7 @@ export class StrategyManager {
         ouMu: Number(ouMu.toFixed(2)),
         ouSigma: Number(ouSigma.toFixed(2)),
         spreadBps,
-        liquidityScore: qualData?.liquidityScore || 95,
+        liquidityScore: qualData?.liquidityScore ?? 0,
         suitabilityScore,
         isQualified,
         reason,
@@ -370,21 +301,20 @@ export class StrategyManager {
     });
   }
 
-  public recordStrategyTrade(strategyId: string, pnl: number, isWin: boolean) {
-    const strat = this.strategies.get(strategyId);
-    if (!strat) return;
-
-    strat.metrics.totalTrades += 1;
-    if (isWin) {
-      strat.metrics.winningTrades += 1;
-    } else {
-      strat.metrics.losingTrades += 1;
+  /**
+   * Rebuild every strategy's performance numbers from real closed trades.
+   * Nothing is invented: a strategy with no closed trades shows zeros.
+   */
+  public refreshMetricsFromTrades(trades: ClosedTradeLike[]): void {
+    for (const strat of this.strategies.values()) {
+      const lastSignalTime = strat.metrics.lastSignalTime;
+      strat.metrics = computeStrategyMetrics(trades.filter((t) => t.strategy === strat.id || t.strategy === strat.executionTag || t.strategy === strat.name));
+      strat.metrics.lastSignalTime = lastSignalTime;
     }
+  }
 
-    strat.metrics.winRatePct = Number(
-      ((strat.metrics.winningTrades / strat.metrics.totalTrades) * 100).toFixed(1)
-    );
-    strat.metrics.realizedPnl = Number((strat.metrics.realizedPnl + pnl).toFixed(2));
-    strat.metrics.dailyPnl = Number((strat.metrics.dailyPnl + pnl).toFixed(2));
+  public markSignal(strategyId: string, at: number = Date.now()): void {
+    const strat = this.strategies.get(strategyId);
+    if (strat) strat.metrics.lastSignalTime = at;
   }
 }

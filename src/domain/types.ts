@@ -44,6 +44,13 @@ export interface Candle {
 
 export type SignalType = 'STRONG_BUY' | 'BUY' | 'NEUTRAL' | 'SELL' | 'STRONG_SELL';
 
+/** Collapse STRONG_* into an executable order side. Anything else is not tradable. */
+export function normalizeSignalSide(type: unknown): 'BUY' | 'SELL' | null {
+  if (type === 'BUY' || type === 'STRONG_BUY') return 'BUY';
+  if (type === 'SELL' || type === 'STRONG_SELL') return 'SELL';
+  return null;
+}
+
 export interface TradingSignal {
   id: string;
   symbol: AssetSymbol;
@@ -433,6 +440,23 @@ export function roundToStep(value: number, step: number): number {
   if (!step || step <= 0) return value;
   const precision = Math.max(0, Math.ceil(-Math.log10(step)));
   return Number((Math.floor(value / step) * step).toFixed(precision));
+}
+
+/**
+ * Round a strategy price (stop / target) keeping about 6 significant digits, so a cheap coin
+ * (e.g. 0.0821) is not flattened to 2 decimals. The exchange tick size is applied again at order time.
+ */
+export function roundPriceSig(price: number, sigDigits = 6): number {
+  if (!Number.isFinite(price) || price === 0) return price;
+  const decimals = Math.min(10, Math.max(2, sigDigits - 1 - Math.floor(Math.log10(Math.abs(price)))));
+  return Number(price.toFixed(decimals));
+}
+
+/** Round a quantity DOWN so risk-sized quantities are never rounded up above the risk budget. */
+export function floorQty(value: number, decimals = 8): number {
+  if (!Number.isFinite(value) || value <= 0) return 0;
+  const f = 10 ** decimals;
+  return Math.floor(value * f + 1e-9) / f;
 }
 
 export function isLiveTradingConfirmed(): boolean {

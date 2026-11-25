@@ -28,7 +28,7 @@ export const INITIAL_RUNTIME_CONFIG: RuntimeConfigState = {
   qaoaLayers: 3,
   riskAversionLambda: 0.5,
   budgetPenaltyGamma: 5.0,
-  maxLeverage: 20.0,
+  maxLeverage: 5.0,
   maxDrawdownCapPct: 6.0,
   enableKillSwitch: true,
 };

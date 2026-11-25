@@ -3,7 +3,7 @@
  * Ornstein-Uhlenbeck Mean Reversion & Statistical Arbitrage Strategy
  */
 
-import { AssetSymbol, OrderBook, SignalType, TradingSignal } from '../domain/types';
+import { AssetSymbol, OrderBook, SignalType, TradingSignal, roundPriceSig } from '../domain/types';
 import { CalculatedFeatures } from '../features/FeatureEngine';
 
 export interface StrategyConfig {
@@ -93,12 +93,12 @@ export class MeanReversionStrategy {
 
     // Stop loss at extreme Z-Score boundary
     const stopLoss = isBuy
-      ? Number((currentPrice - this.config.stopLossZScore * ouSigma).toFixed(2))
-      : Number((currentPrice + this.config.stopLossZScore * ouSigma).toFixed(2));
+      ? roundPriceSig(currentPrice - this.config.stopLossZScore * ouSigma)
+      : roundPriceSig(currentPrice + this.config.stopLossZScore * ouSigma);
 
     const takeProfit = isBuy
-      ? Number((currentPrice + distanceToMu * this.config.takeProfitRatio).toFixed(2))
-      : Number((currentPrice - distanceToMu * this.config.takeProfitRatio).toFixed(2));
+      ? roundPriceSig(currentPrice + distanceToMu * this.config.takeProfitRatio)
+      : roundPriceSig(currentPrice - distanceToMu * this.config.takeProfitRatio);
 
     return {
       id: `SIG-${this.signalCounter}-${symbol.replace('/', '')}-${Date.now().toString(36)}`,

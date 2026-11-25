@@ -3,6 +3,7 @@
  * Dynamic Portfolio Sizer, Tier Manager & Compounding Safety Engine
  */
 
+import { HARD_CAPS, clampLeverage } from '../config/hardCaps';
 import { AssetSymbol } from '../domain/types';
 import { AssetScreener } from '../market-data/AssetScreener';
 import { RiskEngine } from './RiskEngine';
@@ -267,7 +268,7 @@ export class PortfolioSizer {
   public calculateDynamicLeverage(signalStrength: number): number {
     const config = this.getConfig();
     const minLeverage = config.minLeverage || 10;
-    const maxLeverage = config.maxLeverage || 20;
+    const maxLeverage = config.maxLeverage || HARD_CAPS.maxLeverage;
 
     if (minLeverage >= maxLeverage) {
       return minLeverage;
@@ -337,7 +338,14 @@ export class PortfolioSizer {
   }
 
   public getConfig(): TierConfig {
-    return this.tierConfigs[this.currentTier];
+    const tier = this.tierConfigs[this.currentTier];
+    // Hard caps always win over the tier table.
+    return {
+      ...tier,
+      maxLeverage: Math.min(tier.maxLeverage || HARD_CAPS.maxLeverage, HARD_CAPS.maxLeverage),
+      minLeverage: Math.min(tier.minLeverage ?? 1, HARD_CAPS.maxLeverage),
+      maxTradePercentage: Math.min(tier.maxTradePercentage || HARD_CAPS.maxTradeNotionalPct, HARD_CAPS.maxTradeNotionalPct),
+    };
   }
 
   public canOpenNewTrade(currentOpenPositions: number, totalOpenNotional: number = 0, currentEquity: number = 0): { allowed: boolean; reason?: string } {
@@ -402,12 +410,12 @@ export class PortfolioSizer {
     }
 
     // المخاطرة المحددة (1% من إجمالي رأس المال)
-    const riskAmount = safeEquity * Math.min(0.02, Math.max(0.005, riskPct));
+    const riskAmount = safeEquity * Math.min(HARD_CAPS.maxRiskPerTradePct, Math.max(0.0025, riskPct));
     let rawQty = riskAmount / stopDistance;
     let notional = rawQty * entry;
 
     // سقف التعرض الأقصى لكل صفقة بناءً على فئة المحفظة
-    const maxExposurePct = config.maxTradePercentage || 0.50;
+    const maxExposurePct = Math.min(config.maxTradePercentage || HARD_CAPS.maxTradeNotionalPct, HARD_CAPS.maxTradeNotionalPct);
     const maxNotional = safeEquity * maxExposurePct;
     if (notional > maxNotional) {
       rawQty = maxNotional / entry;
@@ -417,7 +425,7 @@ export class PortfolioSizer {
     // لا نرفع الحجم للوصول إلى حد أدنى اسمي؛ ذلك يكسر ميزانية الخطر.
     // إذا كان الحجم أقل من حد Binance، يرفض OrderGateway الصفقة.
     const calculatedLev = Math.max(1, Math.ceil(notional / safeEquity));
-    const leverage = Math.min(config.maxLeverage || 20, calculatedLev);
+    const leverage = clampLeverage(Math.min(config.maxLeverage || HARD_CAPS.maxLeverage, calculatedLev));
 
     return {
       quantity: Number(rawQty.toFixed(4)),
