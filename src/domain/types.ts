@@ -44,6 +44,13 @@ export interface Candle {
 
 export type SignalType = 'STRONG_BUY' | 'BUY' | 'NEUTRAL' | 'SELL' | 'STRONG_SELL';
 
+/** Collapse STRONG_* into an executable order side. Anything else is not tradable. */
+export function normalizeSignalSide(type: unknown): 'BUY' | 'SELL' | null {
+  if (type === 'BUY' || type === 'STRONG_BUY') return 'BUY';
+  if (type === 'SELL' || type === 'STRONG_SELL') return 'SELL';
+  return null;
+}
+
 export interface TradingSignal {
   id: string;
   symbol: AssetSymbol;

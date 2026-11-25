@@ -56,7 +56,7 @@ import { failClosedOnInvalidEquity, recoverTransientReconciliationHalt, restoreP
 import { AssetScreener } from '../market-data/AssetScreener';
 import { StrategyManager } from '../strategies/StrategyManager';
 import { SystemWatchdog, WatchdogStatus } from '../monitoring/SystemWatchdog';
-import { BotStrategy, StrategyScreenerItem } from '../domain/types';
+import { BotStrategy, StrategyScreenerItem, normalizeSignalSide } from '../domain/types';
 import fs from 'fs';
 import {
   appendUniqueFill,
@@ -1048,7 +1048,12 @@ export class TradingPipeline {
     }
 
     const sig = decision.signal;
-    const signalType = sig.type as 'BUY' | 'SELL';
+    const normalizedSide = normalizeSignalSide(sig.type);
+    if (!normalizedSide) {
+      this.logEntryGate(symbol, 'signal-type', `unsupported type=${String(sig.type)}`);
+      return;
+    }
+    const signalType: 'BUY' | 'SELL' = normalizedSide;
     const strength = sig.strength;
     const strategyId = typeof sig.strategy === 'string' && sig.strategy.trim().length > 0
       ? sig.strategy.trim()
