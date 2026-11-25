@@ -75,6 +75,15 @@ export function applyBoardSizeMultiplier(quantity: number, multiplier: number): 
   return Number((quantity * Math.min(1, multiplier)).toFixed(4));
 }
 
+/**
+ * The ONE stop distance used both to size the position and to place the exchange stop.
+ * 2 sigma, clamped to 0.4%..3% of price so a degenerate sigma cannot produce a nonsense stop.
+ */
+export function computeStopDistance(price: number, ouSigma: number): number {
+  const rawDist = 2 * Number(ouSigma);
+  return Math.min(Math.max(Number.isFinite(rawDist) ? rawDist : 0, price * 0.004), price * 0.03);
+}
+
 export class TradingPipeline {
   private assetScreener: AssetScreener;
   private strategyManager: StrategyManager;
@@ -125,6 +134,7 @@ export class TradingPipeline {
     entryReferencePrice: number;
     maxHoldMs?: number;
     stopLossPrice?: number;
+    stopDistance?: number;
     boardVotes: Record<string, string>;
     strategyCouncilVotes: unknown[];
     sevenCouncilVotes: unknown[];
@@ -798,11 +808,11 @@ export class TradingPipeline {
    * Places SL/TP for a filled entry and VERIFIES the stop. If the stop cannot be placed the position
    * is closed immediately and the KillSwitch is raised: a leveraged position must never stay naked.
    */
-  private async applyProtection(ord: any, pending: { side: 'BUY' | 'SELL'; ouSigma: number; ouMu: number; stopLossPrice?: number }): Promise<boolean> {
+  private async applyProtection(ord: any, pending: { side: 'BUY' | 'SELL'; ouSigma: number; ouMu: number; stopLossPrice?: number; stopDistance?: number }): Promise<boolean> {
     const fill = ord.avgFillPrice || ord.price;
     // Stop distance: 2 sigma, clamped to a sane band (0.4%..3% of price) so a degenerate sigma cannot produce a nonsense stop
-    const rawDist = 2 * Number(pending.ouSigma);
-    const dist = Math.min(Math.max(Number.isFinite(rawDist) ? rawDist : 0, fill * 0.004), fill * 0.03);
+    // Same distance that sized the position (falls back to the shared formula if absent, e.g. orphan adoption).
+    const dist = pending.stopDistance && pending.stopDistance > 0 ? pending.stopDistance : computeStopDistance(fill, pending.ouSigma);
     const sl = pending.side === 'BUY' ? fill - dist : fill + dist;
     pending.stopLossPrice = sl;
     // Target is a price from the strategy, not a duration. Reject invalid/sideways targets;
@@ -1136,9 +1146,13 @@ export class TradingPipeline {
       // 3. Portfolio Sizer calculation with 1% Risk-Based Sizing (البند 6 و 8)
       const balance = this.userDataStream.getBalance();
       const subEquity = this.userDataStream.getBalance().totalEquity;
+      const sizingStopDistance = computeStopDistance(features.currentPrice, features.ouSigma || (features.currentPrice * 0.005));
+      const sizingStopPrice = signalType === 'BUY'
+        ? features.currentPrice - sizingStopDistance
+        : features.currentPrice + sizingStopDistance;
       const positionSizing = this.portfolioSizer.calculatePositionSize(
         features.currentPrice,
-        sig.stopLoss,
+        sizingStopPrice,
         subEquity,
         0.01
       );
@@ -1231,6 +1245,7 @@ export class TradingPipeline {
           this.pendingProtection.set(ord.id, {
             ouSigma: features.ouSigma || (features.currentPrice * 0.005),
             ouMu: sig.takeProfit,
+            stopDistance: sizingStopDistance,
             maxHoldMs: sig.maxHoldMs,
             side: signalType,
             symbol,
