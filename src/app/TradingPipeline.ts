@@ -322,9 +322,19 @@ export class TradingPipeline {
     }).catch(() => {});
   }
 
+  /** Strategy Hub numbers come from real closed trades only. */
+  private async refreshStrategyStats(): Promise<void> {
+    try {
+      this.strategyManager.refreshMetricsFromTrades(await this.db.getAllTrades());
+    } catch (err) {
+      console.warn('Could not refresh strategy stats from trades:', err);
+    }
+  }
+
   public async start() {
     if (this.isRunning) return;
     this.isRunning = true;
+    await this.refreshStrategyStats();
 
     console.log('🚀 Starting Basel AlgoCore Autonomous Trading System...');
 
@@ -629,6 +639,7 @@ export class TradingPipeline {
 
 
         this.recordTradeReturn(totalPnl);
+        await this.refreshStrategyStats();
         this.boardOfDirectors.learnFromOutcome(totalPnl, closedSymbol);
 
         await this.telegramService.sendMessage(`
